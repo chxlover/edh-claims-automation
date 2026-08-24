@@ -95,12 +95,15 @@ Safety / compatibility:
 
 Verification:
 
-- `git init` — OK; `git add -A` — 123 files staged.
+- `git init` — OK; `git add -A` — 123 files staged (121 pagkatapos i-exclude ang
+  `date_fill_hbsys/Path.txt` at `command.txt`).
 - Full staged-file review: WALANG nakitang patient data, `.db`, `.csv`,
   `.xlsx`, `.log`, `hbsys_bot.py`, certs, o temp images.
 - Ang natitirang "suspicious" matches ay false positives: `.gitkeep`
   placeholders at `patient_*.py` code modules.
-- Push sa GitHub (private) — dapat i-verify pagkatapos ng push.
+- Push sa GitHub (private `chxlover/edh-claims-automation`, branch `main`) —
+  VERIFIED: `git ls-remote origin` ay nagpapakita ng `acbff9b... refs/heads/main`
+  na tugma sa local HEAD.
 
 ### 2026-08-24 — PDF detection: Delivery Room Record as OPR
 
