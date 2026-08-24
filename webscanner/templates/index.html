@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#1a2b3c">
+<title>WebScanner</title>
+<style>
+  :root {
+    --bg: #121a22; --panel: #1e2a36; --accent: #38bdf8; --ok: #34d399;
+    --warn: #fbbf24; --danger: #f87171; --text: #e5eef7; --muted: #8ba1b3;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; min-height: 100dvh;
+  }
+  header {
+    background: var(--panel); padding: 10px 14px; display: flex;
+    align-items: center; gap: 10px; border-bottom: 1px solid #2c3b4a;
+    position: sticky; top: 0; z-index: 20;
+  }
+  header .logo { font-size: 20px; }
+  header h1 { font-size: 16px; margin: 0; flex: 1; letter-spacing: .3px; }
+  header .ip { font-size: 10px; color: var(--muted); }
+
+  main { flex: 1; display: flex; flex-direction: column; padding: 10px; gap: 10px; overflow-y: auto; }
+
+  .view {
+    background: var(--panel); border-radius: 14px; overflow: hidden;
+    border: 1px solid #2c3b4a; position: relative;
+  }
+  #stage { width: 100%; display: block; touch-action: none; background: #000; }
+  .hidden { display: none !important; }
+
+  /* camera chrome */
+  #camWrap { position: relative; }
+  #video { width: 100%; display: block; background: #000; min-height: 240px; }
+  .corner-mark { position: absolute; width: 26px; height: 26px; border: 3px solid var(--ok); pointer-events: none; }
+  .cm1 { top: 18px; left: 18px; border-right: none; border-bottom: none; border-radius: 8px 0 0 0; }
+  .cm2 { top: 18px; right: 18px; border-left: none; border-bottom: none; border-radius: 0 8px 0 0; }
+  .cm3 { bottom: 18px; right: 18px; border-left: none; border-top: none; border-radius: 0 0 8px 0; }
+  .cm4 { bottom: 18px; left: 18px; border-right: none; border-top: none; border-radius: 0 0 0 8px; }
+  .hint {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: 14px; background: rgba(0,0,0,.65); color: #fff;
+    padding: 6px 14px; border-radius: 20px; font-size: 12px; white-space: nowrap;
+  }
+
+  /* toolbar */
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    flex: 1; min-width: 74px; background: var(--panel); color: var(--text);
+    border: 1px solid #34475a; border-radius: 12px; padding: 12px 6px;
+    font-size: 13px; cursor: pointer; display: flex; flex-direction: column;
+    align-items: center; gap: 4px; transition: transform .05s;
+  }
+  button:active { transform: scale(.95); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06202e; font-weight: 700; }
+  button.ok { background: var(--ok); border-color: var(--ok); color: #06201a; font-weight: 700; }
+  button.danger { background: #4a2430; border-color: var(--danger); color: var(--danger); }
+  button.small { padding: 8px 6px; font-size: 12px; }
+  button:disabled { opacity: .4; }
+  .ico { font-size: 20px; line-height: 1; }
+
+  /* filters */
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    flex: 1; min-width: 70px; padding: 10px 6px; border-radius: 999px;
+    background: var(--panel); border: 1px solid #34475a; color: var(--text);
+    font-size: 12px; text-align: center; cursor: pointer;
+  }
+  .chip.active { background: var(--accent); border-color: var(--accent); color: #06202e; font-weight: 700; }
+
+  .row { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+  .row input[type=range] { flex: 1; accent-color: var(--accent); }
+  .row label { min-width: 96px; }
+
+  /* pages tray */
+  #pagesTray { display: flex; gap: 8px; overflow-x: auto; padding: 6px 2px; }
+  .page-thumb {
+    position: relative; flex: 0 0 74px; height: 96px; border-radius: 8px;
+    overflow: hidden; border: 2px solid #34475a; cursor: pointer; background: #000;
+  }
+  .page-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .page-thumb .num {
+    position: absolute; top: 2px; left: 4px; background: rgba(0,0,0,.7);
+    border-radius: 6px; padding: 1px 6px; font-size: 10px;
+  }
+  .page-thumb .del {
+    position: absolute; top: 2px; right: 2px; background: var(--danger);
+    border-radius: 50%; width: 18px; height: 18px; font-size: 12px;
+    line-height: 18px; text-align: center; color: #fff;
+  }
+  .page-thumb.selected { border-color: var(--accent); }
+
+  #toast {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 24px;
+    background: #06202e; color: #d7f2ff; padding: 10px 18px; border-radius: 24px;
+    border: 1px solid var(--accent); font-size: 13px; z-index: 100;
+    opacity: 0; pointer-events: none; transition: opacity .25s; max-width: 90vw;
+  }
+  #toast.show { opacity: 1; }
+
+  footer { padding: 8px; text-align: center; font-size: 11px; color: var(--muted); }
+  .spinner {
+    width: 18px; height: 18px; border: 3px solid #34475a; border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .7s linear infinite; display: inline-block;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">📷</span>
+  <h1>WebScanner</h1>
+  <span class="ip" id="urlHint"></span>
+</header>
+
+<main>
+  <!-- CAMERA / SHOOTER -->
+  <section id="camView" class="view">
+    <div id="camWrap">
+      <video id="video" autoplay playsinline muted></video>
+      <div class="corner-mark cm1"></div>
+      <div class="corner-mark cm2"></div>
+      <div class="corner-mark cm3"></div>
+      <div class="corner-mark cm4"></div>
+      <div id="camHint" class="hint">Ilagay ang dokumento sa loob ng frame</div>
+    </div>
+  </section>
+
+  <!-- SHOOTER TOOLBAR -->
+  <section id="shootBar" class="toolbar">
+    <button id="btnCapture" class="primary"><span class="ico">📸</span>Capture</button>
+    <button id="btnUpload"><span class="ico">🖼️</span>Upload</button>
+    <button id="btnFlip"><span class="ico">🔄</span>Flip cam</button>
+    <button id="btnUse"><span class="ico">✅</span>Gamitin</button>
+  </section>
+
+  <!-- EDIT VIEW -->
+  <section id="editView" class="view hidden">
+    <canvas id="stage"></canvas>
+  </section>
+
+  <section id="editBar" class="toolbar hidden">
+    <button id="btnAuto" class="primary"><span class="ico">🎯</span>Auto</button>
+    <button id="btnRotate"><span class="ico">↻</span>Rotate</button>
+    <button id="btnSaveJpg"><span class="ico">🖼️</span>Save JPG</button>
+    <button id="btnSavePng"><span class="ico">🖼️</span>Save PNG</button>
+    <button id="btnRetake"><span class="ico">📷</span>Retake</button>
+  </section>
+
+  <section id="filterBar" class="hidden">
+    <div class="chips">
+      <div class="chip active" data-filter="colored">🌈 Colored</div>
+      <div class="chip" data-filter="enhanced">✨ Enhanced</div>
+      <div class="chip" data-filter="greyscale">⚪ Greyscale</div>
+      <div class="chip" data-filter="bw">⬛ B&W</div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label>Brightness</label>
+      <input type="range" id="brightness" min="-100" max="100" value="0">
+    </div>
+    <div class="row">
+      <label>Contrast</label>
+      <input type="range" id="contrast" min="50" max="200" value="100">
+    </div>
+    <div class="toolbar" style="margin-top:8px">
+      <button id="btnAddPage" class="ok"><span class="ico">📑</span>Add sa PDF</button>
+      <button id="btnPdf"><span class="ico">📄</span>Export PDF</button>
+      <button id="btnClear"><span class="ico">🗑️</span>Clear pages</button>
+    </div>
+  </section>
+
+  <!-- PAGES TRAY -->
+  <section id="pagesSection" class="hidden">
+    <div class="row" style="justify-content:space-between">
+      <span>📚 Pages (<span id="pageCount">0</span>)</span>
+      <label style="min-width:auto; display:flex; align-items:center; gap:6px">
+        Size
+        <select id="pageSize" style="background:var(--panel); color:var(--text); border:1px solid #34475a; border-radius:8px; padding:6px;">
+          <option value="A4" selected>A4</option>
+          <option value="A5">A5</option>
+          <option value="Letter">Letter</option>
+          <option value="Legal">Legal</option>
+        </select>
+      </label>
+    </div>
+    <div id="pagesTray"></div>
+  </section>
+</main>
+
+<footer>WebScanner · EDH Claims · A4 default · HTTPS camera</footer>
+<div id="toast"></div>
+
+<input type="file" id="fileInput" accept="image/*" class="hidden">
+
+<script>
+"use strict";
+/* ============================================================ state */
+const S = {
+  camera: null, stream: null, facing: "environment",
+  editing: false, raw: null,        // original captured dataURL
+  srcW: 0, srcH: 0,
+  corners: null,                    // normalized 4 corners
+  rotate: 0,
+  filter: "colored",
+  pages: [],                        // processed dataURLs (PDF pages)
+  processing: false,
+};
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), stage = $("stage"), ctx = stage.getContext("2d");
+const PAD = 18; // corner handle radius in px
+
+/* ============================================================ toast */
+let toastTimer = null;
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+/* ============================================================ camera */
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    toast("Camera not available — use Upload instead");
+    return;
+  }
+  try {
+    if (S.stream) S.stream.getTracks().forEach(t => t.stop());
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: S.facing }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+    S.stream = stream;
+    video.srcObject = stream;
+    await video.play();
+    $("camHint").textContent = "Ilagay ang dokumento sa loob ng frame";
+  } catch (err) {
+    toast("Camera error: " + (err && err.message ? err.message : err));
+  }
+}
+
+function flipCamera() {
+  S.facing = S.facing === "environment" ? "user" : "environment";
+  startCamera();
+}
+
+/* ============================================================ capture */
+function captureFrame() {
+  if (!video.videoWidth) { toast("Camera not ready"); return; }
+  const c = document.createElement("canvas");
+  c.width = video.videoWidth;
+  c.height = video.videoHeight;
+  c.getContext("2d").drawImage(video, 0, 0);
+  S.raw = c.toDataURL("image/jpeg", 0.92);
+  S.srcW = c.width;
+  S.srcH = c.height;
+  beginEdit();
+}
+
+/* ============================================================ upload */
+function onFile(ev) {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      S.raw = rd.result;
+      S.srcW = img.naturalWidth;
+      S.srcH = img.naturalHeight;
+      beginEdit();
+    };
+    img.src = rd.result;
+  };
+  rd.readAsDataURL(f);
+  ev.target.value = "";
+}
+
+/* ============================================================ edit flow */
+async function beginEdit() {
+  S.editing = true;
+  S.rotate = 0;
+  S.filter = "colored";
+  $("brightness").value = 0;
+  $("contrast").value = 100;
+  setChip("colored");
+  S.corners = null;
+  $("camView").classList.add("hidden");
+  $("shootBar").classList.add("hidden");
+  $("editView").classList.remove("hidden");
+  $("editBar").classList.remove("hidden");
+  $("filterBar").classList.remove("hidden");
+  $("pagesSection").classList.remove("hidden");
+  try {
+    await autoDetect();
+  } catch (e) {
+    S.corners = [[0, 0], [1, 0], [1, 1], [0, 1]];
+    await processEdit();
+  }
+}
+
+async function api(url, payload) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (!data.ok) throw new Error(data.error || "Server error");
+  return data;
+}
+
+async function autoDetect() {
+  setBusy(true);
+  try {
+    const d = await api("/api/detect", { image: S.raw });
+    S.corners = d.corners;
+    await processEdit();
+  } catch (e) {
+    toast("Auto detect failed: " + e.message);
+    S.corners = [[0, 0], [1, 0], [1, 1], [0, 1]];
+    await processEdit();
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function processEdit() {
+  if (S.processing) return;
+  S.processing = true;
+  setBusy(true);
+  try {
+    const payload = {
+      image: S.raw,
+      corners: S.corners,
+      src_w: S.srcW, src_h: S.srcH,
+      rotate: S.rotate,
+      filter: S.filter,
+      brightness: parseInt($("brightness").value, 10),
+      contrast: parseInt($("contrast").value, 10) / 100,
+    };
+    const d = await api("/api/process", payload);
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = d.image; });
+    S.lastResult = d.image;
+    drawStage(img);
+  } catch (e) {
+    toast("Process failed: " + e.message);
+  } finally {
+    S.processing = false;
+    setBusy(false);
+  }
+}
+
+/* ============================================================ stage drawing + corners */
+function drawStage(img) {
+  const maxW = Math.min(img.width, window.innerWidth - 20);
+  const scale = maxW / img.width;
+  stage.width = img.width;
+  stage.height = img.height;
+  stage.style.width = maxW + "px";
+  ctx.drawImage(img, 0, 0);
+  drawCorners();
+}
+
+function toCanvasPoint(c) {
+  return [c[0] * stage.width, c[1] * stage.height];
+}
+function toNorm(x, y) {
+  return [x / stage.width, y / stage.height];
+}
+
+function drawCorners() {
+  if (!S.corners) return;
+  ctx.save();
+  S.corners.forEach((c, i) => {
+    const [x, y] = toCanvasPoint(c);
+    ctx.beginPath();
+    ctx.arc(x, y, PAD * 0.55, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(56,189,248,.35)";
+    ctx.fill();
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = "#0c4a6e";
+    ctx.font = "bold 13px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(i + 1), x, y);
+  });
+  ctx.restore();
+}
+
+/* corner drag interaction */
+let dragIdx = null;
+function hitTest(x, y) {
+  if (!S.corners) return null;
+  for (let i = 0; i < S.corners.length; i++) {
+    const [cx, cy] = toCanvasPoint(S.corners[i]);
+    if ((x - cx) ** 2 + (y - cy) ** 2 <= (PAD * 1.5) ** 2) return i;
+  }
+  return null;
+}
+function posFromEvent(ev) {
+  const rect = stage.getBoundingClientRect();
+  const cx = (ev.touches ? ev.touches[0].clientX : ev.clientX) - rect.left;
+  const cy = (ev.touches ? ev.touches[0].clientY : ev.clientY) - rect.top;
+  return [cx * (stage.width / rect.width), cy * (stage.height / rect.height)];
+}
+stage.addEventListener("pointerdown", (ev) => {
+  if (!S.editing) return;
+  const [x, y] = posFromEvent(ev);
+  const idx = hitTest(x, y);
+  if (idx !== null) {
+    dragIdx = idx;
+    stage.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  }
+});
+stage.addEventListener("pointermove", (ev) => {
+  if (dragIdx === null) return;
+  const [x, y] = posFromEvent(ev);
+  S.corners[dragIdx] = toNorm(x, y);
+  // redraw image layer only (last processed result)
+  redrawResult();
+});
+stage.addEventListener("pointerup", (ev) => {
+  if (dragIdx === null) return;
+  dragIdx = null;
+  processEdit(); // re-warp with new corners
+});
+
+function redrawResult() {
+  if (!S.lastResult) return;
+  const img = new Image();
+  img.onload = () => { ctx.drawImage(img, 0, 0); drawCorners(); };
+  img.src = S.lastResult;
+}
+
+/* ============================================================ filter chips */
+function setChip(name) {
+  S.filter = name;
+  document.querySelectorAll(".chip").forEach(ch =>
+    ch.classList.toggle("active", ch.dataset.filter === name));
+}
+
+/* ============================================================ pages / pdf */
+function addPage() {
+  if (!S.lastResult) { toast("Wala pang scan"); return; }
+  S.pages.push(S.lastResult);
+  renderPages();
+  toast("Na-add ang page (" + S.pages.length + ")");
+}
+function renderPages() {
+  const tray = $("pagesTray");
+  tray.innerHTML = "";
+  $("pageCount").textContent = S.pages.length;
+  S.pages.forEach((url, i) => {
+    const d = document.createElement("div");
+    d.className = "page-thumb";
+    d.innerHTML = `<img src="${url}"><span class="num">${i + 1}</span><span class="del">✕</span>`;
+    d.querySelector(".del").onclick = (ev) => {
+      ev.stopPropagation();
+      S.pages.splice(i, 1);
+      renderPages();
+    };
+    tray.appendChild(d);
+  });
+}
+
+async function exportPdf() {
+  if (!S.pages.length) { toast("Walang page — i-Add muna sa PDF"); return; }
+  setBusy(true);
+  try {
+    const r = await fetch("/api/export/pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pages: S.pages, page_size: $("pageSize").value }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.error || "PDF export failed");
+    }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "webscan.pdf";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast("PDF ready ✅");
+  } catch (e) {
+    toast("PDF failed: " + e.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+/* ============================================================ download helpers */
+function downloadDataUrl(dataUrl, name) {
+  const a = document.createElement("a");
+  a.href = dataUrl;
+  a.download = name;
+  a.click();
+}
+function saveJpg() { if (S.lastResult) downloadDataUrl(S.lastResult, "webscan.jpg"); }
+function savePng() {
+  if (!S.lastResult) return;
+  setBusy(true);
+  api("/api/process", {
+    image: S.raw,
+    corners: S.corners,
+    src_w: S.srcW, src_h: S.srcH,
+    rotate: S.rotate, filter: S.filter,
+    brightness: parseInt($("brightness").value, 10),
+    contrast: parseInt($("contrast").value, 10) / 100,
+    format: "png",
+  }).then(d => downloadDataUrl(d.image, "webscan.png"))
+    .catch(e => toast("PNG failed: " + e.message))
+    .finally(() => setBusy(false));
+}
+
+/* ============================================================ busy overlay */
+function setBusy(on) {
+  document.querySelectorAll("button").forEach(b => b.disabled = on);
+  if (on) {
+    const btn = $("btnCapture");
+    btn.innerHTML = '<span class="spinner"></span><span>...</span>';
+    btn.classList.add("primary");
+  } else {
+    $("btnCapture").innerHTML = '<span class="ico">📸</span>Capture';
+  }
+}
+
+/* ============================================================ reset */
+function retake() {
+  S.editing = false;
+  S.corners = null;
+  $("editView").classList.add("hidden");
+  $("editBar").classList.add("hidden");
+  $("filterBar").classList.add("hidden");
+  $("camView").classList.remove("hidden");
+  $("shootBar").classList.remove("hidden");
+}
+
+/* ============================================================ events */
+$("btnCapture").onclick = () => { captureFrame(); };
+$("btnUpload").onclick = () => $("fileInput").click();
+$("fileInput").addEventListener("change", onFile);
+$("btnFlip").onclick = flipCamera;
+$("btnUse").onclick = () => { if (video.videoWidth) captureFrame(); else toast("Camera not ready"); };
+$("btnAuto").onclick = autoDetect;
+$("btnRotate").onclick = () => {
+  S.rotate = (S.rotate + 90) % 360;
+  processEdit();
+};
+$("btnSaveJpg").onclick = saveJpg;
+$("btnSavePng").onclick = savePng;
+$("btnRetake").onclick = retake;
+$("btnAddPage").onclick = addPage;
+$("btnPdf").onclick = exportPdf;
+$("btnClear").onclick = () => { S.pages = []; renderPages(); };
+document.querySelectorAll(".chip").forEach(ch =>
+  ch.onclick = () => { setChip(ch.dataset.filter); processEdit(); });
+$("brightness").addEventListener("change", () => processEdit());
+$("contrast").addEventListener("change", () => processEdit());
+
+/* ============================================================ init */
+$("urlHint").textContent = location.host;
+startCamera();
+</script>
+</body>
+</html>

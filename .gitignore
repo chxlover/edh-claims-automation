@@ -1,0 +1,114 @@
+# ============================================================
+# EDH Claims Automation System - .gitignore
+# Patient data, runtime data, and secrets are NEVER pushed.
+# ============================================================
+
+# ---------- Patient data / work folders (contents excluded, structure kept) ----------
+# Pattern: ignore everything inside the folder, but keep .gitkeep
+scans/*
+!scans/.gitkeep
+
+output/*
+!output/.gitkeep
+
+backup_originals/*
+!backup_originals/.gitkeep
+
+claims_checker_results/*
+!claims_checker_results/.gitkeep
+
+claims_checker_results/INCOMPLETE/*
+!claims_checker_results/INCOMPLETE/.gitkeep
+
+claims_checker_results/READY/*
+!claims_checker_results/READY/.gitkeep
+
+claims_checker_results/READY_ARCHIVED/*
+!claims_checker_results/READY_ARCHIVED/.gitkeep
+
+claims_checker_results/READY_WITH_REVIEW/*
+!claims_checker_results/READY_WITH_REVIEW/.gitkeep
+
+# ---------- Other work folders (contents excluded) ----------
+review_staging/*
+!review_staging/.gitkeep
+
+resume_staging/*
+!resume_staging/.gitkeep
+
+merge_input/*
+!merge_input/.gitkeep
+
+merge_output/*
+!merge_output/.gitkeep
+
+pdfs/*
+!pdfs/.gitkeep
+
+test_runs/
+training_data/
+date_fill_queue/
+New folder/
+New folder (2)/
+
+# ---------- Signatures & local settings ----------
+signatures/
+claims_gui_config.json
+doctors_config.json
+signature_check_config.json
+update_config.json
+
+# ---------- Machine-specific notes (local paths) ----------
+date_fill_hbsys/Path.txt
+date_fill_hbsys/command.txt
+
+# ---------- Secrets ----------
+# hbsys_bot.py contains a hardcoded Telegram token + DB credentials
+hbsys_bot.py
+# WebScanner SSL private key / certificates
+webscanner/certs/
+# IDE / tool config (machine-specific paths & command history)
+.idea/
+.reasonix/
+reasonix.toml
+
+# ---------- Logs / reports / generated files ----------
+logs/
+reports/
+*.log
+claims_gui_log_*.txt
+claims_checker_report*.csv
+fees_checker_report*.csv
+fees_checker_report*.xlsx
+claims_checker_report*.xlsx
+*_temp.png
+*_preview_temp.png
+
+# ---------- Local databases (SQLite) ----------
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ---------- Runtime data (local JSON state) ----------
+review_queue.json
+unknown_review_log.json
+unknown_training_data.json
+
+# ---------- Sample files ----------
+csf001.pdf
+csf001000*.pdf
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ---------- OS ----------
+Thumbs.db
+Desktop.ini
+.DS_Store

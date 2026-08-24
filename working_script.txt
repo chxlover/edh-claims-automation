@@ -1,0 +1,6 @@
+edh_claims_gui_XML_COPY_BUTTON.py
+    "merge_pdf": "merge.py",
+    "convert_pdfa": "pdfa.py",
+    "claims_processor": "bbot_unknown_trainer_DEFERRED_OUTPUT_REVIEW_PATSUFFIX.py",
+    "unknown_review_manager": "unknown_review_manager_INTEGRATED_PDFA_THREAD.py",
+}

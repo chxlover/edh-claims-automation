@@ -1,0 +1,4035 @@
+import fitz
+import numpy as np
+import cv2
+import os
+import re
+import stat
+import subprocess
+import shutil
+import json
+import time
+import pytesseract
+from PIL import Image
+from pdf2image import convert_from_path
+from PyPDF2 import PdfMerger, PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from rapidfuzz import fuzz
+
+try:
+    import tkinter as tk
+    from tkinter import messagebox, simpledialog, ttk
+except Exception:
+    tk = None
+    messagebox = None
+    simpledialog = None
+    ttk = None
+
+try:
+    import pymysql
+except ImportError:
+    pymysql = None
+
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+POPPLER_PATH = r"C:\poppler\Library\bin"
+GHOSTSCRIPT_PATH = r"C:\Program Files\gs\gs10.07.0\bin\gswin64c.exe"
+
+SCAN_FOLDER = r"C:\claims_bot\scans"
+OUTPUT_FOLDER = r"C:\claims_bot\output"
+SIGNATURE_FOLDER = r"C:\claims_bot\signatures"
+BACKUP_FOLDER = r"C:\claims_bot\backup_originals"
+
+# ==================================================
+# DYNAMIC DOCTOR MANAGER CONFIG
+# ==================================================
+# GUI Doctor Manager saves here.
+# Bot will read this automatically.
+DOCTORS_CONFIG_PATH = r"C:\claims_bot\doctors_config.json"
+UNKNOWN_TRAINING_PATH = r"C:\claims_bot\unknown_training_data.json"
+CLAIMS_GUI_CONFIG_PATH = r"C:\claims_bot\claims_gui_config.json"
+
+# ==================================================
+# DATABASE CONFIG - READ ONLY MYSQL USER
+# ==================================================
+# IMPORTANT:
+# Gumamit ng MySQL user na SELECT lang ang permission.
+# Palitan ang DB_NAME / DB_USER / DB_PASSWORD ayon sa actual setup mo.
+DB_HOST = "192.168.1.2"
+DB_PORT = 3306
+DB_USER = "root"
+DB_PASSWORD = "root"
+DB_NAME = "hbsys_edh"
+
+MAX_SIZE_KB = 1000
+
+current_patient = None
+current_patient_base_name = None
+current_hospital_no = None
+DOCTOR_SETTINGS_LOADED_FROM_JSON_ONCE = False
+
+soa2_pages = {}
+mrf_pages = {}
+pbc_pages = {}
+cf2_pages = {}
+cf2_page_texts = {}
+
+DOC_KEYWORDS = {
+    "CSF": ["claim signature form", "csf"],
+    # CF2 must be page-specific. A generic "cf2" fallback is unsafe because
+    # "Use additional CF2 if necessary" appears on both pages.
+    "CF2": [],
+    "MRF": ["member registration"],
+    "OPR": ["operating room record"],
+    "ANR": [
+        "anesthesia record",
+        "anaesthesia record",
+        "anesthetic agent",
+        "anaesthetic agent",
+        "detailed technique",
+        "induction",
+        "maintenance",
+        "emergence",
+        "fluid summary",
+        "urine output in o.r",
+        "condition of patient on departure"
+    ],
+    "COE": [
+        "hci portal reference no",
+        "hci portal reference",
+        "philhealth benefit eligibility",
+        "philhealth benefit eligibility form",
+        "teamphilhealth"
+    ],
+}
+
+DTR_KEYWORDS = [
+    "x-ray", "xray", "ct scan", "ultrasound",
+    "hematology", "urinalysis", "diagnostic",
+    "examination", "mila amor", "electrocardiogram", "electro", "ecg", "normal sinus rhythm",
+    "laboratory result", "clinical chemistry",
+    "cross-matching", "parasitology",
+    "blood bank result", "laboratory department", "blood typing", "blood chemistry", "ultrasound", "serology", "radiographic report"
+]
+
+MULTI_PAGE = ["DTR"]
+
+DOCTOR_SETTINGS = {
+    "GARCIA_MICHELLE": {
+        "aliases": ["GARCIA, MICHELLE", "GARCIA MICHELLE", "MICHELLE GARCIA"],
+        "file": "garcia_michelle.png"
+    },
+    "GARCIA_JOSE_NARCISO": {
+        "aliases": ["GARCIA, JOSE NARCISO", "GARCIA JOSE NARCISO", "JOSE NARCISO GARCIA"],
+        "file": "garcia_jose_narciso.png",
+        "x": 240,
+        "y": 180,
+        "max_w": 120,
+        "max_h": 50
+    },
+    "AY_AYEN_OLIVIA": {
+        "aliases": [
+            "OLIVIA G AY-AYEN",
+            "OLIVIA G AY AYEN",
+            "OLIVIA AY-AYEN",
+            "OLIVIA AY AYEN",
+            "AY-AYEN OLIVIA",
+            "AY AYEN OLIVIA",
+            "AY-AYEN, OLIVIA",
+            "OLIVIA G AY-AYEN MD",
+            "OLIVIA G AY AYEN MD"
+        ],
+        "file": "ay_ayen_olivia.png",
+        "x": 270,
+        "y": 190,
+        "max_w": 95,
+        "max_h": 30
+    },
+    "ESPIRITU": {
+        "aliases": [
+            "MARIA CRISTINA DEL ROSARIO ESPIRITU",
+            "MARIA CRISTINA ESPIRITU",
+            "ESPIRITU MARIA CRISTINA",
+            "DR MARIA CRISTINA ESPIRITU"
+        ],
+        "file": "espiritu.png",
+        "max_w": 130,
+        "max_h": 35
+    },
+    "BALBOA": {
+        "aliases": ["BALBOA"],
+        "file": "balboa.png"
+    },
+    "GAFFUD_RHODA_JACQUELINE": {
+        "aliases": [
+            "RHODA JACQUELINE P GAFFUD",
+            "RHODA JACQUELINE GAFFUD",
+            "GAFFUD RHODA JACQUELINE",
+            "GAFFUD, RHODA JACQUELINE",
+            "RHODA GAFFUD"
+        ],
+        "file": "gaffud_rhoda_jacqueline.png"
+    },
+    "GAFFUD_YMMANDAH": {
+        "aliases": ["GAFFUD, YMMANDAH", "GAFFUD YMMANDAH", "YMMANDAH GAFFUD"],
+        "file": "gaffud_ymmandah.png"
+    },
+    "SUMAWANG_RIVERA": {
+        "aliases": ["SUMAWANG-RIVERA", "SUMAWANG RIVERA", "SUMAWANG", "RIVERA"],
+        "file": "sumawang_rivera.png"
+    },
+    "AYESHA_BEA_FEDERIZO": {
+        "aliases": ["FEDERIZO, AYESHA BEA", "AYESHA BEA", "FEDERIZO"],
+        "file": "ayesha_bea_federizo.png",
+        "x": 250,
+        "y": 155,
+        "max_w": 150,
+        "max_h": 65,
+
+        # Separate signature-check box for CSF Part IV.
+        # This avoids false SKIP from printed doctor name/date/underlines.
+        "check_x": 250,
+        "check_y": 155,
+        "check_max_w": 150,
+        "check_max_h": 65
+    },
+    "MARIA_ELAINE_TUPONG": {
+        "aliases": ["MARIA ELAINE, TUPONG", "MARIA ELAINE"],
+        "file": "maria_elaine_tupong.png",
+        "x": 310,
+        "y": 175,
+        "max_w": 95,
+        "max_h": 30,
+        
+        # CF2 PAGE 2 SIGNATURE CONFIG
+        "cf2_x": 120,
+        "cf2_y": 740,
+        "cf2_max_w": 120,
+        "cf2_max_h": 25
+       
+    }
+}
+
+
+# ==================================================
+# LOAD DOCTORS FROM GUI JSON
+# ==================================================
+def parse_aliases(value):
+    """
+    Accept aliases saved by GUI as:
+        "ESPIRITU | MARIA CRISTINA ESPIRITU"
+    or list:
+        ["ESPIRITU", "MARIA CRISTINA ESPIRITU"]
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+
+    value = str(value).strip()
+
+    if not value:
+        return []
+
+    parts = re.split(r"[|,;\n]+", value)
+
+    return [p.strip() for p in parts if p.strip()]
+
+
+
+GENERIC_DOCTOR_ALIASES = {
+    "MD", "M D", "DR", "DRA", "DOC", "DOCTOR",
+    "PHYSICIAN", "LICENSE", "LIC", "PRC"
+}
+
+
+def is_valid_doctor_alias(alias):
+    """
+    Prevent false doctor detection from generic aliases like:
+        MD, DR, DOCTOR
+
+    This was the cause of wrong signature:
+        ALLAN_P_TUPONG_MD matched alias "MD" with score 100
+        even though Part IV doctor was EMY-ANN SUMAWANG-RIVERA.
+    """
+    alias_clean = normalize_text(str(alias or ""))
+
+    if not alias_clean:
+        return False
+
+    if alias_clean in GENERIC_DOCTOR_ALIASES:
+        return False
+
+    # Very short aliases are dangerous for fuzzy matching.
+    if len(alias_clean) < 4:
+        return False
+
+    # Must contain at least 4 letters total.
+    letters = re.sub(r"[^A-Z]", "", alias_clean)
+    if len(letters) < 4:
+        return False
+
+    return True
+
+
+def safe_int(value, default=None):
+    try:
+        if value is None or str(value).strip() == "":
+            return default
+        return int(float(str(value).strip()))
+    except Exception:
+        return default
+
+
+def doctor_name_to_key(name):
+    name = str(name or "").upper()
+    name = re.sub(r"[^A-Z0-9]+", "_", name)
+    name = re.sub(r"_+", "_", name).strip("_")
+
+    if not name:
+        name = "DOCTOR"
+
+    return name
+
+
+def load_doctor_settings_from_json():
+    """
+    Load doctor settings from C:\\claims_bot\\doctors_config.json.
+
+    GUI fields supported:
+        name
+        aliases
+        signature_file
+        part_iv_x
+        part_iv_y
+        part_v_x
+        part_v_y
+        cf2_x
+        cf2_y
+        cf2_max_w
+        cf2_max_h
+        cf2_hci_x
+        cf2_hci_y
+        cf2_hci_max_w
+        cf2_hci_max_h
+        enabled
+    """
+    if not os.path.exists(DOCTORS_CONFIG_PATH):
+        print("[DOCTOR CONFIG] doctors_config.json not found. Using hardcoded DOCTOR_SETTINGS.")
+        return None
+
+    try:
+        with open(DOCTORS_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            print("[DOCTOR CONFIG] Invalid doctors_config.json format. Expected list.")
+            return None
+
+        loaded = {}
+
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+
+            if not item.get("enabled", True):
+                continue
+
+            name = str(item.get("name") or "").strip()
+            signature_file = str(item.get("signature_file") or item.get("file") or "").strip()
+
+            aliases = parse_aliases(item.get("aliases"))
+
+            if name and is_valid_doctor_alias(name):
+                aliases.append(name)
+
+            # Final safety filter. This prevents aliases like "MD" from matching everyone.
+            aliases = list(dict.fromkeys([a for a in aliases if is_valid_doctor_alias(a)]))
+
+            if not name and not aliases:
+                continue
+
+            if not signature_file:
+                print("[DOCTOR CONFIG] Skipped doctor without signature file:", name)
+                continue
+
+            key = item.get("key") or doctor_name_to_key(name or aliases[0])
+
+            part_iv_x = safe_int(item.get("part_iv_x"), safe_int(item.get("x"), 250))
+            part_iv_y = safe_int(item.get("part_iv_y"), safe_int(item.get("y"), 190))
+
+            max_w = safe_int(item.get("max_w"), 130)
+            max_h = safe_int(item.get("max_h"), 35)
+
+            cf2_x = safe_int(item.get("cf2_x"), None)
+            cf2_y = safe_int(item.get("cf2_y"), None)
+            cf2_max_w = safe_int(item.get("cf2_max_w"), None)
+            cf2_max_h = safe_int(item.get("cf2_max_h"), None)
+
+            loaded[key] = {
+                "aliases": aliases,
+                "file": signature_file,
+
+                # Part IV placement used by existing signing logic
+                "x": part_iv_x,
+                "y": part_iv_y,
+                "max_w": max_w,
+                "max_h": max_h,
+
+                # Part IV signature-check ROI
+                "check_x": safe_int(item.get("check_x"), part_iv_x),
+                "check_y": safe_int(item.get("check_y"), part_iv_y),
+                "check_max_w": safe_int(item.get("check_max_w"), max_w),
+                "check_max_h": safe_int(item.get("check_max_h"), max_h),
+
+                # Reserved for future Part V per-doctor config
+                "part_v_x": safe_int(item.get("part_v_x"), None),
+                "part_v_y": safe_int(item.get("part_v_y"), None),
+
+                # CF2 doctor/professional signature placement
+                "cf2_x": cf2_x,
+                "cf2_y": cf2_y,
+                "cf2_max_w": cf2_max_w,
+                "cf2_max_h": cf2_max_h,
+
+                # CF2 Authorized HCI Representative placement.
+                # Usually configured only on the Chief of Hospital/Rhoda row.
+                "cf2_hci_x": safe_int(item.get("cf2_hci_x"), None),
+                "cf2_hci_y": safe_int(item.get("cf2_hci_y"), None),
+                "cf2_hci_max_w": safe_int(item.get("cf2_hci_max_w"), None),
+                "cf2_hci_max_h": safe_int(item.get("cf2_hci_max_h"), None),
+            }
+
+        if not loaded:
+            print("[DOCTOR CONFIG] No enabled doctors loaded. Using hardcoded DOCTOR_SETTINGS.")
+            return None
+
+        print("[DOCTOR CONFIG] Loaded doctors from GUI JSON:", len(loaded))
+        print("[DOCTOR CONFIG] Doctors:", list(loaded.keys()))
+
+        return loaded
+
+    except Exception as e:
+        print("[DOCTOR CONFIG ERROR]", str(e))
+        print("[DOCTOR CONFIG] Using hardcoded DOCTOR_SETTINGS.")
+        return None
+
+
+def reload_dynamic_doctor_settings():
+    """
+    Load latest doctors_config.json into DOCTOR_SETTINGS.
+    """
+    global DOCTOR_SETTINGS
+
+    loaded = load_doctor_settings_from_json()
+
+    if loaded:
+        DOCTOR_SETTINGS = loaded
+
+    return DOCTOR_SETTINGS
+
+
+
+
+# ==================================================
+# GUI FEATURE TOGGLES
+# ==================================================
+def _bool_from_env_or_config(env_name, config_key, default=True):
+    """
+    Feature toggle source priority:
+    1. Environment variable from GUI subprocess
+    2. C:\claims_bot\claims_gui_config.json
+    3. default
+    """
+    val = os.environ.get(env_name)
+
+    if val is not None:
+        return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+    try:
+        if os.path.exists(CLAIMS_GUI_CONFIG_PATH):
+            with open(CLAIMS_GUI_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+
+            if config_key in cfg:
+                return bool(cfg.get(config_key))
+    except Exception as e:
+        print("[GUI CONFIG ERROR]", str(e))
+
+    return default
+
+
+def is_auto_sign_enabled():
+    return _bool_from_env_or_config("CLAIMS_ENABLE_AUTO_SIGN", "enable_auto_sign", True)
+
+
+def _bool_from_env_or_config_with_fallback(env_name, config_key, fallback_config_key, default=True):
+    val = os.environ.get(env_name)
+
+    if val is not None:
+        return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+    try:
+        if os.path.exists(CLAIMS_GUI_CONFIG_PATH):
+            with open(CLAIMS_GUI_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+
+            if config_key in cfg:
+                return bool(cfg.get(config_key))
+
+            if fallback_config_key in cfg:
+                return bool(cfg.get(fallback_config_key))
+    except Exception as e:
+        print("[GUI CONFIG ERROR]", str(e))
+
+    return default
+
+
+def is_auto_sign_csf_enabled():
+    return _bool_from_env_or_config_with_fallback(
+        "CLAIMS_ENABLE_AUTO_SIGN_CSF",
+        "enable_auto_sign_csf",
+        "enable_auto_sign",
+        True
+    )
+
+
+def is_auto_sign_cf2_enabled():
+    return _bool_from_env_or_config_with_fallback(
+        "CLAIMS_ENABLE_AUTO_SIGN_CF2",
+        "enable_auto_sign_cf2",
+        "enable_auto_sign",
+        True
+    )
+
+
+def is_date_signed_enabled():
+    return _bool_from_env_or_config("CLAIMS_ENABLE_DATE_SIGNED", "enable_date_signed", True)
+
+
+def is_backup_enabled():
+    return _bool_from_env_or_config("CLAIMS_ENABLE_BACKUP", "enable_backup", True)
+
+
+
+# ==================================================
+# UNKNOWN TRAINER
+# ==================================================
+VALID_UNKNOWN_TRAINER_TYPES = [
+    "CSF",
+    "SOA1",
+    "SOA2_page1",
+    "SOA2_page2",
+    "SOA2_page2_1",
+    "MRF_page2_1",
+    "DTR",
+    "COE",
+    "CF2_page1",
+    "CF2_page2",
+    "MRF_page1",
+    "MRF_page2",
+    "PBC_page1",
+    "PBC_page2",
+    "OPR",
+    "ANR",
+    "OTHER",
+    "UNKNOWN"
+]
+
+
+def load_unknown_training_data():
+    try:
+        if os.path.exists(UNKNOWN_TRAINING_PATH):
+            with open(UNKNOWN_TRAINING_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if isinstance(data, list):
+                return data
+    except Exception as e:
+        print("[UNKNOWN TRAINER] Load error:", str(e))
+
+    return []
+
+
+def save_unknown_training_record(record):
+    data = load_unknown_training_data()
+    data.append(record)
+
+    try:
+        with open(UNKNOWN_TRAINING_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        print("[UNKNOWN TRAINER] Saved training rule ->", UNKNOWN_TRAINING_PATH)
+    except Exception as e:
+        print("[UNKNOWN TRAINER] Save error:", str(e))
+
+
+def split_training_keywords(value):
+    if not value:
+        return []
+
+    if isinstance(value, list):
+        return [normalize_text(str(v)) for v in value if normalize_text(str(v))]
+
+    parts = re.split(r"[,\n;|]+", str(value))
+    return [normalize_text(p) for p in parts if normalize_text(p)]
+
+
+def detect_doc_from_unknown_training(pdf_path, text):
+    """
+    Check user-trained UNKNOWN rules before asking again.
+
+    Rule match:
+    - if any saved keyword/phrase appears in OCR text
+    - or if filename contains saved filename hint
+    """
+    data = load_unknown_training_data()
+
+    if not data:
+        return None
+
+    clean = normalize_text(text or "")
+    filename = os.path.basename(pdf_path or "").lower()
+
+    for rule in data:
+        if not isinstance(rule, dict):
+            continue
+
+        doc_type = rule.get("doc_type")
+
+        if not doc_type or doc_type == "UNKNOWN":
+            continue
+
+        keywords = split_training_keywords(rule.get("keywords", []))
+        filename_hint = str(rule.get("filename_contains") or "").strip().lower()
+
+        matched = False
+
+        for kw in keywords:
+            if kw and kw in clean:
+                matched = True
+                break
+
+        if filename_hint and filename_hint in filename:
+            matched = True
+
+        if matched:
+            print("[UNKNOWN TRAINER] Matched trained rule:", doc_type)
+            return doc_type
+
+    return None
+
+
+def ask_unknown_doc_type(pdf_path, text):
+    """
+    Manual review popup for UNKNOWN PDF.
+    User selects document type and optional keywords for future detection.
+    """
+    filename = os.path.basename(pdf_path)
+
+    preview = (text or "").strip()
+    preview = preview[:1800]
+
+    # Console fallback
+    if tk is None or ttk is None:
+        print("\n[UNKNOWN TRAINER] UNKNOWN PDF:", filename)
+        print("[UNKNOWN TRAINER] OCR preview:")
+        print(preview[:800])
+        print("[UNKNOWN TRAINER] Valid types:", ", ".join(VALID_UNKNOWN_TRAINER_TYPES))
+
+        choice = input("Enter document type or press ENTER to keep UNKNOWN: ").strip()
+
+        if not choice:
+            return "UNKNOWN"
+
+        choice_upper = choice.upper()
+
+        for item in VALID_UNKNOWN_TRAINER_TYPES:
+            if choice_upper == item.upper():
+                return item
+
+        print("[UNKNOWN TRAINER] Invalid type. Keeping UNKNOWN.")
+        return "UNKNOWN"
+
+    result = {
+        "doc_type": "UNKNOWN",
+        "keywords": ""
+    }
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+
+    win = tk.Toplevel(root)
+    win.title("UNKNOWN Trainer")
+    win.geometry("780x620")
+    win.attributes("-topmost", True)
+    win.grab_set()
+
+    frm = ttk.Frame(win, padding=12)
+    frm.pack(fill="both", expand=True)
+
+    ttk.Label(
+        frm,
+        text="UNKNOWN PDF detected",
+        font=("Segoe UI", 14, "bold")
+    ).pack(anchor="w")
+
+    ttk.Label(
+        frm,
+        text=f"File: {filename}",
+        font=("Segoe UI", 10)
+    ).pack(anchor="w", pady=(4, 10))
+
+    ttk.Label(frm, text="OCR Preview:").pack(anchor="w")
+
+    txt = tk.Text(frm, height=18, wrap="word", font=("Consolas", 9))
+    txt.pack(fill="both", expand=True, pady=(4, 10))
+    txt.insert("1.0", preview)
+    txt.config(state="disabled")
+
+    row = ttk.Frame(frm)
+    row.pack(fill="x", pady=(4, 6))
+
+    ttk.Label(row, text="Correct Document Type:", width=22).pack(side="left")
+
+    doc_var = tk.StringVar(value="DTR")
+    combo = ttk.Combobox(
+        row,
+        textvariable=doc_var,
+        values=VALID_UNKNOWN_TRAINER_TYPES,
+        state="readonly",
+        width=22
+    )
+    combo.pack(side="left")
+
+    ttk.Label(
+        frm,
+        text="Optional future keywords/phrases, separated by comma. Example: laboratory result, xray report, operating room record"
+    ).pack(anchor="w", pady=(8, 2))
+
+    keywords_var = tk.StringVar()
+    keywords_entry = ttk.Entry(frm, textvariable=keywords_var)
+    keywords_entry.pack(fill="x")
+
+    button_row = ttk.Frame(frm)
+    button_row.pack(fill="x", pady=(12, 0))
+
+    def save_and_use():
+        result["doc_type"] = doc_var.get().strip() or "UNKNOWN"
+        result["keywords"] = keywords_var.get().strip()
+        win.destroy()
+
+    def keep_unknown():
+        result["doc_type"] = "UNKNOWN"
+        result["keywords"] = ""
+        win.destroy()
+
+    ttk.Button(button_row, text="Use Selected Type", command=save_and_use).pack(side="left")
+    ttk.Button(button_row, text="Keep UNKNOWN", command=keep_unknown).pack(side="left", padx=(8, 0))
+
+    win.wait_window()
+
+    try:
+        root.destroy()
+    except Exception:
+        pass
+
+    doc_type = result["doc_type"]
+
+    if doc_type and doc_type != "UNKNOWN":
+        keywords = split_training_keywords(result.get("keywords"))
+
+        record = {
+            "doc_type": doc_type,
+            "keywords": keywords,
+            "filename_contains": "",
+            "sample_file": filename
+        }
+
+        save_unknown_training_record(record)
+
+    return doc_type or "UNKNOWN"
+
+
+def make_writable(path):
+    if os.path.exists(path):
+        os.chmod(path, stat.S_IWRITE)
+
+
+def safe_delete(path, retries=5, delay=0.5):
+    """
+    Safely delete a file even if it is read-only or temporarily locked.
+
+    Fixes:
+        PermissionError: [WinError 5] Access is denied
+
+    Common causes:
+        - PDF is read-only
+        - PDF is still open in viewer
+        - scanner/Windows is still holding the file briefly
+    """
+    if not path or not os.path.exists(path):
+        return True
+
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            make_writable(path)
+            os.remove(path)
+            return True
+
+        except PermissionError as e:
+            last_error = e
+            print(f"[SAFE DELETE] Permission denied attempt {attempt}/{retries}: {path}")
+            time.sleep(delay)
+
+        except Exception as e:
+            last_error = e
+            print(f"[SAFE DELETE] Delete failed attempt {attempt}/{retries}: {path} -> {e}")
+            time.sleep(delay)
+
+    print("[SAFE DELETE WARNING] Could not delete file. It may be open/locked:")
+    print("   ", path)
+    print("   ", last_error)
+    return False
+
+
+def file_size_kb(path):
+    return os.path.getsize(path) / 1024
+
+
+def safe_move(src, dst):
+    base, ext = os.path.splitext(dst)
+    counter = 1
+    new_dst = dst
+
+    while os.path.exists(new_dst):
+        new_dst = f"{base}_{counter}{ext}"
+        counter += 1
+
+    os.rename(src, new_dst)
+    return new_dst
+
+
+def sanitize_folder_component(value):
+    if value is None:
+        return ""
+
+    value = str(value).strip()
+    value = re.sub(r'[<>:"/\\|?*\r\n\t]+', "-", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    value = value.strip(" -")
+
+    return value
+
+
+def build_patient_folder_name(patient_name, hospital_no=None):
+    patient_name = sanitize_folder_component(patient_name)
+    hospital_no = sanitize_folder_component(hospital_no)
+
+    if hospital_no:
+        return f"{patient_name} - {hospital_no}"
+
+    return patient_name
+
+
+def normalize_text(text):
+    text = text.upper()
+    text = text.replace("Ñ", "N")
+    text = re.sub(r"[^A-Z0-9\- ]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def normalize_soa_label_line(line):
+    """
+    OCR cleanup para sa SOA labels.
+    Example:
+    S0A -> SOA
+    5OA -> SOA
+    S O A -> SOA
+    """
+    line = normalize_text(line)
+    line = line.replace("S0A", "SOA")
+    line = line.replace("5OA", "SOA")
+    line = re.sub(r"\bS\s+O\s+A\b", "SOA", line)
+    return line
+
+
+def has_strong_soa_identity(text):
+    """
+    Strong SOA markers only.
+    Ginagamit ito para hindi mapagkamalang SOA2 ang DTR/lab forms
+    na may 'reference range' or 'prepared by'.
+    """
+    text_lower = text.lower()
+    clean = normalize_text(text)
+
+    strong_exact = [
+        "please pay at the cashier",
+        "soa reference no",
+        "soa reference #",
+        "soa ref no",
+        "soa ref #",
+        "statement of account",
+        "patient's statement of account",
+        "summary of fees",
+        "summary of charges",
+        "itemized charges"
+    ]
+
+    if any(k in text_lower for k in strong_exact):
+        return True
+
+    strong_clean = [
+        "PLEASE PAY AT THE CASHIER",
+        "SOA REFERENCE NO",
+        "SOA REFERENCE",
+        "SOA REF NO",
+        "STATEMENT OF ACCOUNT",
+        "PATIENT S STATEMENT OF ACCOUNT",
+        "SUMMARY OF FEES",
+        "SUMMARY OF CHARGES",
+        "ITEMIZED CHARGES"
+    ]
+
+    if any(k in clean for k in strong_clean):
+        return True
+
+    return False
+
+
+def is_dtr_text(text):
+    """
+    DTR / diagnostic / lab guard.
+    Ito ang pumipigil na maging SOA2 ang laboratory, ECG, xray, etc.
+    """
+    text_lower = text.lower()
+    clean = normalize_text(text)
+
+    if any(k in text_lower for k in DTR_KEYWORDS):
+        return True
+
+    dtr_extra_clean = [
+        "REFERENCE RANGE",
+        "REF RANGE",
+        "HEMATOLOGY",
+        "URINALYSIS",
+        "CLINICAL CHEMISTRY",
+        "CREATININE",
+        "HEMOGLOBIN",
+        "PLATELET",
+        "WBC",
+        "RBC",
+        "BLOOD TYPE",
+        "CROSS MATCHING",
+        "ELECTROCARDIOGRAM",
+        "NORMAL SINUS RHYTHM",
+        "VENTRICULAR RATE",
+        "PR INTERVAL",
+        "QRS DURATION",
+        "QT QTC"
+    ]
+
+    if any(k in clean for k in dtr_extra_clean):
+        return True
+
+    return False
+
+
+def is_probably_dtr_not_soa(text):
+    """
+    True kapag mukhang DTR/lab/diagnostic siya at wala namang strong SOA marker.
+    """
+    return is_dtr_text(text) and not has_strong_soa_identity(text)
+
+
+
+def normalize_hospital_no(value):
+    """
+    Normalize Hospital No.
+
+    User may enter:
+        12345
+
+    Bot converts it to:
+        000000000012345
+
+    Final format: 15 digits.
+    """
+    if value is None:
+        return None
+
+    value = str(value)
+    value = re.sub(r"\D", "", value)
+
+    if not value:
+        return None
+
+    return value.zfill(15)
+
+def build_patient_name_from_db(row):
+    """
+    Folder format:
+        PATLAST, PATFIRST PATSUFFIX PATMIDDLE
+
+    Example:
+        BERMUDEZ, ELINO JR DELA CRUZ
+
+    Notes:
+        patsuffix is placed after patfirst because hospital naming preference is:
+        patlast, patfirst patsuffix patmiddle
+    """
+    patlast = str(row.get("patlast") or "").strip().upper()
+    patfirst = str(row.get("patfirst") or "").strip().upper()
+    patsuffix = str(row.get("patsuffix") or "").strip().upper()
+    patmiddle = str(row.get("patmiddle") or "").strip().upper()
+
+    name_parts = []
+
+    if patfirst:
+        name_parts.append(patfirst)
+
+    if patsuffix:
+        name_parts.append(patsuffix)
+
+    if patmiddle:
+        name_parts.append(patmiddle)
+
+    given_part = " ".join(name_parts).strip()
+
+    if patlast and given_part:
+        full_name = f"{patlast}, {given_part}"
+    elif patlast:
+        full_name = patlast
+    else:
+        full_name = given_part
+
+    full_name = re.sub(r"\s+", " ", full_name).strip(" ,")
+
+    return full_name
+
+def get_patient_from_db_by_hpercode(hpercode):
+    """
+    READ ONLY database lookup.
+    Source of truth for patient folder name.
+
+    Query:
+    SELECT patlast, patfirst, patsuffix, patmiddle, hpercode
+    FROM hperson
+    WHERE hpercode=%s
+    LIMIT 1
+    """
+    hpercode = normalize_hospital_no(hpercode)
+
+    if not hpercode:
+        print("[DB] Invalid Hospital No:", hpercode)
+        return None
+
+    if pymysql is None:
+        print("[DB ERROR] pymysql is not installed. Run: pip install pymysql")
+        return None
+
+    try:
+        conn = pymysql.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=5,
+            read_timeout=10,
+            write_timeout=10,
+            autocommit=True,
+            charset="utf8"
+        )
+
+        with conn.cursor() as cursor:
+            sql = """
+                SELECT
+                    patlast,
+                    patfirst,
+                    patsuffix,
+                    patmiddle,
+                    hpercode
+                FROM hperson
+                WHERE hpercode = %s
+                LIMIT 1
+            """
+
+            cursor.execute(sql, (hpercode,))
+            row = cursor.fetchone()
+
+        conn.close()
+
+        if not row:
+            print("[DB] No patient found for hpercode:", hpercode)
+            return None
+
+        row["hpercode"] = normalize_hospital_no(row.get("hpercode"))
+
+        print(
+            "[DB] Patient found:",
+            build_patient_name_from_db(row),
+            "-",
+            row["hpercode"]
+        )
+
+        return row
+
+    except Exception as e:
+        print("[DB ERROR]", str(e))
+        return None
+
+
+
+def confirm_patient_from_db_by_hpercode(initial_hospital_no):
+    """
+    Human confirmation layer.
+
+    Flow:
+    1. Use OCR Hospital No. from SOA1.
+    2. Query hperson using SELECT only.
+    3. Show popup with Hospital No. + patient name.
+    4. YES = accept and continue.
+    5. NO = ask user to enter correct Hospital No., then query again.
+    6. Cancel = stop processing safely.
+    """
+    hospital_no = normalize_hospital_no(initial_hospital_no)
+
+    # If Tkinter is not available, fallback to old behavior.
+    if tk is None or messagebox is None or simpledialog is None:
+        print("[CONFIRM] Tkinter not available. Using DB result without popup.")
+        return get_patient_from_db_by_hpercode(hospital_no)
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+
+    try:
+        while True:
+            if not hospital_no:
+                hospital_no = simpledialog.askstring(
+                    "Enter Hospital No.",
+                    "Hospital No. was not detected.\n\nEnter correct Hospital No:",
+                    parent=root
+                )
+                hospital_no = normalize_hospital_no(hospital_no)
+
+                if not hospital_no:
+                    print("[CONFIRM] Cancelled. No Hospital No. entered.")
+                    return None
+
+            row = get_patient_from_db_by_hpercode(hospital_no)
+
+            if not row:
+                retry = messagebox.askyesno(
+                    "Patient Not Found",
+                    f"No patient found for Hospital No.:\n\n{hospital_no}\n\nDo you want to enter the correct Hospital No.?",
+                    parent=root
+                )
+
+                if not retry:
+                    print("[CONFIRM] Cancelled. Patient not found.")
+                    return None
+
+                hospital_no = simpledialog.askstring(
+                    "Correct Hospital No.",
+                    "Enter correct Hospital No:",
+                    parent=root
+                )
+                hospital_no = normalize_hospital_no(hospital_no)
+                continue
+
+            patient_name = build_patient_name_from_db(row)
+            db_hpercode = normalize_hospital_no(row.get("hpercode"))
+
+            ok = messagebox.askyesno(
+                "Confirm Patient",
+                "Please confirm patient before processing.\n\n"
+                f"Hospital No.: {db_hpercode}\n\n"
+                f"Patient Name:\n{patient_name}\n\n"
+                "Is this the correct patient?",
+                parent=root
+            )
+
+            if ok:
+                print("[CONFIRM] Patient confirmed:", patient_name, "-", db_hpercode)
+                return row
+
+            hospital_no = simpledialog.askstring(
+                "Correct Hospital No.",
+                "Enter correct Hospital No:",
+                parent=root
+            )
+            hospital_no = normalize_hospital_no(hospital_no)
+
+            if not hospital_no:
+                print("[CONFIRM] Cancelled. No corrected Hospital No. entered.")
+                return None
+
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+
+def safe_copy(src, dst):
+    """
+    Copy file without overwriting existing backup files.
+    """
+    base, ext = os.path.splitext(dst)
+    counter = 1
+    new_dst = dst
+
+    while os.path.exists(new_dst):
+        new_dst = f"{base}_{counter}{ext}"
+        counter += 1
+
+    shutil.copy2(src, new_dst)
+    return new_dst
+
+
+def backup_original_scans(files):
+    if not is_backup_enabled():
+        print("[BACKUP] Disabled from GUI settings. Backup skipped.")
+        return
+
+    """
+    Copy untouched original scanned PDFs to:
+    C:\\claims_bot\\backup_originals\\PATIENT NAME - HOSPITAL NO\\
+
+    This runs AFTER patient confirmation and BEFORE processing/moving files.
+    """
+    if not current_patient:
+        print("[BACKUP] No confirmed patient. Backup skipped.")
+        return
+
+    backup_patient_folder = os.path.join(BACKUP_FOLDER, current_patient)
+    os.makedirs(backup_patient_folder, exist_ok=True)
+
+    print("\n[+] BACKUP: Copying original scanned PDFs before processing...\n")
+
+    count = 0
+
+    for file in files:
+        if not file.lower().endswith(".pdf"):
+            continue
+
+        src = os.path.join(SCAN_FOLDER, file)
+
+        if not os.path.exists(src):
+            continue
+
+        dst = os.path.join(backup_patient_folder, file)
+        copied = safe_copy(src, dst)
+        count += 1
+
+        print("[BACKUP] Original scan copied ->", copied)
+
+    print("[BACKUP] Completed. Total original PDFs backed up:", count)
+
+
+def set_patient_context_from_db_hospital_no(hospital_no):
+    """
+    Creates/updates current patient context using:
+    SOA1 OCR Hospital No -> DB hperson -> exact patient name.
+
+    Final folder format:
+    PATLAST, PATFIRST PATMIDDLE - HPERCODE
+    """
+    global current_patient, current_patient_base_name, current_hospital_no
+    global soa2_pages, mrf_pages, pbc_pages, cf2_pages, cf2_page_texts
+
+    hospital_no = normalize_hospital_no(hospital_no)
+
+    if not hospital_no:
+        return False
+
+    row = confirm_patient_from_db_by_hpercode(hospital_no)
+
+    if not row:
+        return False
+
+    db_patient_name = build_patient_name_from_db(row)
+    db_hpercode = normalize_hospital_no(row.get("hpercode"))
+
+    if not db_patient_name or not db_hpercode:
+        print("[DB] Incomplete patient data:", row)
+        return False
+
+    old_folder_name = current_patient
+
+    current_patient_base_name = db_patient_name
+    current_hospital_no = db_hpercode
+    current_patient = build_patient_folder_name(
+        current_patient_base_name,
+        current_hospital_no
+    )
+
+    # Reset temporary page trackers when new verified patient is set.
+    soa2_pages = {}
+    mrf_pages = {}
+    pbc_pages = {}
+    cf2_pages = {}
+    cf2_page_texts = {}
+
+    print("[+] VERIFIED PATIENT FROM DB:", current_patient)
+
+    # If an old temporary folder already exists, move contents to verified DB folder.
+    if old_folder_name and old_folder_name != current_patient:
+        old_folder = os.path.join(OUTPUT_FOLDER, old_folder_name)
+        new_folder = os.path.join(OUTPUT_FOLDER, current_patient)
+
+        if os.path.exists(old_folder):
+            if os.path.exists(new_folder):
+                move_folder_contents(old_folder, new_folder)
+            else:
+                os.rename(old_folder, new_folder)
+
+            print("[+] Folder renamed using DB patient name:")
+            print("    OLD:", old_folder_name)
+            print("    NEW:", current_patient)
+
+    return True
+
+
+def extract_hospital_no_from_soa1(text):
+    if not text:
+        return None
+
+    raw_text = text.upper()
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+    def clean_candidate(candidate):
+        if not candidate:
+            return None
+
+        candidate = candidate.upper()
+        candidate = candidate.replace("—", "-")
+        candidate = candidate.replace("_", "-")
+        candidate = re.sub(r"[^A-Z0-9\-\/]", "", candidate)
+        candidate = candidate.strip("-/ ")
+
+        if len(candidate) < 3:
+            return None
+
+        if len(candidate) > 40:
+            candidate = candidate[:40]
+
+        if not re.search(r"\d", candidate):
+            return None
+
+        blocked_words = {
+            "PATIENT",
+            "ACCOUNT",
+            "CASHIER",
+            "PHILHEALTH",
+            "STATEMENT",
+            "DATE",
+            "NAME",
+            "ROOM",
+            "WARD",
+            "HOSPITAL"
+        }
+
+        if candidate in blocked_words:
+            return None
+
+        return candidate
+
+    same_line_patterns = [
+        r"(?:HOSPITAL|HOSP\.?)\s*(?:NO|NUMBER|#)\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\/]{2,40})",
+        r"(?:HOSPITAL|HOSP\.?)\s*(?:NO|NUMBER|#)\.?\s+([A-Z0-9][A-Z0-9\-\/]{2,40})",
+    ]
+
+    for pattern in same_line_patterns:
+        match = re.search(pattern, raw_text)
+        if match:
+            hospital_no = clean_candidate(match.group(1))
+            if hospital_no:
+                print("[+] Hospital No. extracted from SOA1:", hospital_no)
+                return hospital_no
+
+    for i, line in enumerate(lines):
+        normalized_line = normalize_text(line)
+
+        has_hospital_label = (
+            "HOSPITAL NO" in normalized_line
+            or "HOSP NO" in normalized_line
+            or "HOSPITAL NUMBER" in normalized_line
+            or "HOSPITAL #" in normalized_line
+            or "HOSP #" in normalized_line
+        )
+
+        if not has_hospital_label:
+            continue
+
+        after_label = re.sub(
+            r".*(?:HOSPITAL|HOSP)\s*(?:NO|NUMBER|#)\.?\s*[:\-]?",
+            "",
+            line,
+            flags=re.IGNORECASE
+        ).strip()
+
+        hospital_no = clean_candidate(after_label)
+
+        if hospital_no:
+            print("[+] Hospital No. extracted from SOA1:", hospital_no)
+            return hospital_no
+
+        for next_line in lines[i + 1:i + 4]:
+            hospital_no = clean_candidate(next_line)
+            if hospital_no:
+                print("[+] Hospital No. extracted from SOA1:", hospital_no)
+                return hospital_no
+
+    print("[!] Hospital No. not found in SOA1")
+    return None
+
+
+def move_folder_contents(src_folder, dst_folder):
+    os.makedirs(dst_folder, exist_ok=True)
+
+    for item in os.listdir(src_folder):
+        src_path = os.path.join(src_folder, item)
+        dst_path = os.path.join(dst_folder, item)
+
+        if os.path.isdir(src_path):
+            if os.path.exists(dst_path):
+                move_folder_contents(src_path, dst_path)
+                try:
+                    os.rmdir(src_path)
+                except Exception:
+                    pass
+            else:
+                os.rename(src_path, dst_path)
+        else:
+            safe_move(src_path, dst_path)
+
+    try:
+        os.rmdir(src_folder)
+    except Exception:
+        pass
+
+
+def update_current_patient_folder_with_hospital_no(hospital_no):
+    """
+    OLD behavior: use OCR patient name + OCR hospital no.
+    NEW behavior: use SOA1 OCR hospital no only as key,
+    then query hperson table for exact patient name and hpercode.
+
+    This makes folder name more accurate:
+    PATLAST, PATFIRST PATMIDDLE - HPERCODE
+    """
+    hospital_no = normalize_hospital_no(hospital_no)
+
+    if not hospital_no:
+        print("[!] Empty Hospital No, cannot update folder")
+        return
+
+    ok = set_patient_context_from_db_hospital_no(hospital_no)
+
+    if not ok:
+        print("[!] DB verification failed. Folder not renamed from OCR Hospital No.")
+
+def ocr_pdf(pdf_path):
+    images = convert_from_path(
+        pdf_path,
+        first_page=1,
+        last_page=1,
+        poppler_path=POPPLER_PATH
+    )
+    return pytesseract.image_to_string(images[0]).lower()
+
+
+def convert_to_pdfa_target_size(pdf_path):
+    if not os.path.exists(GHOSTSCRIPT_PATH):
+        print("[!] Ghostscript not found:", GHOSTSCRIPT_PATH)
+        return
+
+    make_writable(pdf_path)
+    resolutions = [300, 250, 220, 200, 180, 150, 120]
+
+    for res in resolutions:
+        temp_pdf = pdf_path.replace(".pdf", f"_tmp_{res}.pdf")
+
+        cmd = [
+            GHOSTSCRIPT_PATH,
+            "-dPDFA",
+            "-dBATCH",
+            "-dNOPAUSE",
+            "-sDEVICE=pdfwrite",
+            "-dPreserveAnnots=true",
+            "-dPrinted=true",
+            "-dPDFACompatibilityPolicy=1",
+            "-dDownsampleColorImages=true",
+            f"-dColorImageResolution={res}",
+            "-dDownsampleGrayImages=true",
+            f"-dGrayImageResolution={res}",
+            "-dDownsampleMonoImages=true",
+            f"-dMonoImageResolution={res}",
+            "-dAutoRotatePages=/None",
+            f"-sOutputFile={temp_pdf}",
+            pdf_path
+        ]
+
+        subprocess.run(cmd, check=True)
+        size = file_size_kb(temp_pdf)
+
+        print(f"[TEST] {os.path.basename(pdf_path)} {res} DPI -> {size:.0f} KB")
+
+        if size <= MAX_SIZE_KB:
+            os.remove(pdf_path)
+            os.rename(temp_pdf, pdf_path)
+            os.chmod(pdf_path, stat.S_IREAD)
+            print(f"[+] PDF/A + Read-only FINAL: {os.path.basename(pdf_path)} -> {size:.0f} KB")
+            return
+
+        os.remove(temp_pdf)
+
+    print("[!] Hindi umabot sa target size pero converted best effort.")
+
+
+def finalize_all_pdfs():
+    print("\n[+] Converting ALL final PDFs to PDF/A + Read-only target 1000KB...\n")
+
+    for root, dirs, files in os.walk(OUTPUT_FOLDER):
+        for file in files:
+            if not file.lower().endswith(".pdf"):
+                continue
+
+            if "_overlay" in file or "_signed" in file or ".tmp" in file or "_tmp_" in file:
+                continue
+
+            pdf_path = os.path.join(root, file)
+            convert_to_pdfa_target_size(pdf_path)
+
+
+def extract_patient_name(text):
+    text = text.upper()
+    lines = text.split("\n")
+
+    stop_words = {
+        "LAST", "NAME", "FIRST", "MIDDLE", "EXTENSION",
+        "JR", "SR", "III", "IV",
+        "CHILD", "PARENT", "SPOUSE",
+        "RELATIONSHIP", "MEMBER", "DATE", "BIRTH",
+        "MONTH", "DAY", "YEAR", "PATIENT"
+    }
+
+    for i, line in enumerate(lines):
+        if "NAME OF PATIENT" in line or "5. NAME OF PATIENT" in line:
+            block = " ".join(lines[i + 1:i + 9])
+            block = re.sub(r"[^A-Z\s]", " ", block)
+            block = re.sub(r"\s+", " ", block).strip()
+
+            words = [w for w in block.split() if w not in stop_words and len(w) > 1]
+
+            clean = []
+            for w in words:
+                if w in {"TUA", "PARENT", "SPOUSE", "CHILD", "SIGNATURE", "DATE"}:
+                    break
+                clean.append(w)
+
+            if len(clean) >= 3:
+                return f"{clean[0]}, {clean[1]} {clean[2]}".title()
+
+            if len(clean) >= 2:
+                return f"{clean[0]}, {clean[1]}".title()
+
+    return None
+
+
+def extract_part_iv_text(text):
+    clean = text.upper()
+
+    start_markers = [
+        "PART IV",
+        "PART  IV",
+        "PARTIV",
+        "PART |V",
+        "PART !V",
+        "HEALTH CARE PROFESSIONAL INFORMATION",
+        "CERTIFICATION OF HEALTH CARE PROFESSIONAL",
+        "ACCREDITATION NO"
+    ]
+
+    end_markers = [
+        "PART V",
+        "PART  V",
+        "PARTV",
+        "PROVIDER INFORMATION AND CERTIFICATION"
+    ]
+
+    start = -1
+
+    for marker in start_markers:
+        pos = clean.find(marker)
+        if pos != -1:
+            start = pos
+            break
+
+    if start != -1:
+        end = len(clean)
+
+        for marker in end_markers:
+            pos = clean.find(marker, start + 20)
+            if pos != -1:
+                end = pos
+                break
+
+        part_text = clean[start:end]
+    else:
+        part_text = ""
+
+    if len(part_text.strip()) < 150:
+        lines = clean.split("\n")
+        part_text = "\n".join(lines[-60:])
+
+    print("\n[DEBUG PART IV TEXT]")
+    print(part_text[:1000])
+    print("[END DEBUG PART IV TEXT]\n")
+
+    return part_text
+
+
+def has_fuzzy_keyword(text, phrases, threshold=82):
+    clean = normalize_text(text)
+
+    for phrase in phrases:
+        phrase_clean = normalize_text(phrase)
+        score = fuzz.partial_ratio(phrase_clean, clean)
+
+        if score >= threshold:
+            print("[FUZZ DOC]", phrase, "score =", score)
+            return True
+
+    return False
+
+
+def line_fuzzy_match(text, phrases, threshold=72):
+    lines = [normalize_text(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+
+    for line in lines:
+        for phrase in phrases:
+            phrase_clean = normalize_text(phrase)
+            score = fuzz.partial_ratio(phrase_clean, line)
+
+            if score >= threshold:
+                print("[FUZZ LINE]", phrase, "score =", score, "line =", line[:100])
+                return True
+
+    return False
+
+
+def is_soa1_text(text):
+    text_lower = text.lower()
+
+    if "please pay at the cashier" in text_lower:
+        return True
+
+    return line_fuzzy_match(
+        text,
+        ["PLEASE PAY AT THE CASHIER"],
+        threshold=82
+    )
+
+
+def is_soa2_page1_text(text):
+    """
+    SOA2 page 1 strict rule.
+
+    IMPORTANT FIX:
+    Hindi na siya basta nag-fuzzy sa 'SOA REFERENCE',
+    kasi ang DTR/lab forms may 'REFERENCE RANGE' at nagiging false SOA2_page1.
+
+    New rule:
+    - Same line dapat may SOA
+    - Same line dapat may REF / REFERENCE / NO
+    - Skip kung REFERENCE RANGE / REF RANGE
+    """
+    text_lower = text.lower()
+
+    exact_markers = [
+        "soa reference no",
+        "soa reference #",
+        "soa ref no",
+        "soa ref #"
+    ]
+
+    if any(k in text_lower for k in exact_markers):
+        return True
+
+    lines = [normalize_soa_label_line(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+
+    for line in lines:
+
+        if "REFERENCE RANGE" in line or "REF RANGE" in line:
+            continue
+
+        has_soa = "SOA" in line
+        has_ref = (
+            "REFERENCE" in line
+            or "REF" in line
+        )
+        has_no = (
+            " NO" in line
+            or "NO " in line
+            or line.endswith("NO")
+            or "#" in line
+        )
+
+        if has_soa and has_ref and has_no:
+            print("[SOA2 PAGE1 STRICT LINE]", line[:120])
+            return True
+
+        if has_soa and has_ref:
+            score1 = fuzz.partial_ratio("SOA REFERENCE NO", line)
+            score2 = fuzz.partial_ratio("SOA REF NO", line)
+            best_score = max(score1, score2)
+
+            if best_score >= 82:
+                print("[SOA2 PAGE1 FUZZ SAFE] score =", best_score, "line =", line[:120])
+                return True
+
+    return False
+
+def is_coe_text(text):
+    """
+    COE / PhilHealth Benefit Eligibility guard.
+
+    COE can contain labels that look like SOA2 page 2, so this must run before
+    SOA2 detection and image fallback.
+    """
+    text_lower = str(text or "").lower()
+    clean = normalize_text(text or "")
+
+    if (
+        "hci portal reference no" in text_lower
+        or "hci portal reference" in text_lower
+        or "philhealth benefit eligibility" in text_lower
+        or "philhealth benefit eligibility form" in text_lower
+        or "teamphilhealth" in text_lower
+        or "team philhealth" in text_lower
+    ):
+        return True
+
+    benefit_identity = (
+        "BENEFIT" in clean
+        and (
+            "ELIGIBILITY" in clean
+            or fuzz.partial_ratio("ELIGIBILITY", clean) >= 84
+        )
+    )
+
+    portal_identity = (
+        "HCI" in clean
+        and "PORTAL" in clean
+        and (
+            "REFERENCE" in clean
+            or fuzz.partial_ratio("REFERENCE", clean) >= 84
+        )
+    )
+
+    team_identity = (
+        "TEAM" in clean
+        and "PHILHEALTH" in clean
+    )
+
+    if benefit_identity or portal_identity or team_identity:
+        print("[COE IDENTITY]", clean[:120])
+        return True
+
+    return False
+
+
+def is_soa2_page2_text(text):
+    """
+    SOA2 page 2 rule.
+
+    IMPORTANT FIX:
+    Kapag mukhang DTR/lab/diagnostic siya at walang strong SOA marker,
+    huwag siyang gawing SOA2_page2 kahit may 'prepared by'.
+    """
+    if detect_anr_type(text):
+        print("[ANR GUARD] Blocked false SOA2_page2 detection")
+        return False
+
+    if is_probably_dtr_not_soa(text):
+        print("[DTR GUARD] Blocked false SOA2_page2 detection")
+        return False
+
+    if is_coe_text(text):
+        print("[COE GUARD] Blocked false SOA2_page2 detection")
+        return False
+
+    text_lower = text.lower()
+
+    if (
+        "prepared by" in text_lower
+        or "prepared by:" in text_lower
+        or "conforme" in text_lower
+        or "conforme:" in text_lower
+    ):
+        return True
+
+    secondary_exact = [
+        "relationship of representative",
+        "patient / representative",
+        "patient/representative",
+        "signature over printed name",
+        "administrative officer"
+    ]
+
+    if any(k in text_lower for k in secondary_exact):
+        return True
+
+    fuzzy_main_markers = [
+        "PREPARED BY",
+        "CONFORME"
+    ]
+
+    if line_fuzzy_match(text, fuzzy_main_markers, threshold=68):
+        return True
+
+    fuzzy_secondary_markers = [
+        "RELATIONSHIP OF REPRESENTATIVE",
+        "PATIENT REPRESENTATIVE",
+        "SIGNATURE OVER PRINTED NAME",
+        "ADMINISTRATIVE OFFICER"
+    ]
+
+    if line_fuzzy_match(text, fuzzy_secondary_markers, threshold=76):
+        return True
+
+    return False
+
+
+
+def detect_mrf_type(text):
+    """
+    Detect MRF page 1 and page 2 before CSF/SOA logic.
+
+    FINAL RULE:
+    MRF_page1 keywords:
+      - PhilHealth Member Registration Form
+      - UHC, but only with page 1 context
+      - PHILSYS
+
+    MRF_page2 keywords:
+      - For PhilHealth Use Only
+      - amendment / updating-amendment, but not amendment alone
+        unless there are other page 2 indicators.
+
+    IMPORTANT:
+    PMRF was removed because it can also appear on MRF_page2.
+    """
+    text_lower = text.lower()
+    clean = normalize_text(text)
+
+    # CF2 page 1 can contain generic PhilHealth/MRF-looking labels.
+    # If CF2 identity is present, let detect_cf2_type handle it later.
+    if (
+        "claim form 2" in text_lower
+        or "cf2" in text_lower
+        or (
+            "type of accommodation" in text_lower
+            and "z-benefit package code" in text_lower
+        )
+    ):
+        print("[CF2 GUARD] Blocked false MRF detection")
+        return ""
+
+    # -------------------------
+    # MRF PAGE 1 - strong markers first
+    # -------------------------
+    page1_strong_exact = [
+        "philhealth member registration form",
+        "member registration form",
+        "philsys id number",
+        "philsys"
+    ]
+
+    if any(k in text_lower for k in page1_strong_exact):
+        return "MRF_page1"
+
+    page1_strong_fuzzy = [
+        "PHILHEALTH MEMBER REGISTRATION FORM",
+        "MEMBER REGISTRATION FORM",
+        "PHILSYS ID NUMBER",
+        "PHILSYS"
+    ]
+
+    for phrase in page1_strong_fuzzy:
+        score = fuzz.partial_ratio(phrase, clean)
+        if score >= 84:
+            print("[MRF PAGE1 FUZZ]", phrase, "score =", score)
+            return "MRF_page1"
+
+    # UHC is allowed as page1 keyword, pero huwag standalone lang.
+    # Page2 can also contain PhilHealth/header text, kaya kailangan may page1 context.
+    has_uhc = (
+        "uhc" in text_lower
+        or "UHC" in clean
+        or fuzz.partial_ratio("UHC", clean) >= 95
+    )
+
+    page1_context = [
+        "personal details",
+        "philhealth identification number",
+        "pin is your unique",
+        "purpose:",
+        "registration",
+        "preferred konsulta provider",
+        "maiden name"
+    ]
+
+    if has_uhc and any(k in text_lower for k in page1_context):
+        return "MRF_page1"
+
+    # -------------------------
+    # MRF PAGE 2
+    # -------------------------
+    # Strong page2 marker: automatic page2.
+    if (
+        "for philhealth use only" in text_lower
+        or "for philhealth use" in text_lower
+        or fuzz.partial_ratio("FOR PHILHEALTH USE ONLY", clean) >= 82
+    ):
+        return "MRF_page2"
+
+    # Amendment alone is weak because MRF_page1 may also contain registration/updating/amendment.
+    # Require at least 2 page2 indicators OR very strong specific text.
+    page2_indicators = [
+        "updating/amendment",
+        "updating amendment",
+        "v. updating/amendment",
+        "v updating amendment",
+        "change/correction of name",
+        "correction of date of birth",
+        "correction of sex",
+        "change of civil status",
+        "updating of personal information",
+        "under penalty of law",
+        "documents i have attached",
+        "full name:"
+    ]
+
+    page2_hits = 0
+    for marker in page2_indicators:
+        if marker in text_lower:
+            page2_hits += 1
+
+    if page2_hits >= 2:
+        return "MRF_page2"
+
+    page2_fuzzy = [
+        "CHANGE CORRECTION OF NAME",
+        "CORRECTION OF DATE OF BIRTH",
+        "CHANGE OF CIVIL STATUS",
+        "UPDATING OF PERSONAL INFORMATION",
+        "UNDER PENALTY OF LAW"
+    ]
+
+    fuzzy_hits = 0
+    for phrase in page2_fuzzy:
+        score = fuzz.partial_ratio(phrase, clean)
+        if score >= 82:
+            print("[MRF PAGE2 FUZZ]", phrase, "score =", score)
+            fuzzy_hits += 1
+
+    if fuzzy_hits >= 1 and page2_hits >= 1:
+        return "MRF_page2"
+
+    return ""
+
+
+def detect_pbc_type(text):
+    """
+    Detect PBC page 1 and page 2 before CSF/SOA/DTR logic.
+
+    PBC_page1:
+      - Certificate of Live Birth
+      - Office of the Civil Registrar General
+      - Municipal Form No. 102
+      - Registry No.
+      - Registered at the Office of the Civil Registrar
+
+    PBC_page2:
+      - Affidavit of Acknowledgment/Admission of Paternity
+      - Admission of Paternity
+      - Affidavit for Delayed Registration of Birth
+      - Subscribed and Sworn
+    """
+    text_lower = text.lower()
+    clean = normalize_text(text)
+
+    # -------------------------
+    # PBC PAGE 1
+    # -------------------------
+    page1_exact = [
+        "certificate of live birth",
+        "office of the civil registrar general",
+        "municipal form no. 102",
+        "municipal form no 102",
+        "registry no",
+        "registered at the office of the civil registrar"
+    ]
+
+    if any(k in text_lower for k in page1_exact):
+        return "PBC_page1"
+
+    page1_fuzzy = [
+        "CERTIFICATE OF LIVE BIRTH",
+        "OFFICE OF THE CIVIL REGISTRAR GENERAL",
+        "MUNICIPAL FORM NO 102",
+        "REGISTERED AT THE OFFICE OF THE CIVIL REGISTRAR"
+    ]
+
+    for phrase in page1_fuzzy:
+        score = fuzz.partial_ratio(phrase, clean)
+        if score >= 84:
+            print("[PBC PAGE1 FUZZ]", phrase, "score =", score)
+            return "PBC_page1"
+
+    # -------------------------
+    # PBC PAGE 2
+    # -------------------------
+    page2_exact = [
+        "affidavit of acknowledgment",
+        "admission of paternity",
+        "affidavit for delayed registration of birth",
+        "subscribed and sworn"
+    ]
+
+    if any(k in text_lower for k in page2_exact):
+        return "PBC_page2"
+
+    page2_fuzzy = [
+        "AFFIDAVIT OF ACKNOWLEDGMENT",
+        "ADMISSION OF PATERNITY",
+        "AFFIDAVIT FOR DELAYED REGISTRATION OF BIRTH",
+        "SUBSCRIBED AND SWORN"
+    ]
+
+    for phrase in page2_fuzzy:
+        score = fuzz.partial_ratio(phrase, clean)
+        if score >= 82:
+            print("[PBC PAGE2 FUZZ]", phrase, "score =", score)
+            return "PBC_page2"
+
+    return ""
+
+
+
+def detect_opr_type(text):
+
+    text_lower = text.lower()
+    clean = normalize_text(text)
+
+    # STRICT OPR ONLY
+    if "operating room record" in text_lower:
+        return "OPR"
+
+    if fuzz.partial_ratio(
+        "OPERATING ROOM RECORD",
+        clean
+    ) >= 88:
+
+        print("[OPR FUZZ] OPERATING ROOM RECORD")
+
+        return "OPR"
+
+    return ""
+
+
+def detect_anr_type(text):
+    """
+    Detect ANR / Anesthesia Record using OCR text.
+    Added as a safe guard so ANR will not be renamed as SOA2_page2.
+    """
+    text_lower = text.lower()
+    clean = normalize_text(text)
+
+    strong_exact = [
+        "anesthesia record",
+        "anaesthesia record"
+    ]
+
+    if any(k in text_lower for k in strong_exact):
+        return "ANR"
+
+    secondary_markers = [
+        "premedication",
+        "proposed operation",
+        "anesthetic agent",
+        "anaesthetic agent",
+        "detailed technique",
+        "induction",
+        "maintenance",
+        "emergence",
+        "fluid summary",
+        "urine output in o.r",
+        "urine output in o r",
+        "condition of patient on departure"
+    ]
+
+    secondary_hits = 0
+    for marker in secondary_markers:
+        if marker in text_lower:
+            secondary_hits += 1
+
+    if secondary_hits >= 2:
+        return "ANR"
+
+    fuzzy_markers = [
+        "ANESTHESIA RECORD",
+        "ANAESTHESIA RECORD",
+        "PREMEDICATION DOSE ROUTE TIME",
+        "PROPOSED OPERATION",
+        "ANESTHETIC AGENT",
+        "DETAILED TECHNIQUE",
+        "INDUCTION MAINTENANCE EMERGENCE",
+        "FLUID SUMMARY",
+        "URINE OUTPUT IN O R",
+        "CONDITION OF PATIENT ON DEPARTURE"
+    ]
+
+    fuzzy_hits = 0
+    for phrase in fuzzy_markers:
+        score = fuzz.partial_ratio(phrase, clean)
+        if score >= 78:
+            print("[ANR FUZZ]", phrase, "score =", score)
+            fuzzy_hits += 1
+
+    if fuzzy_hits >= 1 and secondary_hits >= 1:
+        return "ANR"
+
+    return ""
+
+def detect_cf2_type(text):
+
+    text_lower = text.lower()
+
+    # CF2 page 1 has unique accommodation/newborn-care fields.
+    # "Use additional CF2 if necessary" appears on both CF2 pages, so it must
+    # never be used as a standalone page 2 detector.
+    if (
+        "type of accommodation" in text_lower
+        or "for essential newborn care" in text_lower
+        or "essential newborn care" in text_lower
+    ):
+        return "CF2_page1"
+
+    # -------------------------
+    # CF2 PAGE 2
+    # -------------------------
+    page2_keywords = [
+        "certification of consumption",
+        "no co-pay on top",
+        "with co-pay on top",
+        "name of accredited health care professional",
+        "authorized hci representative",
+        "accreditation number"
+    ]
+
+    page2_hits = 0
+
+    for k in page2_keywords:
+        if k in text_lower:
+            page2_hits += 1
+
+    if page2_hits >= 2:
+        return "CF2_page2"
+
+    # -------------------------
+    # CF2 PAGE 1
+    # -------------------------
+    page1_keywords = [
+        "claim form 2",
+        "type of accommodation",
+        "z-benefit package code",
+        "for essential newborn care",
+        "essential newborn care"
+    ]
+
+    page1_hits = 0
+
+    for k in page1_keywords:
+        if k in text_lower:
+            page1_hits += 1
+
+    if "claim form 2" in text_lower:
+        return "CF2_page1"
+
+    if page1_hits >= 2:
+        return "CF2_page1"
+
+    return ""
+
+def detect_doc(text):
+    text = text.lower()
+    clean_text = normalize_text(text)
+
+    # MRF must be detected first.
+    # This prevents MRF page 1 from becoming CSF and MRF page 2 from becoming SOA2_page2.
+    mrf_type = detect_mrf_type(text)
+    if mrf_type:
+        return mrf_type
+
+    pbc_type = detect_pbc_type(text)
+    if pbc_type:
+        return pbc_type
+
+    opr_type = detect_opr_type(text)
+    if opr_type:
+        return opr_type
+
+    anr_type = detect_anr_type(text)
+    if anr_type:
+        return anr_type
+
+    cf2_type = detect_cf2_type(text)
+
+    if cf2_type:
+        return cf2_type
+
+    if (
+        "CLAIM SIGNATURE FORM" in clean_text
+        or "CL SIGNATURE FORM" in clean_text
+        or "THIS FORM MAY BE REPRODUCED" in clean_text
+        or "CSF" in clean_text
+    ):
+        return "CSF"
+
+    if (
+        "hci portal reference no" in text
+        or "hci portal reference" in text
+        or "philhealth benefit eligibility" in text
+        or "philhealth benefit eligibility form" in text
+        or "teamphilhealth" in text
+        or "team philhealth" in text
+        or is_coe_text(text)
+    ):
+        return "COE"
+
+    # IMPORTANT FIX:
+    # DTR guard muna bago SOA.
+    # Para ang lab/ECG/xray na may "reference range" or "prepared by"
+    # ay hindi maging SOA2_page1/page2.
+    if is_probably_dtr_not_soa(text):
+        return "DTR"
+
+    if (
+        is_soa1_text(text)
+        or is_soa2_page1_text(text)
+        or is_soa2_page2_text(text)
+    ):
+        return "SOA"
+
+    if any(k in text for k in [
+        "statement of account",
+        "patient's statement of account",
+        "summary of fees",
+        "itemized charges",
+        "summary of charges",
+        "professional fees",
+        "print name"
+    ]):
+        return "SOA"
+
+    if has_fuzzy_keyword(text, [
+        "STATEMENT OF ACCOUNT",
+        "SUMMARY OF FEES",
+        "ITEMIZED CHARGES"
+    ], threshold=84):
+        return "SOA"
+
+    for doc, keywords in DOC_KEYWORDS.items():
+        if doc in ["CSF", "MRF"]:
+            continue
+
+        if any(k in text for k in keywords):
+            return doc
+
+    if is_dtr_text(text):
+        return "DTR"
+
+    return "UNKNOWN"
+    
+def normalize_ocr_for_doc(text):
+
+    text = text.upper()
+
+    replacements = {
+
+        "0": "O",
+        "1": "I",
+        "5": "S",
+
+        "PREP RED": "PREPARED",
+        "PREP RED BY": "PREPARED BY",
+
+        "PREPARED 8Y": "PREPARED BY",
+        "PREPARED BV": "PREPARED BY",
+
+        "CONFARNE": "CONFORME",
+        "CONFORRNE": "CONFORME",
+        "CONF0RME": "CONFORME",
+
+        "SIGNATURE EK ER": "SIGNATURE OVER",
+        "VER/PRINTED": "OVER PRINTED"
+
+    }
+
+    for wrong, correct in replacements.items():
+        text = text.replace(wrong, correct)
+
+    return text
+
+def detect_soa_type(text):
+
+    text_lower = text.lower()
+    clean = normalize_ocr_for_doc(text)
+
+    # -------------------------
+    # SOA1
+    # -------------------------
+    if "please pay at the cashier" in text_lower:
+        return "SOA1"
+
+    # -------------------------
+    # SOA2 PAGE1
+    # -------------------------
+    soa_page1_keywords = [
+        "soa reference no",
+        "soa reference #",
+        "soa ref no"
+    ]
+
+    if any(k in text_lower for k in soa_page1_keywords):
+        return "SOA2_page1"
+
+    # -------------------------
+    # SOA2 PAGE2
+    # -------------------------
+    page2_keywords = [
+        "prepared by",
+        "conforme",
+        "administrative aide",
+        "administrative officer",
+        "signature over printed name",
+        "patient / representative",
+        "patient representative"
+    ]
+
+    # exact
+    for k in page2_keywords:
+        if k in text_lower:
+            return "SOA2_page2"
+
+    # fuzzy per line
+    for line in clean.splitlines():
+
+        line = line.strip()
+
+        if not line:
+            continue
+
+        for keyword in page2_keywords:
+
+            score = fuzz.partial_ratio(
+                normalize_ocr_for_doc(keyword),
+                normalize_ocr_for_doc(line)
+            )
+
+            print(
+                "[FUZZ LINE]",
+                keyword.upper(),
+                "score =",
+                score,
+                "line =",
+                line
+            )
+
+            if score >= 80:
+                return "SOA2_page2"
+
+    # default
+    return "SOA1"
+
+
+def detect_doctors(text):
+    global DOCTOR_SETTINGS_LOADED_FROM_JSON_ONCE
+
+    # Load latest Doctor Manager config once per run.
+    if not DOCTOR_SETTINGS_LOADED_FROM_JSON_ONCE:
+        reload_dynamic_doctor_settings()
+        DOCTOR_SETTINGS_LOADED_FROM_JSON_ONCE = True
+
+    part_iv_text = extract_part_iv_text(text)
+    clean = normalize_text(part_iv_text)
+
+    detected = []
+
+    for doctor_key, setting in DOCTOR_SETTINGS.items():
+        best_score = 0
+        best_alias = ""
+
+        for alias in setting["aliases"]:
+            if not is_valid_doctor_alias(alias):
+                continue
+
+            alias_clean = normalize_text(alias)
+
+            # Extra guard: never use generic medical suffixes as doctor identity.
+            if alias_clean in GENERIC_DOCTOR_ALIASES:
+                continue
+
+            score = fuzz.partial_ratio(alias_clean, clean)
+
+            if score > best_score:
+                best_score = score
+                best_alias = alias
+
+        print("[FUZZ PART IV]", doctor_key, "score =", best_score, "alias =", best_alias)
+
+        if best_score >= 85 and is_valid_doctor_alias(best_alias):
+            detected.append((doctor_key, setting, best_score, len(normalize_text(best_alias))))
+
+    # If two doctors both score 100, choose the one with the longer/more specific alias,
+    # not the one that matched a short generic word.
+    detected.sort(key=lambda x: (x[2], x[3]), reverse=True)
+
+    return [(doctor_key, setting, score) for doctor_key, setting, score, alias_len in detected]
+
+
+def choose_part_iv_doctor(detected_doctors):
+    if not detected_doctors:
+        return None
+
+    doctor_key, setting, score = detected_doctors[0]
+
+    if score >= 85:
+        return doctor_key, setting
+
+    return None
+
+
+def draw_signature_auto(c, img_path, x, y, max_w, max_h):
+    img = Image.open(img_path)
+
+    w, h = img.size
+
+    scale = min(
+        max_w / float(w),
+        max_h / float(h)
+    )
+
+    new_w = w * scale
+    new_h = h * scale
+
+    offset_x = x + (max_w - new_w) / 2
+    offset_y = y + (max_h - new_h) / 2
+
+    c.drawImage(
+        img_path,
+        offset_x,
+        offset_y,
+        width=new_w,
+        height=new_h,
+        mask="auto"
+    )
+
+
+def pdf_page_to_image(pdf_path, page_no=0, zoom=2):
+    doc = fitz.open(pdf_path)
+
+    page = doc[page_no]
+
+    pix = page.get_pixmap(
+        matrix=fitz.Matrix(zoom, zoom),
+        alpha=False
+    )
+
+    img = np.frombuffer(
+        pix.samples,
+        dtype=np.uint8
+    )
+
+    img = img.reshape(
+        pix.height,
+        pix.width,
+        pix.n
+    )
+
+    doc.close()
+
+    return cv2.cvtColor(
+        img,
+        cv2.COLOR_RGB2GRAY
+    ), zoom
+
+
+def has_signature_in_area(pdf_path, x, y, max_w, max_h, threshold=0.35):
+    gray, zoom = pdf_page_to_image(pdf_path)
+
+    h, w = gray.shape
+
+    page_doc = fitz.open(pdf_path)
+    page_height = float(page_doc[0].rect.height)
+    page_doc.close()
+
+    margin_x = 5
+    margin_y = 3
+
+    x1 = int((x + margin_x) * zoom)
+    x2 = int((x + max_w - margin_x) * zoom)
+
+    y_top_pdf = page_height - (y + max_h - margin_y)
+    y_bottom_pdf = page_height - (y + margin_y)
+
+    y1 = int(y_top_pdf * zoom)
+    y2 = int(y_bottom_pdf * zoom)
+
+    x1 = max(0, min(x1, w - 1))
+    x2 = max(0, min(x2, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    y2 = max(0, min(y2, h - 1))
+
+    roi = gray[y1:y2, x1:x2]
+
+    if roi.size == 0:
+        return False
+
+    # Threshold image
+    _, thresh = cv2.threshold(roi, 200, 255, cv2.THRESH_BINARY_INV)
+
+    # Find contours
+    contours, _ = cv2.findContours(
+        thresh,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    # Count meaningful contours
+    large_contours = 0
+    total_area = 0
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+
+        if area >= 12:
+            large_contours += 1
+            total_area += area
+
+    print(
+        "[SIGN CHECK]",
+        "contours =", large_contours,
+        "area =", total_area
+    )
+
+    # Decision
+    if large_contours >= 2 or total_area >= 120:
+        return True
+
+    return False
+
+def has_signature_dark_ratio(pdf_path, x, y, max_w, max_h, threshold=0.18):
+    gray, zoom = pdf_page_to_image(pdf_path)
+
+    h, w = gray.shape
+
+    page_doc = fitz.open(pdf_path)
+    page_height = float(page_doc[0].rect.height)
+    page_doc.close()
+
+    margin_x = 20
+    margin_y = 8
+
+    x1 = int((x + margin_x) * zoom)
+    x2 = int((x + max_w - margin_x) * zoom)
+
+    y_top_pdf = page_height - (y + max_h - margin_y)
+    y_bottom_pdf = page_height - (y + margin_y)
+
+    y1 = int(y_top_pdf * zoom)
+    y2 = int(y_bottom_pdf * zoom)
+
+    x1 = max(0, min(x1, w - 1))
+    x2 = max(0, min(x2, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    y2 = max(0, min(y2, h - 1))
+
+    roi = gray[y1:y2, x1:x2]
+
+    if roi.size == 0:
+        return False
+
+    dark_pixels = np.sum(roi < 80)
+    ratio = dark_pixels / float(roi.size)
+
+    print(
+        "[PART V DARK CHECK]",
+        "ratio =", ratio,
+        "threshold =", threshold,
+        "x =", x,
+        "y =", y,
+        "w =", max_w,
+        "h =", max_h
+    )
+
+    return ratio >= threshold
+
+
+
+def has_handwritten_signature_in_area(
+    pdf_path,
+    x,
+    y,
+    max_w,
+    max_h,
+    min_contours=1,
+    min_area=80,
+    debug_label="PART_IV"
+):
+    """
+    Handwritten signature checker for CSF Part IV.
+
+    Why separate from has_signature_in_area():
+    - Part IV contains printed doctor name and horizontal lines.
+    - Normal contour counting sees printed text as "signature".
+    - This function removes horizontal lines and ignores small printed letters.
+
+    It detects only handwriting-like strokes:
+    - taller than printed letters
+    - wider than normal letters
+    - meaningful contour area
+    """
+
+    gray, zoom = pdf_page_to_image(pdf_path)
+    h, w = gray.shape
+
+    page_doc = fitz.open(pdf_path)
+    page_height = float(page_doc[0].rect.height)
+    page_doc.close()
+
+    margin_x = 3
+    margin_y = 2
+
+    x1 = int((x + margin_x) * zoom)
+    x2 = int((x + max_w - margin_x) * zoom)
+
+    y_top_pdf = page_height - (y + max_h - margin_y)
+    y_bottom_pdf = page_height - (y + margin_y)
+
+    y1 = int(y_top_pdf * zoom)
+    y2 = int(y_bottom_pdf * zoom)
+
+    x1 = max(0, min(x1, w - 1))
+    x2 = max(0, min(x2, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    y2 = max(0, min(y2, h - 1))
+
+    roi = gray[y1:y2, x1:x2]
+
+    if roi.size == 0:
+        print("[HAND SIGN CHECK] Empty ROI", debug_label)
+        return False
+
+    # Convert dark ink/text into white foreground.
+    _, thresh = cv2.threshold(
+        roi,
+        200,
+        255,
+        cv2.THRESH_BINARY_INV
+    )
+
+    # Remove horizontal form lines/underlines because they are not signatures.
+    horizontal_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (45, 1)
+    )
+    horizontal_lines = cv2.morphologyEx(
+        thresh,
+        cv2.MORPH_OPEN,
+        horizontal_kernel
+    )
+    cleaned = cv2.subtract(thresh, horizontal_lines)
+
+    contours, _ = cv2.findContours(
+        cleaned,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    handwriting_contours = 0
+    handwriting_area = 0
+
+    for cnt in contours:
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        area = cv2.contourArea(cnt)
+        aspect = bw / float(bh or 1)
+
+        # Ignore small printed letters.
+        if bh < 18:
+            continue
+
+        # Ignore tiny noise.
+        if bw < 25 or area < 40:
+            continue
+
+        # Ignore remaining very long thin horizontal marks.
+        if aspect > 10 and bh < 22:
+            continue
+
+        handwriting_contours += 1
+        handwriting_area += area
+
+    print(
+        "[HAND SIGN CHECK]",
+        debug_label,
+        "hand_contours =", handwriting_contours,
+        "hand_area =", handwriting_area,
+        "x =", x,
+        "y =", y,
+        "w =", max_w,
+        "h =", max_h
+    )
+
+    return handwriting_contours >= min_contours or handwriting_area >= min_area
+
+def add_signatures_to_csf(
+    input_pdf,
+    output_pdf,
+    detected_doctors
+):
+
+    reader = PdfReader(input_pdf)
+    writer = PdfWriter()
+
+    page = reader.pages[0]
+
+    page_width = float(page.mediabox.width)
+    page_height = float(page.mediabox.height)
+
+    overlay_path = input_pdf + "_overlay.pdf"
+
+    c = canvas.Canvas(
+        overlay_path,
+        pagesize=(page_width, page_height)
+    )
+
+    part_iv_position = (250, 190)
+    part_v_position = (50, 75)
+
+    max_w = 130
+    max_h = 35
+
+    signed_count = 0
+
+    part_iv_doctor = choose_part_iv_doctor(detected_doctors)
+
+    if part_iv_doctor:
+        doctor_key, setting = part_iv_doctor
+        sig_path = os.path.join(SIGNATURE_FOLDER, setting["file"])
+
+        if os.path.exists(sig_path):
+            doctor_x = setting.get("x", part_iv_position[0])
+            doctor_y = setting.get("y", part_iv_position[1])
+
+            doctor_max_w = setting.get("max_w", max_w)
+            doctor_max_h = setting.get("max_h", max_h)
+
+            # Use a separate handwriting checker for CSF Part IV.
+            # This prevents printed doctor name/date/lines from being treated as a signature.
+            check_x = setting.get("check_x", doctor_x)
+            check_y = setting.get("check_y", doctor_y)
+            check_max_w = setting.get("check_max_w", doctor_max_w)
+            check_max_h = setting.get("check_max_h", doctor_max_h)
+
+            if has_handwritten_signature_in_area(
+                input_pdf,
+                check_x,
+                check_y,
+                check_max_w,
+                check_max_h,
+                min_contours=1,
+                min_area=80,
+                debug_label="CSF PART IV " + doctor_key
+            ):
+                print("[SKIP] Existing signature detected in PART IV")
+            else:
+                draw_signature_auto(
+                    c,
+                    sig_path,
+                    doctor_x,
+                    doctor_y,
+                    doctor_max_w,
+                    doctor_max_h
+                )
+                print("[+] Signed PART IV:", doctor_key)
+                signed_count += 1
+        else:
+            print("[!] Missing PART IV signature:", sig_path)
+
+    else:
+        print("[INFO] No valid PART IV doctor detected")
+
+    rhoda_file = os.path.join(
+        SIGNATURE_FOLDER,
+        "gaffud_rhoda_jacqueline.png"
+    )
+
+    if os.path.exists(rhoda_file):
+
+        x, y = part_v_position
+
+        if has_signature_dark_ratio(
+            input_pdf,
+            x,
+            y,
+            max_w,
+            max_h,
+            threshold=0.18
+        ):
+
+            print(
+                "[SKIP] Existing signature "
+                "detected in PART V"
+            )
+
+        else:
+
+            draw_signature_auto(
+                c,
+                rhoda_file,
+                x,
+                y,
+                max_w,
+                max_h
+            )
+
+            print(
+                "[+] Signed PART V: "
+                "RHODA JACQUELINE P. GAFFUD"
+            )
+
+            signed_count += 1
+
+    else:
+
+        print(
+            "[!] Missing PART V signature:",
+            rhoda_file
+        )
+
+    c.save()
+
+    if signed_count == 0:
+
+        os.remove(overlay_path)
+
+        return False
+
+    overlay = PdfReader(overlay_path)
+
+    page.merge_page(
+        overlay.pages[0]
+    )
+
+    writer.add_page(page)
+
+    for i in range(1, len(reader.pages)):
+        writer.add_page(reader.pages[i])
+
+    with open(output_pdf, "wb") as f:
+        writer.write(f)
+
+    os.remove(overlay_path)
+
+    return True
+
+
+def auto_sign_csf(pdf_path, text):
+    if not is_auto_sign_csf_enabled():
+        print("[AUTO SIGN] Disabled from GUI settings. CSF auto-sign skipped.")
+        return False
+
+    make_writable(pdf_path)
+
+    detected_doctors = detect_doctors(text)
+
+    print(
+        "[DEBUG] Doctors detected:",
+        [d[0] for d in detected_doctors]
+    )
+
+    temp_signed = pdf_path.replace(
+        ".pdf",
+        "_signed.pdf"
+    )
+
+    signed = add_signatures_to_csf(
+        pdf_path,
+        temp_signed,
+        detected_doctors
+    )
+
+    if signed:
+
+        os.remove(pdf_path)
+
+        os.rename(
+            temp_signed,
+            pdf_path
+        )
+
+        print(
+            "[+] CSF signing complete"
+        )
+
+        return True
+
+    if os.path.exists(temp_signed):
+        os.remove(temp_signed)
+
+    return False
+
+
+def merge_pdf(existing, new_file):
+    make_writable(existing)
+
+    temp_output = existing + ".tmp.pdf"
+
+    merger = PdfMerger()
+
+    merger.append(existing)
+    merger.append(new_file)
+
+    merger.write(temp_output)
+
+    merger.close()
+
+    os.remove(existing)
+    safe_delete(new_file)
+
+    os.rename(temp_output, existing)
+
+
+def merge_two(p1, p2, output):
+    if os.path.exists(output):
+
+        make_writable(output)
+
+        os.remove(output)
+
+    merger = PdfMerger()
+
+    merger.append(p1)
+    merger.append(p2)
+
+    merger.write(output)
+
+    merger.close()
+
+
+def is_soa2_page1_by_image(pdf_path):
+    """
+    Image/OCR fallback for SOA2 page 1.
+    Ginagamit kapag hindi nadetect ng main OCR.
+    """
+    try:
+        images = convert_from_path(
+            pdf_path,
+            first_page=1,
+            last_page=1,
+            poppler_path=POPPLER_PATH
+        )
+
+        pil_img = images[0].convert("L")
+
+        img = np.array(pil_img)
+        img = cv2.resize(img, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+        img = cv2.GaussianBlur(img, (3, 3), 0)
+        _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        image_text = pytesseract.image_to_string(Image.fromarray(img)).lower()
+
+        if is_coe_text(image_text):
+            print("[COE IMAGE GUARD] Blocked false SOA2_page1 detection")
+            return False
+
+        if is_soa2_page1_text(image_text):
+            print("[SOA2 IMAGE CHECK] SOA2_page1 detected by image OCR")
+            return True
+
+        return False
+
+    except Exception as e:
+        print("[SOA2 PAGE1 IMAGE CHECK ERROR]", str(e))
+        return False
+
+
+def is_soa2_page2_by_image(pdf_path):
+    """
+    Image/OCR fallback for SOA2 page 2.
+    Ginagamit kapag hindi nadetect ng main OCR.
+    """
+    try:
+        images = convert_from_path(
+            pdf_path,
+            first_page=1,
+            last_page=1,
+            poppler_path=POPPLER_PATH
+        )
+
+        pil_img = images[0].convert("L")
+
+        img = np.array(pil_img)
+        img = cv2.resize(img, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+        img = cv2.GaussianBlur(img, (3, 3), 0)
+        _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        image_text = pytesseract.image_to_string(Image.fromarray(img)).lower()
+
+        if is_coe_text(image_text):
+            print("[COE IMAGE GUARD] Blocked false SOA2_page2 detection")
+            return False
+
+        if is_probably_dtr_not_soa(image_text):
+            print("[DTR GUARD] Image OCR blocked false SOA2_page2")
+            return False
+
+        if is_anr_by_image(pdf_path):
+            print("[ANR IMAGE GUARD] Blocked false SOA2_page2 detection")
+            return False
+
+        if is_soa2_page2_text(image_text):
+            print("[SOA2 IMAGE CHECK] SOA2_page2 detected by image OCR")
+            return True
+
+        return False
+
+    except Exception as e:
+        print("[SOA2 IMAGE CHECK ERROR]", str(e))
+        return False
+
+
+
+def is_anr_by_image(pdf_path):
+    """
+    Strong image-based fallback for ANR / Anesthesia Record.
+
+    Why this is needed:
+    - ANR scans are usually image-only.
+    - Normal OCR sometimes misses "ANESTHESIA RECORD".
+    - The same page can be falsely routed as SOA2_page2 because OCR sees form labels.
+
+    This function uses:
+    1. Full-page OCR
+    2. Cropped top-right OCR where "ANESTHESIA RECORD" usually appears
+    3. Cropped lower-section OCR for ANR-specific labels
+    4. Grid/layout fallback ONLY for ANR-style anesthesia chart
+    """
+    try:
+        images = convert_from_path(
+            pdf_path,
+            first_page=1,
+            last_page=1,
+            poppler_path=POPPLER_PATH
+        )
+
+        pil_img = images[0].convert("L")
+
+        # Upscale for better OCR
+        big = pil_img.resize(
+            (pil_img.width * 2, pil_img.height * 2),
+            Image.Resampling.LANCZOS
+        )
+
+        def prep_for_ocr(pil_part):
+            arr = np.array(pil_part)
+            arr = cv2.GaussianBlur(arr, (3, 3), 0)
+            _, arr = cv2.threshold(
+                arr,
+                0,
+                255,
+                cv2.THRESH_BINARY + cv2.THRESH_OTSU
+            )
+            return Image.fromarray(arr)
+
+        ocr_chunks = []
+
+        # Full page OCR
+        try:
+            ocr_chunks.append(
+                pytesseract.image_to_string(
+                    prep_for_ocr(big),
+                    config="--psm 6"
+                )
+            )
+            ocr_chunks.append(
+                pytesseract.image_to_string(
+                    prep_for_ocr(big),
+                    config="--psm 11"
+                )
+            )
+        except Exception:
+            pass
+
+        bw, bh = big.size
+
+        # ANR title is usually top-right
+        crop_title = big.crop((int(bw * 0.58), 0, bw, int(bh * 0.23)))
+
+        # ANR lower fields: detailed technique / induction / maintenance / emergence / fluid summary
+        crop_bottom = big.crop((0, int(bh * 0.70), bw, bh))
+
+        # Left side labels: hours / agents / fluids / pulse / BP etc.
+        crop_left = big.crop((0, int(bh * 0.18), int(bw * 0.28), int(bh * 0.78)))
+
+        for crop in [crop_title, crop_bottom, crop_left]:
+            try:
+                ocr_chunks.append(
+                    pytesseract.image_to_string(
+                        prep_for_ocr(crop),
+                        config="--psm 6"
+                    )
+                )
+                ocr_chunks.append(
+                    pytesseract.image_to_string(
+                        prep_for_ocr(crop),
+                        config="--psm 11"
+                    )
+                )
+            except Exception:
+                pass
+
+        image_text = "\n".join(ocr_chunks).lower()
+        clean = normalize_text(image_text)
+
+        anr_exact_keywords = [
+            "anesthesia record",
+            "anaesthesia record",
+            "premedication",
+            "proposed operation",
+            "anesthetic agent",
+            "anaesthetic agent",
+            "detailed technique",
+            "induction",
+            "maintenance",
+            "emergence",
+            "fluid summary",
+            "urine output in o.r",
+            "urine output in o r",
+            "condition of patient on departure",
+            "anesthesiologist",
+            "anaesthesiologist"
+        ]
+
+        exact_hits = 0
+        for k in anr_exact_keywords:
+            if k in image_text:
+                exact_hits += 1
+
+        if "anesthesia record" in image_text or "anaesthesia record" in image_text:
+            print("[ANR IMAGE CHECK] ANR title keyword found")
+            return True
+
+        if exact_hits >= 2:
+            print("[ANR IMAGE CHECK] ANR exact hits =", exact_hits)
+            return True
+
+        fuzzy_markers = [
+            "ANESTHESIA RECORD",
+            "ANAESTHESIA RECORD",
+            "PREMEDICATION DOSE ROUTE TIME",
+            "PROPOSED OPERATION",
+            "ANESTHETIC AGENT",
+            "ANAESTHETIC AGENT",
+            "DETAILED TECHNIQUE",
+            "INDUCTION MAINTENANCE EMERGENCE",
+            "FLUID SUMMARY",
+            "URINE OUTPUT IN O R",
+            "CONDITION OF PATIENT ON DEPARTURE",
+            "ANESTHESIOLOGIST"
+        ]
+
+        fuzzy_hits = 0
+        for marker in fuzzy_markers:
+            score = fuzz.partial_ratio(marker, clean)
+            if score >= 68:
+                print("[ANR IMAGE FUZZ]", marker, "score =", score)
+                fuzzy_hits += 1
+
+        if fuzzy_hits >= 2:
+            print("[ANR IMAGE CHECK] ANR fuzzy hits =", fuzzy_hits)
+            return True
+
+        # Layout fallback for ANR anesthesia chart.
+        # This is allowed only inside this function; caller guards against strong SOA1.
+        img = np.array(pil_img)
+        img = cv2.resize(img, (900, 1200))
+        blur = cv2.GaussianBlur(img, (3, 3), 0)
+        edges = cv2.Canny(blur, 30, 120)
+
+        # ANR has dense center graph/grid.
+        center = edges[230:930, 120:830]
+
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (24, 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 24))
+
+        horizontal = cv2.morphologyEx(center, cv2.MORPH_OPEN, horizontal_kernel)
+        vertical = cv2.morphologyEx(center, cv2.MORPH_OPEN, vertical_kernel)
+
+        h_score = int(np.sum(horizontal > 0))
+        v_score = int(np.sum(vertical > 0))
+        edge_score = int(np.sum(center > 0))
+        dark_pixels = int(np.sum(img < 120))
+
+        print(
+            "[ANR IMAGE GRID]",
+            "h_score =", h_score,
+            "v_score =", v_score,
+            "edge_score =", edge_score,
+            "dark =", dark_pixels,
+            "ocr_hits =", exact_hits,
+            "fuzzy_hits =", fuzzy_hits
+        )
+
+        # Conservative: require both grid shape and at least weak ANR OCR hint.
+        weak_anr_hint = (
+            fuzz.partial_ratio("ANESTHESIA RECORD", clean) >= 58
+            or fuzz.partial_ratio("DETAILED TECHNIQUE", clean) >= 58
+            or fuzz.partial_ratio("FLUID SUMMARY", clean) >= 58
+            or "anest" in image_text
+            or "anaest" in image_text
+        )
+
+        if weak_anr_hint and h_score > 6500 and v_score > 4500 and edge_score > 18000:
+            print("[ANR IMAGE CHECK] ANR grid/layout detected")
+            return True
+
+        return False
+
+    except Exception as e:
+        print("[ANR IMAGE CHECK ERROR]", str(e))
+        return False
+
+def is_ecg_by_image(pdf_path):
+    """
+    Image-based fallback for ECG forms.
+    Ginagamit lang ito kapag OCR doc_type is UNKNOWN.
+    Hindi nito binabago ang existing OCR keywords; dagdag fallback lang ito.
+    """
+    try:
+        images = convert_from_path(
+            pdf_path,
+            first_page=1,
+            last_page=1,
+            poppler_path=POPPLER_PATH
+        )
+
+        pil_img = images[0].convert("L")
+
+        try:
+            image_text = pytesseract.image_to_string(pil_img).lower()
+        except Exception:
+            image_text = ""
+
+        ecg_text_keywords = [
+            "electrocardiogram",
+            "ecg",
+            "normal sinus rhythm",
+            "sinus rhythm",
+            "ventricular rate",
+            "pr interval",
+            "qrs duration",
+            "qt/qtc",
+            "borderline abnormal ecg"
+        ]
+
+        if any(k in image_text for k in ecg_text_keywords):
+            print("[ECG IMAGE CHECK] ECG text keyword found")
+            return True
+
+        img = np.array(pil_img)
+
+        img = cv2.resize(img, (900, 1200))
+
+        blur = cv2.GaussianBlur(img, (3, 3), 0)
+
+        edges = cv2.Canny(blur, 30, 120)
+
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 30))
+
+        horizontal = cv2.morphologyEx(edges, cv2.MORPH_OPEN, horizontal_kernel)
+        vertical = cv2.morphologyEx(edges, cv2.MORPH_OPEN, vertical_kernel)
+
+        h_score = int(np.sum(horizontal > 0))
+        v_score = int(np.sum(vertical > 0))
+        edge_score = int(np.sum(edges > 0))
+        dark_pixels = int(np.sum(img < 120))
+
+        line_score = h_score + v_score
+
+        print(
+            "[ECG IMAGE CHECK]",
+            "h_score =", h_score,
+            "v_score =", v_score,
+            "edge_score =", edge_score,
+            "dark =", dark_pixels,
+            "line_score =", line_score
+        )
+
+        if line_score > 2500 and edge_score > 12000 and dark_pixels > 12000:
+            return True
+
+        if h_score > 1800 and dark_pixels > 18000:
+            return True
+
+        return False
+
+    except Exception as e:
+        print("[ECG IMAGE CHECK ERROR]", str(e))
+        return False
+
+def extract_cf2_doctor_section(text):
+    """
+    Extract only CF2 Page 2 doctor/professional fee section.
+
+    Target area:
+    - 10. Accreditation Number
+    - Name of Accredited Health Care Professional
+    - No co-pay on top
+    - With co-pay on top
+
+    Purpose:
+    Para hindi madamay ang RHODA sa lower Chief of Hospital II section.
+    """
+
+    upper_text = text.upper()
+
+    start_markers = [
+        "10. ACCREDITATION NUMBER",
+        "10 ACCREDITATION NUMBER",
+        "ACCREDITATION NUMBER",
+        "ACCREDITATION NO",
+        "NAME OF ACCREDITED HEALTH CARE PROFESSIONAL"
+    ]
+
+    end_markers = [
+        "PART III",
+        "CERTIFICATION OF CONSUMPTION",
+        "PART IV",
+        "AUTHORIZED HCI REPRESENTATIVE",
+        "CHIEF OF HOSPITAL"
+    ]
+
+    start = -1
+
+    for marker in start_markers:
+        pos = upper_text.find(marker)
+        if pos != -1:
+            start = pos
+            break
+
+    if start == -1:
+        print("[!] CF2 doctor section start not found, using first half of OCR text")
+        return upper_text[:len(upper_text) // 2]
+
+    end = len(upper_text)
+
+    for marker in end_markers:
+        pos = upper_text.find(marker, start + 20)
+        if pos != -1:
+            end = pos
+            break
+
+    section = upper_text[start:end]
+
+    print("\n[DEBUG CF2 DOCTOR SECTION]")
+    print(section[:1200])
+    print("[END DEBUG CF2 DOCTOR SECTION]\n")
+
+    return section
+
+def get_cf2_hci_representative():
+    """
+    Return the single CF2 Authorized HCI Representative signature config.
+
+    The hospital currently uses RHODA / Chief of Hospital for this lower-left
+    CF2 signature. Keeping this tied to the doctor config lets the GUI control
+    the signature file and coordinates without another JSON file.
+    """
+    fallback = {
+        "file": "gaffud_rhoda_jacqueline.png",
+        "cf2_hci_x": 45,
+        "cf2_hci_y": 25,
+        "cf2_hci_max_w": 135,
+        "cf2_hci_max_h": 30,
+    }
+
+    for doctor_key, setting in DOCTOR_SETTINGS.items():
+        aliases = " ".join(setting.get("aliases", []))
+        haystack = normalize_text(doctor_key + " " + aliases + " " + setting.get("file", ""))
+
+        if (
+            "RHODA" in haystack
+            or "GAFFUD RHODA" in haystack
+            or "GAFFUD_RHODA" in doctor_key
+            or setting.get("file") == fallback["file"]
+        ):
+            rep = fallback.copy()
+            rep["file"] = setting.get("file") or fallback["file"]
+            rep["cf2_hci_x"] = setting.get("cf2_hci_x") or fallback["cf2_hci_x"]
+            rep["cf2_hci_y"] = setting.get("cf2_hci_y") or fallback["cf2_hci_y"]
+            rep["cf2_hci_max_w"] = setting.get("cf2_hci_max_w") or fallback["cf2_hci_max_w"]
+            rep["cf2_hci_max_h"] = setting.get("cf2_hci_max_h") or fallback["cf2_hci_max_h"]
+            return rep
+
+    return fallback
+
+def auto_sign_cf2_page2(pdf_path, text):
+    """
+    Auto-sign CF2 page 2 only.
+
+    Signature 1:
+    - Doctor name is below Accreditation No.
+    - Detect doctor using DOCTOR_SETTINGS aliases.
+
+    Signature 2:
+    - RHODA JACQUELINE P. GAFFUD
+    - Left side / before Chief of Hospital II area.
+
+    NOTE:
+    Coordinates may need adjustment depending on your scan layout.
+    """
+
+    if not is_auto_sign_cf2_enabled():
+        print("[AUTO SIGN] Disabled from GUI settings. CF2 auto-sign skipped.")
+        return False
+
+    make_writable(pdf_path)
+    reload_dynamic_doctor_settings()
+
+    cf2_doctor_section = extract_cf2_doctor_section(text)
+    clean = normalize_text(cf2_doctor_section)
+
+    detected_doctor = None
+
+    for doctor_key, setting in DOCTOR_SETTINGS.items():
+        best_score = 0
+        best_alias = ""
+
+        for alias in setting["aliases"]:
+            score = fuzz.partial_ratio(
+                normalize_text(alias),
+                clean
+            )
+
+            if score > best_score:
+                best_score = score
+                best_alias = alias
+
+        print("[CF2 DOCTOR FUZZ]", doctor_key, "score =", best_score, "alias =", best_alias)
+
+        if best_score >= 82:
+            detected_doctor = (doctor_key, setting)
+            break
+
+    reader = PdfReader(pdf_path)
+    writer = PdfWriter()
+
+    page = reader.pages[0]
+    page_width = float(page.mediabox.width)
+    page_height = float(page.mediabox.height)
+
+    overlay_path = pdf_path + "_cf2_overlay.pdf"
+
+    c = canvas.Canvas(
+        overlay_path,
+        pagesize=(page_width, page_height)
+    )
+
+    signed_count = 0
+    
+    
+    #page_width = float(page.mediabox.width)
+    #page_height = float(page.mediabox.height)
+
+    #print("[CF2 PAGE SIZE] width =", page_width, "height =", page_height)
+
+    # =========================
+    # MANUAL COORDINATES AREA
+    # =========================
+    # Adjust mo ito kapag mataas/mababa ang pirma.
+    # x = left/right
+    # y = taas/baba
+    # max_w/max_h = laki ng signature
+
+    # =========================
+    # MANUAL COORDINATES AREA
+    # =========================
+
+    # Default CF2 doctor position
+    # gagamitin lang ito kapag walang cf2_x/cf2_y config ang doctor
+    default_cf2_doctor_x = 95
+    default_cf2_doctor_y = 705
+    default_cf2_doctor_max_w = 120
+    default_cf2_doctor_max_h = 25
+
+    cf2_hci_rep = get_cf2_hci_representative()
+    rhoda_x = cf2_hci_rep["cf2_hci_x"]
+    rhoda_y = cf2_hci_rep["cf2_hci_y"]
+    rhoda_max_w = cf2_hci_rep["cf2_hci_max_w"]
+    rhoda_max_h = cf2_hci_rep["cf2_hci_max_h"]
+
+    # =========================
+    # SIGN DOCTOR
+    # =========================
+    if detected_doctor:
+
+        doctor_key, setting = detected_doctor
+
+        sig_path = os.path.join(
+            SIGNATURE_FOLDER,
+            setting["file"]
+        )
+
+        if os.path.exists(sig_path):
+
+            # PER-DOCTOR CF2 CONFIG
+            doctor_x = setting.get("cf2_x") or default_cf2_doctor_x
+            doctor_y = setting.get("cf2_y") or default_cf2_doctor_y
+            doctor_max_w = setting.get("cf2_max_w") or default_cf2_doctor_max_w
+            doctor_max_h = setting.get("cf2_max_h") or default_cf2_doctor_max_h
+
+            # CF2 boxes contain printed text/lines, so use the handwriting
+            # checker to avoid false SKIP from form labels.
+            if has_handwritten_signature_in_area(
+                pdf_path,
+                doctor_x,
+                doctor_y,
+                doctor_max_w,
+                doctor_max_h,
+                min_contours=1,
+                min_area=60,
+                debug_label="CF2 DOCTOR " + doctor_key
+            ):
+
+                print(
+                    "[SKIP] Existing CF2 doctor signature detected"
+                )
+
+            else:
+
+                draw_signature_auto(
+                    c,
+                    sig_path,
+                    doctor_x,
+                    doctor_y,
+                    doctor_max_w,
+                    doctor_max_h
+                )
+
+                print(
+                    "[+] Signed CF2 doctor:",
+                    doctor_key
+                )
+
+                signed_count += 1
+
+        else:
+
+            print(
+                "[!] Missing CF2 doctor signature file:",
+                sig_path
+            )
+
+    else:
+
+        print("[INFO] No CF2 doctor detected")
+
+    # =========================
+    # SIGN RHODA / HCI REPRESENTATIVE
+    # =========================
+    rhoda_file = os.path.join(
+        SIGNATURE_FOLDER,
+        cf2_hci_rep["file"]
+    )
+
+    if os.path.exists(rhoda_file):
+        if has_handwritten_signature_in_area(
+            pdf_path,
+            rhoda_x,
+            rhoda_y,
+            rhoda_max_w,
+            rhoda_max_h,
+            min_contours=1,
+            min_area=60,
+            debug_label="CF2 HCI REPRESENTATIVE"
+        ):
+            print("[SKIP] Existing CF2 Rhoda signature detected")
+        else:
+            draw_signature_auto(
+                c,
+                rhoda_file,
+                rhoda_x,
+                rhoda_y,
+                rhoda_max_w,
+                rhoda_max_h
+            )
+
+            print("[+] Signed CF2 Rhoda / HCI Representative")
+            signed_count += 1
+    else:
+        print("[!] Missing Rhoda signature file:", rhoda_file)
+
+    c.save()
+
+    if signed_count == 0:
+        os.remove(overlay_path)
+        return False
+
+    overlay = PdfReader(overlay_path)
+
+    page.merge_page(overlay.pages[0])
+    writer.add_page(page)
+
+    for i in range(1, len(reader.pages)):
+        writer.add_page(reader.pages[i])
+
+    temp_signed = pdf_path.replace(".pdf", "_cf2_signed.pdf")
+
+    with open(temp_signed, "wb") as f:
+        writer.write(f)
+
+    os.remove(overlay_path)
+    os.remove(pdf_path)
+    os.rename(temp_signed, pdf_path)
+
+    print("[+] CF2 page 2 signing complete")
+    return True
+
+def resolve_soa_doc_type(path, text, doc_type):
+    """
+    Shared SOA correction logic.
+    Converts broad SOA into SOA1 / SOA2_page1 / SOA2_page2.
+    Also protects ANR false positive.
+    """
+    if doc_type in ("SOA", "SOA2_page1", "SOA2_page2", "UNKNOWN") and is_coe_text(text):
+        print("[+] Corrected COE before SOA merge")
+        return "COE"
+
+    if doc_type == "SOA":
+        if (not is_soa1_text(text)) and (not is_soa2_page1_text(text)) and is_anr_by_image(path):
+            doc_type = "ANR"
+            print("[+] Corrected SOA false positive -> ANR")
+        else:
+            doc_type = detect_soa_type(text)
+
+        if doc_type == "SOA1" and not is_soa1_text(text):
+            if is_soa2_page1_by_image(path):
+                doc_type = "SOA2_page1"
+                print("[+] SOA fallback corrected by image: SOA2_page1")
+            elif is_soa2_page2_by_image(path):
+                doc_type = "SOA2_page2"
+                print("[+] SOA fallback corrected by image: SOA2_page2")
+            else:
+                print("[INFO] SOA broad fallback saved as SOA1")
+
+    if doc_type == "SOA2_page2" and (not is_soa1_text(text)) and (not is_soa2_page1_text(text)):
+        if is_anr_by_image(path):
+            doc_type = "ANR"
+            print("[+] Final correction: SOA2_page2 -> ANR")
+
+    return doc_type
+
+
+
+# ==================================================
+# DEFERRED UNKNOWN REVIEW
+# ==================================================
+DEFERRED_UNKNOWN_TYPES = [
+    "SOA2_page2_1",
+    "MRF_page2_1",
+    "MRF_page2",
+    "MRF_page1",
+    "SOA2_page2",
+    "SOA2_page1",
+    "UNKNOWN"
+]
+
+
+def handle_deferred_unknown_review(output_pdf_path, doc_type, ocr_text):
+    """
+    Trainer popup only AFTER PDF already saved to OUTPUT folder.
+    """
+
+    if doc_type not in DEFERRED_UNKNOWN_TYPES:
+        return doc_type
+
+    print("[DEFERRED UNKNOWN TRAINER]")
+    print("Saved to output first ->", doc_type)
+
+    selected = ask_unknown_doc_type(output_pdf_path, ocr_text)
+
+    print("[DEFERRED UNKNOWN TRAINER] User selected:", selected)
+
+    return selected
+
+
+def process():
+    global current_patient, current_patient_base_name, current_hospital_no
+    global soa2_pages, mrf_pages, pbc_pages, cf2_pages, cf2_page_texts
+
+    files = sorted(os.listdir(SCAN_FOLDER))
+
+    # OCR cache para hindi paulit-ulit mag OCR during pre-scan and processing.
+    ocr_cache = {}
+
+    # ==================================================
+    # FIRST PASS:
+    # Hanapin muna ang SOA1.
+    # SOA1 -> extract Hospital No -> DB hperson -> verified folder name.
+    # Hindi na CSF ang source ng patient name.
+    # ==================================================
+    print("\n[+] FIRST PASS: Searching SOA1 for Hospital No. and DB patient name...\n")
+
+    for file in files:
+        if not file.lower().endswith(".pdf"):
+            continue
+
+        path = os.path.join(SCAN_FOLDER, file)
+
+        try:
+            text = ocr_pdf(path)
+            ocr_cache[path] = text
+        except Exception as e:
+            print("[OCR ERROR]", file, str(e))
+            continue
+
+        doc_type = detect_doc(text)
+        doc_type = resolve_soa_doc_type(path, text, doc_type)
+
+        if doc_type == "SOA1":
+            hospital_no = extract_hospital_no_from_soa1(text)
+
+            if hospital_no:
+                if set_patient_context_from_db_hospital_no(hospital_no):
+                    print("[+] Patient context ready from DB")
+                    break
+
+    if not current_patient:
+        print("[!] No verified patient context found.")
+        print("[!] Reason: SOA1 Hospital No not found or DB lookup failed.")
+        print("[!] No files will be moved to avoid wrong folder naming.")
+        finalize_all_pdfs()
+        return
+
+    backup_original_scans(files)
+
+    # ==================================================
+    # SECOND PASS:
+    # Process all PDFs using verified DB folder name.
+    # ==================================================
+    print("\n[+] SECOND PASS: Processing files into verified patient folder...\n")
+
+    for file in files:
+        if not file.lower().endswith(".pdf"):
+            continue
+
+        path = os.path.join(SCAN_FOLDER, file)
+
+        if not os.path.exists(path):
+            # Already moved by earlier processing.
+            continue
+
+        text = ocr_cache.get(path)
+
+        if text is None:
+            try:
+                text = ocr_pdf(path)
+                ocr_cache[path] = text
+            except Exception as e:
+                print("[OCR ERROR]", file, str(e))
+                continue
+
+        print("\n--- OCR ---")
+        print(text[:800])
+
+        doc_type = detect_doc(text)
+
+        if doc_type == "UNKNOWN":
+            trained_type = detect_doc_from_unknown_training(path, text)
+
+            if trained_type:
+                doc_type = trained_type
+                print("[+] UNKNOWN Trainer detection:", doc_type)
+
+        if doc_type == "UNKNOWN":
+            if (not is_soa1_text(text)) and (not is_soa2_page1_text(text)) and is_anr_by_image(path):
+                doc_type = "ANR"
+                print("[+] Image-based detection: ANR")
+            elif is_ecg_by_image(path):
+                doc_type = "DTR"
+                print("[+] Image-based detection: ECG -> DTR")
+            elif is_soa2_page1_by_image(path):
+                doc_type = "SOA2_page1"
+                print("[+] Image-based detection: SOA2_page1")
+            elif is_soa2_page2_by_image(path):
+                doc_type = "SOA2_page2"
+                print("[+] Image-based detection: SOA2_page2")
+
+        # ==================================================
+        # UNKNOWN TRAINER SAFETY RULE
+        # ==================================================
+        # Do NOT show trainer popup immediately if a merge pair is pending.
+        # Example:
+        #   SOA2_page1 already found + next page is UNKNOWN
+        #   => treat next page as SOA2_page2 and merge first.
+        #
+        # Same for:
+        #   MRF_page1 + UNKNOWN => MRF_page2
+        #
+        # This prevents wrong popup/training before paired documents are complete.
+        if doc_type == "UNKNOWN" and "SOA2_page1" in soa2_pages:
+            print("[DEFERRED UNKNOWN TRAINER] Pending SOA2 merge detected. No popup during processing.")
+
+        elif doc_type == "UNKNOWN" and "MRF_page1" in mrf_pages:
+            print("[DEFERRED UNKNOWN TRAINER] Pending MRF merge detected. No popup during processing.")
+
+        elif doc_type == "UNKNOWN":
+            print("[DEFERRED UNKNOWN TRAINER] Popup delayed until AFTER output save.")
+
+        # Safety rule:
+        # SOA2_page2_1 and MRF_page2_1 are ambiguous/extra pages.
+        # Do NOT auto-merge them. Treat them as UNKNOWN so user can review/train.
+        if doc_type == "SOA2_page2_1":
+            doc_type = "UNKNOWN"
+            print("[UNKNOWN TRAINER] SOA2_page2_1 treated as UNKNOWN for manual review")
+
+        if doc_type == "MRF_page2_1":
+            doc_type = "UNKNOWN"
+            print("[UNKNOWN TRAINER] MRF_page2_1 treated as UNKNOWN for manual review")
+
+        # CSF is no longer used for patient folder name.
+        if doc_type == "CSF":
+            print("[INFO] CSF detected. Patient name will still use DB hperson, not CSF OCR.")
+
+        doc_type = resolve_soa_doc_type(path, text, doc_type)
+
+        if doc_type == "SOA1":
+            hospital_no = extract_hospital_no_from_soa1(text)
+
+            if hospital_no:
+                # Patient was already confirmed during FIRST PASS.
+                # Do not show confirmation popup again and do not override the confirmed patient.
+                print("[INFO] SOA1 Hospital No seen during processing:", hospital_no)
+                print("[INFO] Confirmed patient folder remains:", current_patient)
+
+        folder = os.path.join(OUTPUT_FOLDER, current_patient)
+        os.makedirs(folder, exist_ok=True)
+
+        # -------------------------
+        # CF2 PAGE MERGE
+        # -------------------------
+        if doc_type.startswith("CF2_page"):
+            saved_page = safe_move(
+                path,
+                os.path.join(folder, doc_type + ".pdf")
+            )
+
+            cf2_pages[doc_type] = saved_page
+            cf2_page_texts[doc_type] = text
+
+            print("[+] Saved CF2 page:", doc_type, "->", saved_page)
+
+            if "CF2_page1" in cf2_pages and "CF2_page2" in cf2_pages:
+                out = os.path.join(folder, "CF2.pdf")
+
+                auto_sign_cf2_page2(
+                    cf2_pages["CF2_page2"],
+                    cf2_page_texts.get("CF2_page2", text)
+                )
+
+                merge_two(
+                    cf2_pages["CF2_page1"],
+                    cf2_pages["CF2_page2"],
+                    out
+                )
+
+                if os.path.exists(cf2_pages["CF2_page1"]):
+                    os.remove(cf2_pages["CF2_page1"])
+
+                if os.path.exists(cf2_pages["CF2_page2"]):
+                    os.remove(cf2_pages["CF2_page2"])
+
+                cf2_pages = {}
+                cf2_page_texts = {}
+
+                print("[+] CF2 merged")
+
+            continue
+
+        # -------------------------
+        # PBC PAGE MERGE
+        # -------------------------
+        if doc_type.startswith("PBC_page"):
+            saved_page = safe_move(
+                path,
+                os.path.join(folder, doc_type + ".pdf")
+            )
+
+            pbc_pages[doc_type] = saved_page
+
+            print("[+] Saved PBC page:", doc_type, "->", saved_page)
+
+            if "PBC_page1" in pbc_pages and "PBC_page2" in pbc_pages:
+                page1 = pbc_pages["PBC_page1"]
+                page2 = pbc_pages["PBC_page2"]
+
+                if not os.path.exists(page1):
+                    print("[!] PBC_page1 file missing, cannot merge:", page1)
+                    continue
+
+                if not os.path.exists(page2):
+                    print("[!] PBC_page2 file missing, cannot merge:", page2)
+                    continue
+
+                out = os.path.join(folder, "PBC.pdf")
+
+                merge_two(page1, page2, out)
+
+                if os.path.exists(page1):
+                    os.remove(page1)
+
+                if os.path.exists(page2):
+                    os.remove(page2)
+
+                pbc_pages = {}
+
+                print("[+] PBC merged")
+
+            continue
+
+        # -------------------------
+        # MRF PAGE MERGE
+        # -------------------------
+        if doc_type.startswith("MRF_page"):
+            saved_page = safe_move(
+                path,
+                os.path.join(folder, doc_type + ".pdf")
+            )
+
+            mrf_pages[doc_type] = saved_page
+
+            print("[+] Saved MRF page:", doc_type, "->", saved_page)
+
+            if "MRF_page1" in mrf_pages and "MRF_page2" in mrf_pages:
+                page1 = mrf_pages["MRF_page1"]
+                page2 = mrf_pages["MRF_page2"]
+
+                if not os.path.exists(page1):
+                    print("[!] MRF_page1 file missing, cannot merge:", page1)
+                    continue
+
+                if not os.path.exists(page2):
+                    print("[!] MRF_page2 file missing, cannot merge:", page2)
+                    continue
+
+                out = os.path.join(folder, "MRF.pdf")
+
+                merge_two(page1, page2, out)
+
+                if os.path.exists(page1):
+                    os.remove(page1)
+
+                if os.path.exists(page2):
+                    os.remove(page2)
+
+                mrf_pages = {}
+
+                print("[+] MRF merged")
+
+            continue
+
+        # -------------------------
+        # SOA2 PAGE MERGE
+        # -------------------------
+        if doc_type.startswith("SOA2"):
+            saved_page = safe_move(
+                path,
+                os.path.join(folder, doc_type + ".pdf")
+            )
+
+            soa2_pages[doc_type] = saved_page
+
+            if "SOA2_page1" in soa2_pages and "SOA2_page2" in soa2_pages:
+                out = os.path.join(folder, "SOA2.pdf")
+
+                merge_two(
+                    soa2_pages["SOA2_page1"],
+                    soa2_pages["SOA2_page2"],
+                    out
+                )
+
+                if os.path.exists(soa2_pages["SOA2_page1"]):
+                    os.remove(soa2_pages["SOA2_page1"])
+
+                if os.path.exists(soa2_pages["SOA2_page2"]):
+                    os.remove(soa2_pages["SOA2_page2"])
+
+                soa2_pages = {}
+
+                print("[+] SOA2 merged")
+
+            continue
+
+        # -------------------------
+        # MULTI-PAGE APPEND DOCS
+        # DTR only. CF2 uses CF2_page1/page2 logic above.
+        # -------------------------
+        if doc_type in MULTI_PAGE:
+            out_file = os.path.join(folder, doc_type + ".pdf")
+
+            if os.path.exists(out_file):
+                merge_pdf(out_file, path)
+                print("[+] Merged ->", doc_type)
+            else:
+                safe_move(path, out_file)
+                print("[+] Created ->", doc_type)
+
+            continue
+
+        # -------------------------
+        # NORMAL SINGLE DOCS
+        # -------------------------
+        out_file = os.path.join(folder, doc_type + ".pdf")
+
+        if doc_type == "ANR" and os.path.exists(out_file):
+            make_writable(out_file)
+            os.remove(out_file)
+
+        saved = safe_move(path, out_file)
+
+        if doc_type == "CSF":
+            auto_sign_csf(saved, text)
+
+        print("[+] Saved ->", doc_type)
+
+    finalize_all_pdfs()
+
+
+process()
+
+if os.environ.get("CLAIMS_GUI_MODE") != "1":
+    input("\nDone. Press ENTER to exit...")
