@@ -93,6 +93,38 @@ def _summarize(values: tuple[str, ...]) -> str:
     return "|".join(unique)
 
 
+def encounter_field_checks(
+    expected: str,
+    state: EncounterDateState,
+) -> dict[str, bool]:
+    """Single source of truth for per-field completeness semantics.
+
+    A patient can have more than one professional fee row. Some rows are left
+    blank by design (the hospital does not date them), so empty professional
+    rows are acceptable; every non-empty row must equal ``expected``. Consent
+    and authorization must exist and match exactly.
+    """
+
+    professional_ok = (
+        any(state.professional_dates)
+        and all(
+            value == expected or not value
+            for value in state.professional_dates
+        )
+    )
+    consent_ok = bool(state.consent_dates) and all(
+        value == expected for value in state.consent_dates
+    )
+    authorization_ok = bool(state.authorization_dates) and all(
+        value == expected for value in state.authorization_dates
+    )
+    return {
+        "professional": professional_ok,
+        "consent": consent_ok,
+        "authorization": authorization_ok,
+    }
+
+
 def evaluate_post_save(
     expected_fill_date: date,
     before: PatientDateSnapshot,
@@ -115,22 +147,10 @@ def evaluate_post_save(
             and before.encounters.get(enccode) != after.encounters.get(enccode)
         )
     )
-    # A patient can have more than one professional fee row. Some rows are left
-    # blank by design (the hospital does not date them), so empty rows are
-    # acceptable; every non-empty row must still equal the expected fill date.
-    professional_ok = (
-        any(expected_state.professional_dates)
-        and all(
-            value == expected or not value
-            for value in expected_state.professional_dates
-        )
-    )
-    consent_ok = bool(expected_state.consent_dates) and all(
-        value == expected for value in expected_state.consent_dates
-    )
-    authorization_ok = bool(expected_state.authorization_dates) and all(
-        value == expected for value in expected_state.authorization_dates
-    )
+    field_checks = encounter_field_checks(expected, expected_state)
+    professional_ok = field_checks["professional"]
+    consent_ok = field_checks["consent"]
+    authorization_ok = field_checks["authorization"]
 
     if changed_other:
         reason = "Another confinement record changed: " + ", ".join(changed_other)

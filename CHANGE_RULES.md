@@ -39,6 +39,232 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-08-26 — Date Fill: skip patients whose HBSys dates are already complete (pre-check)
+
+Reason:
+
+- Kapag na-run ulit ang Date Fill sa mga pasyenteng kumpleto na ang dates sa
+  HBSys, muling pinoproseso pa rin ang buong CF2 flow. Gusto ng may-ari na
+  i-skip ang mga pasyenteng kumpleto na (eksaktong tugma sa expected fill
+  date), at i-process lang ang may kulang. Desisyon ng may-ari: eksaktong
+  tugma ang batayan; kapag 1–2 lang ang kulang, buong flow pa rin (v1);
+  testing script lang (`hbsys_fill_dates_testing.py`) ang gagalawan — hindi
+  ang production `hbsys_fill_dates.py`.
+
+Files:
+
+- Added `date_fill_hbsys/hbsys_date_fill_precheck.py` — read-only pre-check
+  module:
+  - `precheck_claim(verifier, hospital_no, admission, discharge,
+    claim_type)` → `PrecheckResult` na may decision na `SKIP` /
+    `PROCESS` / `UNRESOLVED` (+ missing fields list at reason).
+  - Reuses `resolve_exact_encounter()` + `capture_patient_snapshot()` +
+    `encounter_field_checks()` ng verifier — WALANG bagong SQL, walang
+    duplicate business logic. Expected fill date ay galing sa
+    `EncounterIdentity.target_date` (discharge para REGULAR, admission para
+    ABTC).
+  - `UNRESOLVED` kapag hindi natukoy nang eksakto ang encounter — hindi
+    sini-skip ang ambiguous match (sunod sa "never guess" rule); tuloy sa
+    normal na audited flow.
+  - May standalone self-test via `if __name__ == "__main__":` (9 pure-
+    function checks, walang DB na kailangan).
+- Modified `date_fill_hbsys/hbsys_date_fill_verifier.py` (refactor lamang):
+  - Extracted ang per-field completeness semantics sa bagong public helper
+    na `encounter_field_checks(expected, state)`; ginagamit na ngayon ito ng
+    `evaluate_post_save()` — isang source of truth para sa parehong pre-check
+    at post-save proof. Walang binago sa behavior/semantics.
+- Modified `date_fill_hbsys/hbsys_fill_dates_testing.py` (minimal):
+  - Main loop: bago ang bawat claim (kapag naka-ON ang pre-check), tawagin
+    ang `precheck_claim()`; `SKIP` → status `SKIPPED_DATES_COMPLETE`, log,
+    continue — ZERO clicks sa HBSys. `PROCESS`/`UNRESOLVED`/error sa
+    pre-check → tuloy sa normal na flow (fail-safe).
+  - Bagong CLI flag `--no-precheck` bilang escape hatch (default: ON).
+  - Run-log CSV: bagong columns `precheck`, `precheck_missing`,
+    `precheck_reason` (hiwalay na dict, hindi naaapektuhan ng audit reset ng
+    `process_claim`).
+  - Summary popups: hiwalay na bilang ng "Skipped (dates already complete)"
+    laban sa verified at failed; `failed_rows` filter ay hindi na
+    isinasama ang `SKIPPED_DATES_COMPLETE`.
+  - `describe_stop_status()`: nadagdagan ng `SKIPPED_DATES_COMPLETE`
+    description.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: lahat ng claims sa output folder ay pinoproseso nang buo kahit
+  kumpleto na ang dates sa HBSys.
+- After: bawat claim ay ni-pre-check muna gamit ang read-only DB snapshot;
+  kung eksaktong tugma lahat ng professional/consent/authorization dates sa
+  expected fill date (discharge/admission), LAKTAWAN ito nang walang kahit
+  isang click. Kapag may kulang o iba, tuloy pa rin ang dating buong flow.
+
+Safety / compatibility:
+
+- Read-only SELECTs lamang ang pre-check (parehong connection factory ng
+  verifier); walang writes sa HBSys.
+- Fail-safe: error o ambiguity sa pre-check = PROCESS (dating ugali), hindi
+  skip.
+- Hindi ginalaw: mismong click/fill sequence, production
+  `hbsys_fill_dates.py`, OCR, XML generators, Claims Checker, GUI.
+- Backward compatible: default behavior ay may pre-check pero ang resulta
+  ng non-complete claims ay kapareho ng dati; `--no-precheck` ibinabalik
+  ang lumang daloy nang buo.
+- Refactor note: ang `encounter_field_checks()` extraction ay
+  behavior-preserving (pinatunayan ng 34/34 existing verifier tests).
+
+Verification:
+
+- `python hbsys_date_fill_precheck.py` — 9/9 self-test checks PASSED.
+- Refactor regression: `python -m unittest test_hbsys_date_fill_verifier`
+  — Ran 34 tests, OK (pareho bago at pagkatapos ng refactor).
+- `python -m py_compile` sa 3 binagong/bagong files — malinis.
+- Dry-run laban sa totoong `output/` (4 claims): lahat ay nag-ulat ng
+  `PROCESS` na may tamang missing-fields list (wala pang na-fi-fill), at
+  ang CSV columns (`precheck`, `precheck_missing`, `precheck_reason`) ay
+  populado. Bug na nadetect at naayos noong development: ang unang bersyon
+  ay naglalagay ng precheck fields sa `operator.audit`, na nirereset ng
+  `process_claim()` — inilipat sa hiwalay na dict.
+- SKIP path live-data test (read-only): isang totoong encounter mula sa
+  HBSys na kumpleto ang dates (hpercode 000000000020867, dis 2026-08-23) →
+  `SKIP` decision na may tamang reason at enccode.
+- Live smoke test PENDING — i-run ng may-ari kapag handa:
+  `python hbsys_fill_dates_testing.py --live --limit 1 --confirm-each`
+  (may pre-check na ito by default).
+
+### 2026-08-26 — Production Date Fill: parehong skip-if-dates-complete pre-check
+
+Reason:
+
+- I-apply ang parehong skip-if-complete business logic ng testing Date Fill
+  sa production `hbsys_fill_dates.py` para hindi na muli iproseso ang mga
+  pasyenteng kumpleto na ang dates sa HBSys.
+
+Files:
+
+- Modified `date_fill_hbsys/hbsys_fill_dates.py` (minimal integration;
+  walang binago sa click/fill sequence):
+  - Imports mula sa `hbsys_date_fill_precheck` + `HbsysDateFillVerifier`.
+  - Main loop: bago ang bawat claim, `precheck_claim(...)` na may
+    `claim_type="REGULAR"` (production ay REGULAR lang); `SKIP` → status
+    `SKIPPED_DATES_COMPLETE`, continue — zero clicks. `PROCESS` /
+    `UNRESOLVED` / pre-check error → tuloy sa dating flow (fail-safe).
+  - Bagong CLI flag `--no-precheck` (default: ON).
+  - Run-log CSV: bagong columns `precheck`, `precheck_missing`,
+    `precheck_reason`; precheck fields ay nasa hiwalay na dict (hindi
+    naaapektuhan ng anumang audit reset).
+  - `failed_rows`: hindi na isinasama ang `SKIPPED_DATES_COMPLETE`; ang
+    "stopped" popup ay gumagamit na ng `failed_rows[-1]` (dating
+    `results[-1]`, para hindi maipakita ang skip row bilang failed).
+  - "Date Fill Complete" popup: may dagdag na "Skipped (dates already
+    complete)" count.
+  - `describe_stop_status()`: nadagdagan ng `SKIPPED_DATES_COMPLETE`.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: lahat ng claims sa output folder ay pinoproseso nang buo kahit
+  kumpleto na ang dates.
+- After: eksaktong tugma lahat ng professional/consent/authorization dates
+  sa expected fill date (discharge, REGULAR) → SKIP nang walang click; iba
+  pa → dating buong CF2 flow. Pareho ng testing script ang semantics dahil
+  iisang module (`hbsys_date_fill_precheck`) at iisang field-semantics
+  source (`encounter_field_checks`) ang ginagamit.
+
+Safety / compatibility:
+
+- Read-only SELECTs lamang; fail-safe sa error/ambiguity (PROCESS, hindi
+  skip); `--no-precheck` ibinabalik ang lumang daloy.
+- Walang binago sa click/fill/verification sequence ng production script.
+
+Verification:
+
+- `python -m py_compile date_fill_hbsys/hbsys_fill_dates.py` — malinis.
+- Dry-run laban sa totoong `output/` (2 claims): precheck columns populado
+  (`PROCESS`, tamang missing-fields list) bago pa ang normal flow. Ang
+  kasunod na `error: HBSys window not found` ay pre-existing dry-run
+  behavior kapag sarado ang HBSys — hindi kaugnay ng change na ito.
+- SKIP path at pre-check semantics: pinatunayan na sa nakaraang entry
+  (live-data test na nagresulta ng `SKIP` + 34/34 verifier tests).
+- Live smoke test PENDING — i-run ng may-ari kapag handa at bukas ang
+  HBSys.
+
+### 2026-08-26 — XML Clicker: skip folders that already have all 3 XML; generate missing kinds only
+
+Reason:
+
+- Kapag na-run ulit ang XML Clicker sa mga output folders na kumpleto na ang
+  CF4/CF5/eSOA XML, muling kino-click nito ang buong HBSys workflow at
+  posibleng mag-doble ang XML. Gusto ng may-ari na i-skip ang kumpletong
+  folders at i-process lang ang mga kulang (0, 1, o 2 XML).
+
+Files:
+
+- Added `core/xml_output_checker.py` — modular, read-only filesystem checker:
+  - `find_existing_xml_kinds(folder)` — nag-scan ng patient output folder para
+    sa `_CF4.xml` / `_CF5.xml` / `_ESOA.xml` (case-insensitive) files.
+  - `missing_xml_kinds(existing)` / `is_xml_complete(existing)` /
+    `format_kinds(kinds)` helpers.
+  - May standalone self-test via `if __name__ == "__main__":` (13 checks:
+    empty/full/partial/noisy/missing folders + helper functions).
+- Modified `date_fill_hbsys/xml_generator_clicker.py` (minimal integration):
+  - Import block: `sys.path` insert ng PROJECT_ROOT + imports mula sa
+    `core.xml_output_checker` (parehong convention sa
+    `hbsys_date_fill_verifier.py`).
+  - `process_claim(claim, kinds_to_process=None)`: bagong optional parameter;
+    default ay lahat ng 3 kinds (backward compatible); tatakbo lang ang
+    cf4/cf5/esoa actions na kasama sa requested set.
+  - Main loop: bago ang bawat claim, pre-check ng existing XML sa output
+    folder; kumpleto (3/3) → status `skipped_complete_xml`, log, continue —
+    ZERO clicks sa HBSys. Kulang → i-process LANG ang missing kinds.
+  - Post-run FTPURL verification: ang expected-kinds check ay
+    `set(pending_kinds)` na imbes na laging `{CF4,CF5,ESOA}` (para hindi
+    mag-flag ng "missing" ang mga kind na hindi hiningi).
+  - Run-log CSV: bagong columns `existing_xml` at `missing_xml`.
+  - Completion popup: hiwalay na bilang para sa skipped / completed / needs
+    review; may summary print din sa console (`Already complete (will be
+    skipped): N` / `To process: M`).
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: lahat ng claims sa `output/` ay pinoproseso nang buong
+  CF4→CF5→eSOA kahit kumpleto na; walang skip at walang partial processing.
+- After: kumpleto ang 3 XML sa output folder → SKIP (walang klik). Kulang
+  (0–2) → tanging mga kulang na XML lang ang gine-generate (hal. may CF4
+  na → CF5+eSOA lang ang i-click). Ang run log ay nagtatala na ngayon ng
+  `existing_xml`/`missing_xml` per patient at may `skipped_complete_xml`
+  status.
+
+Safety / compatibility:
+
+- Read-only filesystem checks lamang ang pre-check; walang bagong dependency.
+- Skipped patients = walang kahit isang mouse/keyboard activity sa HBSys.
+- Hindi ginalaw: production processor, OCR, signing engine, XML generator
+  internals, Claims Checker, Date Fill, GUI, `core/xml_auto_copy.py`.
+- Backward compatible: walang binagong CLI arguments; default na ugali ng
+  `process_claim` (walang parameter) ay buong 3 kinds pa rin.
+- Tandaan: ang check ay nakabatay sa patient OUTPUT folder (kung saan
+  nagko-copy ang xml_auto_copy), ayon sa napili ng may-ari — HINDI ang
+  FTPURL folder.
+
+Verification:
+
+- `python core/xml_output_checker.py` — 13/13 self-test checks PASSED
+  (kasama ang case-insensitivity fix na `_cf5.XML`; isang FAIL ang nadetect
+  at naayos noong development).
+- `python -m py_compile date_fill_hbsys/xml_generator_clicker.py
+  core/xml_output_checker.py` — malinis.
+- Dry-run laban sa totoong `output/` (5 claims): pre-check logs tama
+  (`existing=NONE | to generate=CF4+CF5+ESOA`), DRY-RUN mode, walang live click.
+- Simulated dry-run (`--ready-dir` na may 3 test folders):
+  COMPLETE (3 XML) → `SKIPPED ... (CF4+CF5+ESOA)`, walang processing;
+  EMPTY (0 XML) → buong CF4+CF5+ESOA;
+  PARTIAL (CF4 lang) → `to generate=CF5+ESOA` lang. Run-log CSV ay tama
+  ang `existing_xml`/`missing_xml`/status columns.
+- Regression: `python -m unittest tests.test_xml_auto_copy` — Ran 15 tests, OK.
+- Live smoke test PENDING — i-run ng may-ari kapag handa:
+  `python date_fill_hbsys/xml_generator_clicker.py --live --limit 1 --confirm-each`.
+
 ### 2026-08-24 — GitHub repository setup (private) + .gitignore
 
 Reason:

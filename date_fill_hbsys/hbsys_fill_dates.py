@@ -20,6 +20,12 @@ from hbsys_read_admission_history import (
     read_ocr_item_variants,
     read_ocr_items,
 )
+from hbsys_date_fill_precheck import (
+    PRECHECK_PROCESS,
+    PrecheckResult,
+    precheck_claim,
+)
+from hbsys_date_fill_verifier import HbsysDateFillVerifier
 from hbsys_ready_claims import (
     DEFAULT_READY_DIR,
     ReadyClaim,
@@ -784,6 +790,9 @@ def write_run_log(rows: list[dict[str, str]]) -> Path:
                 "output_folder_discharge",
                 "entered_discharge",
                 "discharge_date_match",
+                "precheck",
+                "precheck_missing",
+                "precheck_reason",
                 "safe_reset_confirmed",
                 "status",
             ],
@@ -866,6 +875,9 @@ def describe_stop_status(status: str) -> str:
         "needs_review_phic_beneficiaries": (
             "Could not select the correct PhilHealth Beneficiaries confinement period."
         ),
+        "SKIPPED_DATES_COMPLETE": (
+            "All required HBSys dates already match the expected fill date."
+        ),
     }
     if status.startswith("error:"):
         return status
@@ -884,6 +896,14 @@ def main() -> int:
         action="store_true",
         help="Ask before every patient. Recommended for first live run.",
     )
+    parser.add_argument(
+        "--no-precheck",
+        action="store_true",
+        help=(
+            "Disable the read-only skip-if-dates-complete pre-check and "
+            "process every claim as before."
+        ),
+    )
     args = parser.parse_args()
 
     source_dir = args.ready_dir or DEFAULT_READY_DIR
@@ -900,6 +920,7 @@ def main() -> int:
         return 0
 
     operator = HbsysOperator(live=args.live, pause=args.pause, confirm_each=args.confirm_each)
+    verifier = HbsysDateFillVerifier()
     results: list[dict[str, str]] = []
 
     print(f"Mode: {'LIVE' if args.live else 'DRY-RUN'}")
@@ -909,6 +930,49 @@ def main() -> int:
         print("Dry-run only. Add --live to actually click/type in HBSys.")
 
     for claim in claims:
+        precheck_fields: dict[str, str] = {}
+
+        if not args.no_precheck:
+            pre_result: PrecheckResult | None
+            try:
+                pre_result = precheck_claim(
+                    verifier,
+                    claim.hospital_no,
+                    datetime.strptime(claim.admission_hbsys, "%m-%d-%Y").date(),
+                    datetime.strptime(claim.discharge_hbsys, "%m-%d-%Y").date(),
+                    "REGULAR",
+                )
+            except Exception as exc:  # noqa: BLE001 - fall back to normal flow.
+                pre_result = PrecheckResult(
+                    PRECHECK_PROCESS,
+                    reason=f"precheck error, falling back to full flow: {exc}",
+                )
+            precheck_fields["precheck"] = pre_result.decision
+            precheck_fields["precheck_missing"] = "|".join(pre_result.missing_fields)
+            precheck_fields["precheck_reason"] = pre_result.reason
+
+            if pre_result.skipped:
+                status = "SKIPPED_DATES_COMPLETE"
+                print(
+                    f"[SKIP] {claim.patient_name}: dates already complete — "
+                    "no clicks needed"
+                )
+                results.append(
+                    {
+                        "patient_name": claim.patient_name,
+                        "hospital_no": claim.hospital_no,
+                        "admission": claim.admission_hbsys,
+                        "discharge": claim.discharge_hbsys,
+                        **build_cross_check_fields(claim),
+                        **precheck_fields,
+                        "status": status,
+                        "safe_reset_confirmed": "",
+                    }
+                )
+                continue
+        else:
+            precheck_fields["precheck"] = "DISABLED"
+
         try:
             status = operator.process_claim(claim)
         except KeyboardInterrupt:
@@ -924,6 +988,7 @@ def main() -> int:
                 "admission": claim.admission_hbsys,
                 "discharge": claim.discharge_hbsys,
                 **build_cross_check_fields(claim),
+                **precheck_fields,
                 "status": status,
                 "safe_reset_confirmed": "",
             }
@@ -938,13 +1003,16 @@ def main() -> int:
 
     log_path = write_run_log(results)
     print(f"Run log: {log_path.resolve()}")
+    skipped_complete_count = sum(
+        1 for row in results if row.get("status") == "SKIPPED_DATES_COMPLETE"
+    )
     failed_rows = [
         row
         for row in results
-        if row.get("status") != "done"
+        if row.get("status") not in ("done", "SKIPPED_DATES_COMPLETE")
     ]
     if failed_rows:
-        failed = results[-1]
+        failed = failed_rows[-1]
         stop_message = (
             "Date Fill stopped before completion.\n\n"
             f"Patient: {failed.get('patient_name', '')}\n"
@@ -965,7 +1033,12 @@ def main() -> int:
     open_run_log(log_path)
     show_popup(
         "Date Fill Complete",
-        f"Date Fill completed successfully.\n\nCSV log:\n{log_path.resolve()}",
+        (
+            "Date Fill completed successfully.\n\n"
+            f"Processed: {len(results) - skipped_complete_count}\n"
+            f"Skipped (dates already complete): {skipped_complete_count}\n\n"
+            f"CSV log:\n{log_path.resolve()}"
+        ),
         error=False,
     )
     return 0

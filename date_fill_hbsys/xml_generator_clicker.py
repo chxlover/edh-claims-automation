@@ -5,6 +5,7 @@ import ctypes
 import csv
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,8 +15,18 @@ import pyautogui
 from PIL import Image
 from pywinauto import Desktop
 
-from hbsys_cf4_grid_reader import find_matching_cf4_grid_row
-from hbsys_read_admission_history import (
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.xml_output_checker import (  # noqa: E402
+    REQUIRED_XML_KINDS,
+    find_existing_xml_kinds,
+    format_kinds,
+    missing_xml_kinds,
+)
+from hbsys_cf4_grid_reader import find_matching_cf4_grid_row  # noqa: E402
+from hbsys_read_admission_history import (  # noqa: E402
     DATE_RE,
     OcrItem,
     find_admission_history_window,
@@ -23,8 +34,8 @@ from hbsys_read_admission_history import (
     read_ocr_item_variants,
     read_ocr_items,
 )
-from hbsys_ready_claims import DEFAULT_READY_DIR, ReadyClaim, load_ready_claims
-from hbsys_window import is_hbsys_window, window_title
+from hbsys_ready_claims import DEFAULT_READY_DIR, ReadyClaim, load_ready_claims  # noqa: E402
+from hbsys_window import is_hbsys_window, window_title  # noqa: E402
 
 
 LOG_DIR = Path("logs")
@@ -763,23 +774,32 @@ class XmlGeneratorOperator:
         self.validate_and_generate("eSOA")
         return "done"
 
-    def process_claim(self, claim: ReadyClaim) -> str:
+    def process_claim(
+        self,
+        claim: ReadyClaim,
+        kinds_to_process: set[str] | None = None,
+    ) -> str:
+        """Generate the requested XML kinds (default: all three, CF4 first)."""
         self.log_action(
             f"processing XML for {claim.patient_name} | {claim.hospital_no} | "
-            f"ADM {claim.admission_grid} DIS {claim.discharge_grid}"
+            f"ADM {claim.admission_grid} DIS {claim.discharge_grid} | "
+            f"kinds={format_kinds(kinds_to_process or REQUIRED_XML_KINDS)}"
         )
 
         if self.confirm_each:
             input("Press Enter to process this claim, or Ctrl+C to stop...")
 
-        for label, action in (
+        requested = kinds_to_process or REQUIRED_XML_KINDS
+        for kind_label, action in (
             ("cf4", self.process_cf4),
             ("cf5", self.process_cf5),
             ("esoa", self.process_esoa),
         ):
+            if kind_label.upper() not in requested:
+                continue
             status = action(claim)
             if status != "done":
-                return f"{label}_{status}"
+                return f"{kind_label}_{status}"
         return "done"
 
 
@@ -795,6 +815,8 @@ def write_run_log(rows: list[dict[str, str]]) -> Path:
                 "admission",
                 "discharge",
                 "output_folder",
+                "existing_xml",
+                "missing_xml",
                 "ftpurl_xml_count",
                 "ftpurl_xml_files",
                 "status",
@@ -867,11 +889,49 @@ def main() -> int:
     if not args.live:
         print("Dry-run only. Add --live to actually click/type in HBSys.")
 
+    skipped_count = sum(
+        1
+        for claim in claims
+        if not missing_xml_kinds(find_existing_xml_kinds(claim.folder))
+    )
+    print(f"Already complete (will be skipped): {skipped_count}")
+    print(f"To process: {len(claims) - skipped_count}")
+
     for claim in claims:
+        existing_kinds = find_existing_xml_kinds(claim.folder)
+        pending_kinds = missing_xml_kinds(existing_kinds)
+
+        if not pending_kinds:
+            operator.log_action(
+                f"SKIPPED {claim.patient_name}: all required XML already exist in "
+                f"the output folder ({format_kinds(existing_kinds)})"
+            )
+            results.append(
+                {
+                    "patient_name": claim.patient_name,
+                    "hospital_no": claim.hospital_no,
+                    "admission": claim.admission_hbsys,
+                    "discharge": claim.discharge_hbsys,
+                    "output_folder": str(claim.folder),
+                    "existing_xml": format_kinds(existing_kinds),
+                    "missing_xml": "",
+                    "ftpurl_xml_count": "0",
+                    "ftpurl_xml_files": "",
+                    "status": "skipped_complete_xml",
+                }
+            )
+            continue
+
+        operator.log_action(
+            f"XML pre-check {claim.patient_name}: existing="
+            f"{format_kinds(existing_kinds) or 'NONE'} | "
+            f"to generate={format_kinds(pending_kinds)}"
+        )
+
         ftpurl_before = collect_ftpurl_xml_snapshot()
         changed_xml_files: list[str] = []
         try:
-            status = operator.process_claim(claim)
+            status = operator.process_claim(claim, kinds_to_process=pending_kinds)
         except KeyboardInterrupt:
             raise
         except Exception as exc:  # noqa: BLE001 - operator log should continue.
@@ -883,20 +943,20 @@ def main() -> int:
 
         if status.startswith("error:") and changed_xml_files:
             xml_kinds = detected_xml_kinds(changed_xml_files)
-            missing_kinds = {"CF4", "CF5", "ESOA"} - xml_kinds
-            if not missing_kinds:
+            still_missing = set(pending_kinds) - xml_kinds
+            if not still_missing:
                 status = "done_with_warning"
                 operator.log_action(
-                    "A dialog/window warning occurred, but all XML outputs were detected."
+                    "A dialog/window warning occurred, but all requested XML outputs were detected."
                 )
         elif status == "done":
             xml_kinds = detected_xml_kinds(changed_xml_files)
-            missing_kinds = {"CF4", "CF5", "ESOA"} - xml_kinds
-            if missing_kinds:
-                status = "missing_xml_outputs:" + ",".join(sorted(missing_kinds))
+            still_missing = set(pending_kinds) - xml_kinds
+            if still_missing:
+                status = "missing_xml_outputs:" + ",".join(sorted(still_missing))
                 operator.log_action(
-                    "XML workflow ended but required FTPURL output is missing: "
-                    + ", ".join(sorted(missing_kinds))
+                    "XML workflow ended but requested FTPURL output is missing: "
+                    + ", ".join(sorted(still_missing))
                 )
         if status == "done" and not changed_xml_files:
             status = "done_no_ftpurl_xml_detected"
@@ -916,6 +976,8 @@ def main() -> int:
                 "admission": claim.admission_hbsys,
                 "discharge": claim.discharge_hbsys,
                 "output_folder": str(claim.folder),
+                "existing_xml": format_kinds(existing_kinds),
+                "missing_xml": format_kinds(pending_kinds),
                 "ftpurl_xml_count": str(len(changed_xml_files)),
                 "ftpurl_xml_files": format_changed_files(changed_xml_files),
                 "status": status,
@@ -931,11 +993,15 @@ def main() -> int:
         done_count = sum(
             1 for row in results if row.get("status", "").startswith("done")
         )
+        skipped_count = sum(
+            1 for row in results if row.get("status") == "skipped_complete_xml"
+        )
         show_completion_popup(
             "XML Generator Clicker finished.\n\n"
-            f"Claims processed: {len(results)}\n"
+            f"Claims checked: {len(results)}\n"
+            f"Skipped (already complete): {skipped_count}\n"
             f"Completed: {done_count}\n"
-            f"Needs review/errors: {len(results) - done_count}\n\n"
+            f"Needs review/errors: {len(results) - done_count - skipped_count}\n\n"
             f"Run log:\n{log_path.resolve()}"
         )
     else:
