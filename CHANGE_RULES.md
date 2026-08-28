@@ -1556,3 +1556,261 @@ Safety and compatibility:
 Verification:
 
 - Confirmed the rule is referenced by the project's agent instructions.
+
+### 2026-08-28 — Add Claims Upload Automation (eClaims Upload Claims loop)
+
+Reason:
+
+- Automate the manual eClaims Upload Claims workflow: searching patients from the
+  READY folder, verifying confinement periods against folder names, and checking
+  checkboxes before batch submission. Previously this was done manually per patient.
+
+Files:
+
+- Added `core/add_claims_state.py` — persistent batch state (filesystem-based, resumable).
+- Added `core/add_claims_verifier.py` — confinement period verification (folder vs OCR).
+- Added `core/add_claims_ocr.py` — highlighted row OCR reader for Upload Claims popup.
+- Added `core/add_claims_uploader.py` — main loop controller (orchestrates steps 1–7).
+
+Behavior:
+
+- Before: User manually types each patient name, clicks Search, visually confirms
+  confinement match, checks the checkbox, and repeats for every READY patient.
+- After: Script reads all patient folders from READY, automates the search-verify-check
+  loop for each patient, then clicks Add → OK → Close. State is persisted to
+  `logs/add_claims_upload_state.json` so interrupted batches can be resumed.
+
+Safety and compatibility:
+
+- Dry-run mode by default (no clicks). Must pass `--live` to actually interact with
+  HBSys.
+- Stops after 3 consecutive confinement mismatches (guardrail).
+- Never modifies the READY folder or patient data — read-only folder scan.
+- State file is separate from production databases.
+- Existing Date Fill, XML generators, and Claims Checker are not affected.
+
+Verification:
+
+- All four modules pass `python -m` standalone test execution.
+- Folder name parsing tested with valid and invalid formats.
+- Confinement verification tested with matching and mismatching date pairs.
+- OCR module tested with screenshot input.
+- Uploader module tested in dry-run mode.
+- Python compilation passed for all new modules.
+
+### 2026-08-28 — Add Claims Upload GUI Tab
+
+Reason:
+
+- Integrate the Add Claims Upload automation into the main EDH Claims GUI for
+  easy access. Users can now run the upload from the GUI instead of the command line.
+
+Files:
+
+- Added `gui/add_claims_upload_tab.py` — new GUI tab with patient list, controls,
+  and upload log.
+- Modified `edh_claims_gui_XML_COPY_BUTTON.py` — added import, notebook tab, build
+  method, and dashboard button.
+
+Behavior:
+
+- New "Add Claims Upload" tab in the main notebook with:
+  - Ready folder selector (browse/refresh)
+  - Dry-run/Live mode radio buttons
+  - Confirm-each-patient checkbox
+  - Patient list table with status column
+  - Start/Stop/Resume buttons
+  - Progress bar and upload log
+- Dashboard button "Add Claims Upload" added to quick actions grid.
+- Tab opens the AddClaimsUploadFrame with real-time upload progress.
+
+Safety and compatibility:
+
+- Dry-run mode is default (no clicks).
+- Live mode requires user confirmation before starting.
+- Stop button allows graceful shutdown after current patient.
+- Existing tabs and functionality are unaffected.
+
+Verification:
+
+- Python compilation passed for both modified and new files.
+- GUI tab loads correctly with patient list from READY folder.
+
+### 2026-08-28 — Add Claims Upload Coordinate Calibration
+
+Reason:
+
+- The eClaims Upload Claims popup position can vary based on window placement.
+  A calibration utility helps detect the actual popup position and allows
+  interactive coordinate adjustment for reliable automation.
+
+Files:
+
+- Added `core/add_claims_calibration.py` — interactive calibration utility.
+- Modified `core/add_claims_uploader.py` — loads calibrated coordinates from
+  calibration file, added --calibrate and --detect CLI options.
+
+Behavior:
+
+- New calibration utility can:
+  - Detect Upload Claims popup window position
+  - Capture annotated screenshot showing coordinate points
+  - Allow interactive coordinate adjustment
+  - Save calibration to `logs/add_claims_calibration.json`
+- Uploader loads calibrated coordinates at startup (falls back to defaults).
+- CLI options: --calibrate (run calibration), --detect (detect popup only).
+
+Safety and compatibility:
+
+- Calibration is read-only (no clicks during detection).
+- Interactive calibration requires user input.
+- Default coordinates preserved for 1920x1080 screens.
+- Existing automation workflow unaffected.
+
+Verification:
+
+- Python compilation passed for new module.
+- Calibration file loads correctly.
+- Uploader uses calibrated coordinates when available.
+
+### 2026-08-28 — Add Claims Upload GUI Calibration Button
+
+Reason:
+
+- Add convenience buttons to the Add Claims Upload GUI tab for running
+  coordinate calibration and detecting popup position without command line.
+
+Files:
+
+- Modified `gui/add_claims_upload_tab.py` — added Calibrate Coordinates and
+  Detect Popup buttons with corresponding methods.
+
+Behavior:
+
+- New "Calibrate Coordinates" button opens the calibration utility in a
+  separate process.
+- New "Detect Popup" button runs popup detection and shows results in
+  the upload log.
+- Both buttons are placed after the Resume Batch button with a separator.
+
+Safety and compatibility:
+
+- Calibration runs in a separate process (non-blocking).
+- Detection has a 10-second timeout to prevent hanging.
+- Existing upload functionality unaffected.
+
+Verification:
+
+- Python compilation passed for modified file.
+- Buttons appear in correct position in the GUI tab.
+
+### 2026-08-28 — Interactive Coordinate Getter Tool
+
+Reason:
+
+- Need an easy way to capture exact screen coordinates for UI elements.
+  The coordinate getter provides a visual, interactive way to click on
+  elements and capture their positions for calibration.
+
+Files:
+
+- Added `core/coordinate_getter.py` — interactive coordinate getter GUI.
+- Modified `gui/add_claims_upload_tab.py` — added Coordinate Getter button.
+
+Behavior:
+
+- New "Coordinate Getter" button in Add Claims Upload tab opens the tool.
+- Tool captures screen and displays it in a scrollable window.
+- User clicks on elements to capture their coordinates.
+- Each point gets a label and is saved to a list.
+- Points can be copied to clipboard, saved to JSON, or deleted.
+- Coordinates are captured in original screen resolution.
+
+Safety and compatibility:
+
+- Tool runs in a separate process (non-blocking).
+- No modifications to system or automation files.
+- Coordinates saved to `logs/captured_coordinates.json`.
+- Existing functionality unaffected.
+
+Verification:
+
+- Python compilation passed for new module.
+- Button appears in GUI tab.
+- Tool launches correctly from GUI.
+
+### 2026-08-28 — Calibration Update: Close Button + CF4 Checkbox Logic
+
+Reason:
+
+- User calibrated the coordinates and found:
+  - Close button X is at absolute coordinate 1456 (not relative offset)
+  - Checkbox coordinates change dynamically based on row position
+  - Should use CF4-style blue band detection for checkbox (same as XML Clicker)
+
+Files:
+
+- Modified `logs/add_claims_calibration.json` — updated with calibrated coordinates.
+- Modified `core/add_claims_calibration.py` — updated defaults and close button fields.
+- Modified `core/add_claims_uploader.py` — updated P class, checkbox logic, close button.
+
+Behavior:
+
+- Close button now uses absolute screen coordinates (1456, 12) instead of relative offset.
+- Checkbox detection uses CF4-style blue band + dark pixel detection:
+  1. Find blue highlighted rows in the grid
+  2. Detect the widest blue band (the search result)
+  3. Find dark pixels (checkbox) in that row area
+  4. Click the center of detected checkbox
+- Fallback to GRID_CHECKBOX_X if no dark pixels detected.
+- All coordinates updated from user calibration.
+
+Safety and compatibility:
+
+- Checkbox detection is read-only (screenshot + pixel analysis).
+- Fallback mechanism preserved for reliability.
+- Existing upload workflow unaffected.
+
+Verification:
+
+- Python compilation passed for modified files.
+- Calibration file loads correctly.
+- Close button coordinates match user calibration.
+
+### 2026-08-28 — Fix Checkbox Detection: Blue Band Y Coordinate
+
+Reason:
+
+- Live test showed checkbox was not being clicked because:
+  1. Blue band detection was returning the HEADER band (y=153) instead of the DATA band (y=406)
+  2. Code was scanning x=0+ for blue pixels, but the Include column (checkbox) is NOT highlighted
+  3. The blue highlight only appears on data columns (x=400+)
+
+Files:
+
+- Modified `core/add_claims_uploader.py`:
+  - `_find_highlight_row_y()`: Changed to scan x=400-1500 (data columns only)
+  - Added band grouping logic to find the WIDEST band in data area (y > 300)
+  - Updated `_checkbox_looks_checked()` with improved pixel analysis
+  - Added verbose logging for debugging
+
+Behavior:
+
+- Before: Code found blue band at y=153 (header), clicked checkbox at wrong Y
+- After: Code finds blue band at y=406 (data row), clicks checkbox at correct Y
+- The Include column (checkbox) is at x=8-12, NOT highlighted
+- The data columns (Patient Name, etc.) are at x=400+, highlighted blue
+- Checkbox center is at x=10 (light interior), y=406 (blue band center)
+
+Safety and compatibility:
+
+- Blue band detection is read-only (screenshot + pixel analysis)
+- Fallback to first data row if no blue band detected
+- Existing upload workflow unaffected
+
+Verification:
+
+- Python compilation passed
+- Dry-run test: 4/4 patients processed successfully
+- Blue band detection correctly identifies data row at y=406
+- Checkbox pattern verified: x=10 has light interior (240,240,240)

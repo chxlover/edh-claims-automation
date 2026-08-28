@@ -25,6 +25,7 @@ from core.xml_auto_copy import (
 from gui.not_transmitted_batches_tab import NotTransmittedBatchesFrame
 from gui.pdf_compressor_tab import PDFCompressorFrame
 from gui.pdf_splitter_gui import PdfSplitterFrame
+from gui.add_claims_upload_tab import AddClaimsUploadFrame
 from date_fill_hbsys.hbsys_window import find_hbsys_window
 
 BASE_DIR = r"C:\claims_bot"
@@ -1389,6 +1390,8 @@ class EDHClaimsGUI(tk.Tk):
         self.notebook.add(self.esign_tab, text="PDF E-Sign")
         self.notebook.add(self.pdf_compressor_tab, text="PDF Compress")
         self.notebook.add(self.pdf_splitter_tab, text="PDF Split")
+        self.add_claims_upload_tab = ttk.Frame(self.notebook, padding=4)
+        self.notebook.add(self.add_claims_upload_tab, text="Add Claims Upload")
         self.notebook.add(self.settings_tab, text="Preferences")
         self.notebook.add(self.about_tab, text="About")
 
@@ -1399,6 +1402,7 @@ class EDHClaimsGUI(tk.Tk):
         self.build_esign_tab()
         self.build_pdf_compressor_tab()
         self.build_pdf_splitter_tab()
+        self.build_add_claims_upload_tab()
         self.build_settings_tab()
         self.build_about_tab()
 
@@ -1579,6 +1583,13 @@ class EDHClaimsGUI(tk.Tk):
             6,
             0,
         )
+        add_grid_button(
+            quick_actions,
+            "Add Claims Upload",
+            lambda: self.notebook.select(self.add_claims_upload_tab),
+            6,
+            1,
+        )
 
         self.hbsys_warning_label = tk.Label(
             actions,
@@ -1714,6 +1725,15 @@ class EDHClaimsGUI(tk.Tk):
     def build_not_transmitted_tab(self):
         frame = NotTransmittedBatchesFrame(
             self.not_transmitted_tab,
+            settings_getter=lambda: self.settings,
+            log_callback=self.log,
+        )
+        frame.pack(fill="both", expand=True)
+
+
+    def build_add_claims_upload_tab(self):
+        frame = AddClaimsUploadFrame(
+            self.add_claims_upload_tab,
             settings_getter=lambda: self.settings,
             log_callback=self.log,
         )
