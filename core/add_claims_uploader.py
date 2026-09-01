@@ -356,14 +356,15 @@ class AddClaimsOperator:
         self.log_action(f"verification result: {result.summary}")
         return result
 
-    def click_checkbox_of_highlighted_row(self) -> bool:
+    def click_checkbox_of_highlighted_row(self, patient_name: str = "") -> bool:
         """Click the checkbox of the highlighted (selected) search result row.
 
-        Strategy ("Include" text + blue band):
+        Strategy:
         1. Capture full-screen screenshot via pyautogui
         2. Find "Include" header text → X position of checkbox column
-        3. Find blue highlighted row → Y position of row
-        4. Click at (include_center_x, blue_band_center_y)
+        3. Find blue highlighted row → Y position of row (primary)
+        4. If no blue band → OCR grid to find patient row by name (fallback)
+        5. Click at (include_center_x, row_y)
         """
         if not self.live:
             self.log_action("would click checkbox of highlighted row")
@@ -384,8 +385,14 @@ class AddClaimsOperator:
 
         # Step 3: Find blue highlighted row → row Y
         row_y = self._find_highlighted_row_y(screenshot)
+
+        # Step 3b: Fallback — if no blue band, OCR grid to find patient row
+        if row_y is None and patient_name:
+            self.log_action("no blue band detected, trying OCR fallback...")
+            row_y = self._find_row_by_ocr(screenshot, patient_name)
+
         if row_y is None:
-            self.log_action("could not detect highlighted row via blue band")
+            self.log_action("could not detect row position (no blue band, no OCR match)")
             return False
         self.log_action(f"highlighted row center y={row_y:.0f}")
 
@@ -550,6 +557,87 @@ class AddClaimsOperator:
         )
         return screen_x
 
+    def _find_row_by_ocr(self, screenshot: Image.Image, patient_name: str) -> float | None:
+        """Find Y position of a patient row by OCR when no blue highlight is detected.
+
+        Crops the popup grid area, OCRs it with pytesseract image_to_data,
+        and searches for the patient name. Returns the screen Y coordinate
+        of the matching row, or None if not found.
+        """
+        # Get popup rect
+        popup_left = 0
+        popup_top = 0
+        if self.popup_window is not None:
+            try:
+                rect = self.popup_window.rectangle()
+                popup_left = rect.left
+                popup_top = rect.top
+            except Exception:
+                pass
+
+        # Grid area: below column headers (y=50 local), above Add button (y=460 local)
+        grid_top = popup_top + 55
+        grid_bottom = popup_top + 460
+        grid_left = popup_left + 5
+        grid_right = popup_left + 1000
+
+        # Crop grid area from full screenshot
+        grid_crop = screenshot.crop((
+            max(0, grid_left),
+            max(0, grid_top),
+            min(screenshot.width, grid_right),
+            min(screenshot.height, grid_bottom),
+        ))
+        self.log_action(
+            f"OCR fallback: cropped grid area ({grid_left},{grid_top})-"
+            f"({grid_right},{grid_bottom}) size={grid_crop.width}x{grid_crop.height}"
+        )
+
+        # OCR with image_to_data to get word positions
+        try:
+            import pytesseract
+            data = pytesseract.image_to_data(
+                grid_crop, output_type=pytesseract.Output.DICT
+            )
+        except ImportError:
+            self.log_action("OCR fallback: pytesseract not installed")
+            return None
+        except Exception as exc:
+            self.log_action(f"OCR fallback: pytesseract failed: {exc}")
+            return None
+
+        # Search for patient name parts in OCR output
+        name_parts = [
+            p for p in patient_name.upper().replace(",", "").split() if len(p) > 2
+        ]
+        self.log_action(f"OCR fallback: searching for parts {name_parts}")
+
+        best_y: float | None = None
+        best_score = 0
+
+        for i, text in enumerate(data["text"]):
+            text_upper = text.upper().strip()
+            if not text_upper:
+                continue
+
+            # Score: count how many name parts appear in this word
+            score = sum(1 for part in name_parts if part in text_upper)
+            if score > best_score:
+                best_score = score
+                word_top = data["top"][i]
+                word_height = data["height"][i]
+                best_y = float(grid_top + word_top + word_height // 2)
+
+        if best_y is not None and best_score > 0:
+            self.log_action(
+                f"OCR fallback: found patient at y={best_y:.0f} "
+                f"(score={best_score}/{len(name_parts)})"
+            )
+            return best_y
+
+        self.log_action(f"OCR fallback: patient name not found in grid")
+        return None
+
     def clear_search_box(self) -> None:
         """Clear the search box for the next patient."""
         self.double_click(P.SEARCH_BOX, "Search Box (clear)", local=True)
@@ -685,7 +773,7 @@ def run_upload_loop(
             print(f"  [INFO] verification: {verify_result.reason or 'mismatch'} (clicking anyway)")
 
         # Step 4c: Click checkbox of highlighted row (always, regardless of verification)
-        if not operator.click_checkbox_of_highlighted_row():
+        if not operator.click_checkbox_of_highlighted_row(patient.patient_name):
             consecutive_failures += 1
             state.mark_failed(patient.patient_name, "checkbox click failed")
             state.save()

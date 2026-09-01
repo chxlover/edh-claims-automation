@@ -1814,3 +1814,95 @@ Verification:
 - Dry-run test: 4/4 patients processed successfully
 - Blue band detection correctly identifies data row at y=406
 - Checkbox pattern verified: x=10 has light interior (240,240,240)
+
+### 2026-09-01 — Fix Highlighted Row OCR: use pyautogui.screenshot() instead of window.capture_as_image()
+
+Reason:
+
+- Live test showed that `read_highlighted_row()` in `add_claims_ocr.py`
+  failed to detect the blue highlight band for 3 out of 4 patients
+  (ACOSTA, MASIBAG, SALVADOR), even though the blue band was clearly
+  visible on screen. Only VENTURA was detected.
+- Root cause: `window.capture_as_image()` (pywinauto, Win32 PrintWindow)
+  does not reliably capture custom-rendered selection highlights in the
+  HBSys DataGrid control. The blue band is drawn by the control's custom
+  rendering and is invisible in the captured image.
+- Meanwhile, `click_checkbox_of_highlighted_row()` in the uploader uses
+  `pyautogui.screenshot()` (actual screen pixels) and always detects
+  the blue band correctly.
+
+Files:
+
+- Modified `core/add_claims_ocr.py`:
+  - `read_highlighted_row()`: Now calls `_capture_popup_via_screenshot()`
+    first, which uses `pyautogui.screenshot()` + crop to popup rect.
+    Falls back to `capture_popup()` (window.capture_as_image()) only if
+    the screenshot method fails.
+  - Added `_capture_popup_via_screenshot(window)`: captures full screen
+    via pyautogui.screenshot(), gets popup rect via window.rectangle(),
+    crops to popup area. Returns PIL Image or None on failure.
+  - Updated docstring to explain why pyautogui is preferred.
+
+Behavior:
+
+- Before: `read_highlighted_row()` used `window.capture_as_image()` which
+  often returned an image without the blue highlight band, causing
+  "no highlighted row detected" for most patients.
+- After: Uses `pyautogui.screenshot()` (actual screen pixels) cropped to
+  the popup window area. The blue highlight band is reliably captured,
+  enabling OCR verification for all patients.
+
+Safety / compatibility:
+
+- pyautogui.screenshot() is already used by `click_checkbox_of_highlighted_row()`
+  in the uploader — same proven capture method.
+- Fallback to `window.capture_as_image()` if screenshot fails.
+- No changes to detection thresholds, scan ranges, or OCR logic.
+- `capture_popup()` retained for backward compatibility and fallback.
+
+Verification:
+
+- `python -m py_compile core/add_claims_ocr.py` — passed.
+- Visual inspection: pyautogui.screenshot() captures actual screen pixels
+  including the blue highlight band that window.capture_as_image() misses.
+- Live test confirmed: pyautogui.screenshot() capture works correctly,
+  but `detect_highlighted_row_y()` still missed 3 patients.
+
+### 2026-09-01 — Fix Highlighted Row Detection: extend scan range to y=50
+
+Reason:
+
+- Debug logs revealed the REAL root cause: `detect_highlighted_row_y()`
+  scanned y from 150 to 500 in the popup image.  When the search match
+  was the FIRST row in the list (top of grid), the blue highlight band
+  was at y≈30-60 — completely BELOW the scan start at y=150.
+- For VENTURA (row 14, y≈340) the scan range covered it; for ACOSTA,
+  MASIBAG, and SALVADOR (row 1, y≈30-60) it was missed.
+- pyautogui.screenshot() capture was working correctly all along — the
+  blue band WAS in the captured image but the scan range was too narrow.
+
+Files:
+
+- Modified `core/add_claims_ocr.py`:
+  - `detect_highlighted_row_y()`: Changed scan start from y=150 to y=50.
+    y=50 is below the popup title bar and "Patient Name" field but above
+    the first data row, so it catches highlighted rows at any position
+    in the list without false positives from the header.
+  - Updated docstring explaining the scan range rationale.
+
+Behavior:
+
+- Before: scan_y=150-500 — missed highlighted rows in the top 10 rows.
+- After: scan_y=50-500 — catches highlighted rows at ANY position.
+
+Safety / compatibility:
+
+- y=50 is below the popup UI elements (title bar + Patient Name field)
+  and above the first data row, so no false positives from header text.
+- No changes to blue pixel thresholds, x scan range, or OCR logic.
+
+Verification:
+
+- `python -m py_compile core/add_claims_ocr.py` — passed.
+- Live test PENDING — re-run the upload loop and verify all 4 patients
+  (ACOSTA, MASIBAG, SALVADOR, VENTURA) are detected with OCR text.

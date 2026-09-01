@@ -524,7 +524,7 @@ class AddClaimsUploadFrame(ttk.Frame):
                     continue
 
                 # Click checkbox
-                if not operator.click_checkbox_of_highlighted_row():
+                if not operator.click_checkbox_of_highlighted_row(patient.patient_name):
                     self.state.mark_failed(patient.patient_name, "checkbox click failed")
                     self.state.save()
                     self.after(

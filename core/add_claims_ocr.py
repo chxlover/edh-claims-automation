@@ -123,19 +123,29 @@ def detect_highlighted_row_y(image: Image.Image) -> Optional[float]:
 
     Returns local y-coordinate or None if no highlight is found.
     The blue highlight is on data columns (x=468+), NOT on Include column.
+
+    Note: scan starts at y=50 to catch highlighted rows at the TOP of the
+    list (e.g. when the search match is the first row).  y=50 is below the
+    popup title bar and "Patient Name" field.
     """
     width, height = image.size
 
     # Scan rows for blue pixels — the highlight band is a horizontal stripe
     # Scan x=400+ to find the blue band on data columns
+    # Start at y=50 to catch top-of-list highlighted rows (below header)
     blue_rows: list[int] = []
-    for y in range(150, min(height, 500)):  # grid area
+    scan_start = 50
+    for y in range(scan_start, min(height, 500)):  # grid area
         blue_count = 0
         for x in range(400, min(width, 1500), 6):  # data columns area
             if _is_blue_band(image.getpixel((x, y))):
                 blue_count += 1
         if blue_count >= 10:
             blue_rows.append(y)
+
+    print(f"[OCR DEBUG] detect_highlighted_row_y: image={width}x{height}, blue_rows_found={len(blue_rows)}, scan_y={scan_start}-{min(height, 500)}, scan_x=400-{min(width, 1500)}")
+    if blue_rows:
+        print(f"[OCR DEBUG] blue row y-values: {blue_rows[:10]}{'...' if len(blue_rows) > 10 else ''}")
 
     if not blue_rows:
         return None
@@ -189,17 +199,27 @@ def read_highlighted_row(
 ) -> Optional[HighlightedRow]:
     """Read the highlighted search result row from the Upload Claims popup.
 
-    If *window* is provided, captures a fresh screenshot.
+    If *window* is provided, captures a fresh screenshot via pyautogui
+    (full-screen capture cropped to popup rect).  This is more reliable
+    than window.capture_as_image() which often fails to capture custom-
+    rendered selection highlights (blue band) in Win32 DataGrid controls.
+
     If *popup_path* is provided, reads from an existing screenshot.
     Returns None when no highlight is detected.
     """
     if popup_path is not None:
         image = Image.open(popup_path)
     elif window is not None:
-        path = capture_popup(window)
-        if path is None:
-            return None
-        image = Image.open(path)
+        image = _capture_popup_via_screenshot(window)
+        if image is None:
+            print("[OCR DEBUG] pyautogui screenshot failed, falling back to window.capture_as_image()")
+            # Fallback to window.capture_as_image()
+            path = capture_popup(window)
+            if path is None:
+                return None
+            image = Image.open(path)
+        else:
+            print("[OCR DEBUG] using pyautogui screenshot for OCR")
     else:
         return None
 
@@ -217,6 +237,39 @@ def read_highlighted_row(
         x_start=0,
         x_end=image.size[0],
     )
+
+
+def _capture_popup_via_screenshot(window: object) -> Optional[Image.Image]:
+    """Capture the popup window using pyautogui.screenshot() + crop.
+
+    pyautogui.screenshot() captures actual screen pixels (including custom-
+    rendered blue highlights), unlike window.capture_as_image() which uses
+    Win32 PrintWindow and often misses selection bands.
+    """
+    try:
+        import pyautogui
+        rect = window.rectangle()  # type: ignore[union-attr]
+    except Exception as exc:
+        print(f"[OCR DEBUG] _capture_popup_via_screenshot: failed to get rect: {exc}")
+        return None
+
+    try:
+        screen = pyautogui.screenshot()
+        image = screen.crop((
+            max(0, rect.left),
+            max(0, rect.top),
+            min(screen.width, rect.right),
+            min(screen.height, rect.bottom),
+        ))
+        # DEBUG: save captured image for inspection
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        debug_path = LOG_DIR / f"ocr_capture_{datetime.now():%Y%m%d_%H%M%S}.png"
+        image.save(debug_path)
+        print(f"[OCR DEBUG] captured popup via pyautogui: {image.size} saved to {debug_path}")
+        return image
+    except Exception as exc:
+        print(f"[OCR DEBUG] _capture_popup_via_screenshot: failed: {exc}")
+        return None
 
 
 def read_highlighted_row_text(window: object) -> str:
