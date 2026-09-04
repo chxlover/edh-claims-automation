@@ -322,6 +322,8 @@ For production:
 | `soa2_resolver.py` / `document_type_decisions.py` / `claims_requirement_rules.py` | Document classification & requirements |
 | `xml_auto_copy.py` | Background auto-copy of stable XML files |
 | `pdf_compressor.py` | Safe PDF/A compression |
+| `attachments_state.py` / `claim_attachments_uploader.py` | Claim Attachments automation (HBSys attach workflow, resumable batch state) |
+| `claim_attachments_doc_type.py` | Doc Type assignment for attached files (3-pass OCR: normal + inverted + blue-band; folder-driven matching; never-guess ABORT policy) |
 | `visual_document_learner.py` | Privacy-preserving visual layout learning (shadow mode) |
 | `verification_panel_service.py` / `patient_correction_service.py` / `review_staging.py` | Verification & correction support |
 | `backup_auditor.py` / `not_transmitted_batches.py` | Audit & batch completeness |
@@ -348,6 +350,18 @@ Located in `date_fill_hbsys/`:
 **Critical HBSys requirements:** HBSys open & maximized · 1920×1080 at 100% scaling · do not touch mouse/keyboard during live automation · start on the Billing screen with Hospital No. input visible.
 
 **Date Fill behavior:** for each output folder → enter hospital number → Admit History → select matching confinement (ADMIT row preferred) → PHIC Beneficiaries → Claim Form 2 → Professional Fees **first row** → Consent → fill dates with **discharge date** → save → verify via read-only DB check.
+
+---
+
+## Claim Attachments Upload
+
+GUI tab "Claim Attachments" (or CLI: `python -m core.claim_attachments_uploader [--live] [--confirm-each] [--limit N] [--resume]`).
+
+Per patient in `claims_checker_results/READY/`: search patient → click "attach..." on the highlighted row → attach all folder files (PDFs first) → attach XMLs (Files of type: XML) → **assign Doc Type per grid row** → Upload → OK (Enter) → Close → next patient.
+
+**Doc Type step (v4.3 — live tested & working):** the attachments grid is OCR'd in 4 passes (normal, colour-inverted, a targeted pass on the blue auto-selected row with manual binarization, and per-row-band passes on separator-delimited rows); readings are merged by quality with a stem-gain rule; each grid line is matched 1:1 to a patient-folder file via three tiers (strict stem+extension, loose stem, 1-edit mutated stem). Mapping: `\COE.pdf`→COE, `\CSF.pdf`→CSF, `\DTR.pdf`→DTR, `\SOA1.pdf`/`\SOA2.pdf`→SOA, `\MRF.pdf`→MRF, `\PBC.pdf`→PBC, `\MMC.pdf`→MMC, `\OPR.pdf`→OPR, `\ANR.pdf`→ANR, `\CF3.pdf`→CF3, `\CF2.pdf`→CF2, `_CF4.xml`→CF4, `_CF5.xml`→CF5, `_eSOA.xml`→ESA.
+
+**Never-guess policy:** any unmatched/ambiguous/duplicate row, or files hidden below the scroll area → ABORT before Upload (patient marked FAILED, nothing wrong is typed into HBSys). A `logs/debug_doc_grid_*.png` screenshot is saved every run for diagnosis; the standalone test suite replays the latest debug crops as regression cases.
 
 ---
 

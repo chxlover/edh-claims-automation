@@ -1,8 +1,8 @@
-"""Add Claims Upload GUI Tab.
+"""Claim Attachments Upload GUI Tab.
 
-Provides a Tkinter frame for the eClaims Upload Claims automation.
+Provides a Tkinter frame for the Claim Attachments Upload automation.
 Displays the patient list from READY, allows dry-run/live mode selection,
-and shows real-time upload progress.
+and shows real-time attachment progress.
 
 Integrated into the main EDH Claims GUI as a notebook tab.
 """
@@ -23,20 +23,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.add_claims_uploader import (
-    AddClaimsOperator,
+from core.claim_attachments_uploader import (
+    AttachmentsOperator,
+    build_folder_path,
     load_patients,
-    run_upload_loop,
+    run_attachments_loop,
 )
-from core.add_claims_state import UploadState
+from core.attachments_state import AttachmentsState
 from core.add_claims_verifier import FolderDates
 
 
 DEFAULT_READY_DIR = Path(r"C:\claims_bot\claims_checker_results\READY")
 
 
-class AddClaimsUploadFrame(ttk.Frame):
-    """GUI frame for the Add Claims Upload automation."""
+class ClaimAttachmentsFrame(ttk.Frame):
+    """GUI frame for the Claim Attachments Upload automation."""
 
     def __init__(
         self,
@@ -48,7 +49,7 @@ class AddClaimsUploadFrame(ttk.Frame):
         self.settings_getter = settings_getter
         self.log_callback = log_callback or (lambda msg: None)
         self.patients: list[FolderDates] = []
-        self.state = UploadState()
+        self.state = AttachmentsState()
         self.upload_thread: Optional[threading.Thread] = None
         self.stop_requested = False
 
@@ -63,13 +64,13 @@ class AddClaimsUploadFrame(ttk.Frame):
 
         ttk.Label(
             header,
-            text="Add Claims Upload",
+            text="Claim Attachments",
             font=("Segoe UI", 16, "bold"),
         ).pack(side="left")
 
         ttk.Label(
             header,
-            text="Automate eClaims Upload Claims for READY patients",
+            text="Attach documents (PDFs + XMLs) to patient claims in HBSys",
             style="PanelMuted.TLabel",
         ).pack(side="left", padx=16)
 
@@ -127,7 +128,7 @@ class AddClaimsUploadFrame(ttk.Frame):
 
         self.start_btn = ttk.Button(
             btn_row,
-            text="Start Upload",
+            text="Start Attachments",
             style="Primary.TButton",
             command=self.start_upload,
         )
@@ -148,13 +149,6 @@ class AddClaimsUploadFrame(ttk.Frame):
             command=self.resume_upload,
         )
         self.resume_btn.pack(side="left", padx=(8, 0))
-
-        self.coord_getter_btn = ttk.Button(
-            btn_row,
-            text="Coordinate Getter",
-            command=self.open_coordinate_getter,
-        )
-        self.coord_getter_btn.pack(side="left", padx=(20, 0))
 
         # -- Patient list --------------------------------------------------
         list_frame = ttk.LabelFrame(self, text="Patients from READY Folder", padding=8)
@@ -192,7 +186,7 @@ class AddClaimsUploadFrame(ttk.Frame):
         self.progress.pack(fill="x", pady=(8, 0))
 
         # -- Status log ----------------------------------------------------
-        log_frame = ttk.LabelFrame(self, text="Upload Log", padding=8)
+        log_frame = ttk.LabelFrame(self, text="Attachments Log", padding=8)
         log_frame.pack(fill="both", expand=True, pady=(8, 0))
 
         self.log_text = tk.Text(
@@ -255,7 +249,7 @@ class AddClaimsUploadFrame(ttk.Frame):
         self.progress["value"] = 0
 
         # Load existing state if available
-        self.state = UploadState.load()
+        self.state = AttachmentsState.load()
         if self.state.status == "in_progress":
             self.state_var.set(f"Resumable: {self.state.processed}/{self.state.total_patients}")
         else:
@@ -275,50 +269,23 @@ class AddClaimsUploadFrame(ttk.Frame):
                 self.patient_tree.item(items[index], tags=(status,))
 
     def log(self, message: str) -> None:
-        """Append a message to the upload log."""
+        """Append a message to the attachments log."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert("end", f"[{timestamp}] {message}\n")
         self.log_text.see("end")
         self.log_callback(message)
 
-    # -- Coordinate getter ---------------------------------------------------
-
-    def open_coordinate_getter(self) -> None:
-        """Open the interactive coordinate getter tool."""
-        import subprocess
-        import sys
-
-        self.log("Opening Coordinate Getter...")
-
-        try:
-            env = os.environ.copy()
-            env["CLAIMS_GUI_MODE"] = "1"
-
-            # Run coordinate getter in a separate process
-            subprocess.Popen(
-                [sys.executable, "-m", "core.coordinate_getter"],
-                cwd=str(PROJECT_ROOT),
-                env=env,
-            )
-            self.log("Coordinate Getter opened. Click on elements to capture coordinates.")
-        except Exception as exc:
-            self.log(f"ERROR: Could not open Coordinate Getter: {exc}")
-            messagebox.showerror(
-                "Coordinate Getter Error",
-                f"Could not open Coordinate Getter:\n\n{exc}",
-            )
-
     # -- Upload control ---------------------------------------------------
 
     def start_upload(self) -> None:
-        """Start the upload in a background thread."""
+        """Start the attachments upload in a background thread."""
         if self.upload_thread is not None and self.upload_thread.is_alive():
-            messagebox.showwarning("Add Claims Upload", "Upload is already running.")
+            messagebox.showwarning("Claim Attachments", "Attachments upload is already running.")
             return
 
         if not self.patients:
             messagebox.showinfo(
-                "Add Claims Upload", "No patients found in the READY folder."
+                "Claim Attachments", "No patients found in the READY folder."
             )
             return
 
@@ -327,7 +294,7 @@ class AddClaimsUploadFrame(ttk.Frame):
             if not messagebox.askyesno(
                 "Confirm Live Mode",
                 "Live mode will click/type in HBSys.\n\n"
-                "Make sure HBSys is open and visible.\n\n"
+                "Make sure HBSys is open and on UPLOAD CLAIM ATTACHMENTS.\n\n"
                 "Continue?",
             ):
                 return
@@ -358,10 +325,10 @@ class AddClaimsUploadFrame(ttk.Frame):
 
     def resume_upload(self) -> None:
         """Resume a previously interrupted batch."""
-        state = UploadState.load()
+        state = AttachmentsState.load()
         if state.status not in ("in_progress", "failed"):
             messagebox.showinfo(
-                "Add Claims Upload", "No interrupted batch to resume."
+                "Claim Attachments", "No interrupted batch to resume."
             )
             return
 
@@ -369,7 +336,7 @@ class AddClaimsUploadFrame(ttk.Frame):
         self.start_upload()
 
     def _upload_worker(self, live_mode: bool) -> None:
-        """Background worker for the upload loop."""
+        """Background worker for the attachments loop."""
         try:
             ready_dir = Path(self.ready_dir_var.get())
             confirm_each = self.confirm_each_var.get()
@@ -378,7 +345,7 @@ class AddClaimsUploadFrame(ttk.Frame):
             if self.state.status != "in_progress":
                 self.state.mark_started(len(self.patients))
 
-            operator = AddClaimsOperator(
+            operator = AttachmentsOperator(
                 live=live_mode,
                 pause=0.35,
                 confirm_each=confirm_each,
@@ -387,99 +354,140 @@ class AddClaimsUploadFrame(ttk.Frame):
             self.after(0, lambda: self.log(f"Mode: {'LIVE' if live_mode else 'DRY-RUN'}"))
             self.after(0, lambda: self.log(f"Patients: {len(self.patients)}"))
 
-            # Steps 1-3: Navigate to Add Claims popup
+            # Focus HBSys window
             self.after(0, lambda: self.log("Focusing HBSys window..."))
             operator.focus_hbsys()
 
-            self.after(0, lambda: self.log("Step 1: Click eClaims"))
-            operator.click_eclaims()
-
-            self.after(0, lambda: self.log("Step 2: Click Upload Att"))
-            operator.click_upload_att()
-
-            self.after(0, lambda: self.log("Step 3: Click Add Claims"))
-            operator.click_add_claims()
-
-            if not operator.find_popup():
-                self.after(0, lambda: self.log("ERROR: Upload Claims popup did not appear."))
-                self.after(0, self._upload_finished)
-                return
-
-            # Step 4: Process each patient
+            # Process each patient
             for idx, patient in enumerate(self.patients):
                 if self.stop_requested:
                     self.after(0, lambda: self.log("Upload stopped by user."))
                     break
 
                 if idx < self.state.processed:
-                    # Already processed in a previous run
                     self.after(0, lambda i=idx: self.update_patient_status(i, "Skipped", "gray"))
                     continue
 
                 patient_label = (
                     f"{patient.patient_name} - {patient.hospital_no} - "
-                    f"ADM{patient.admission.strftime('%Y%m%d')}_DIS{patient.discharge.strftime('%Y%m%d')}"
+                    f"ADM{patient.admission.strftime('%Y%m%d')}_"
+                    f"DIS{patient.discharge.strftime('%Y%m%d')}"
                 )
                 self.state.current_patient = patient_label
 
                 self.after(0, lambda i=idx, p=patient: self._update_processing(i, p))
 
-                # Search patient
+                folder_path = build_folder_path(ready_dir, patient)
+
+                # Step 1: Search patient
+                self.after(0, lambda n=patient.patient_name: self.log(f"  Searching: {n}"))
                 operator.search_patient(patient.patient_name)
 
-                # Verify confinement
-                verify_result = operator.read_and_verify_highlighted_row(patient)
-
-                if not verify_result.match:
-                    reason = verify_result.reason or "confinement mismatch"
-                    self.state.mark_failed(patient.patient_name, reason)
-                    self.state.save()
-                    self.after(
-                        0,
-                        lambda i=idx, r=reason: (
-                            self.update_patient_status(i, "FAILED", "red"),
-                            self.log(f"  FAIL: {r}"),
-                        ),
-                    )
-                    operator.clear_search_box()
-                    continue
-
-                # Click checkbox
-                if not operator.click_checkbox_of_highlighted_row(patient.patient_name):
-                    self.state.mark_failed(patient.patient_name, "checkbox click failed")
+                # Step 2: Click "attach..." on highlighted row
+                if not operator.click_attach_on_highlighted_row():
+                    self.state.mark_failed(patient.patient_name, "highlighted row not found")
                     self.state.save()
                     self.after(
                         0,
                         lambda i=idx: (
                             self.update_patient_status(i, "FAILED", "red"),
-                            self.log("  FAIL: checkbox click failed"),
+                            self.log("  FAIL: highlighted row not detected"),
                         ),
                     )
                     operator.clear_search_box()
                     continue
+
+                # Step 3: Wait for attachment popup
+                if not operator.find_attachment_popup():
+                    self.state.mark_failed(patient.patient_name, "popup not found")
+                    self.state.save()
+                    self.after(
+                        0,
+                        lambda i=idx: (
+                            self.update_patient_status(i, "FAILED", "red"),
+                            self.log("  FAIL: attachment popup not found"),
+                        ),
+                    )
+                    operator.clear_search_box()
+                    continue
+
+                # Step 4: Attach all files from patient folder
+                self.after(0, lambda: self.log("  Attaching all files..."))
+                operator.click_popup_attach_button()
+
+                if not operator.wait_for_file_dialog():
+                    self.state.mark_failed(patient.patient_name, "file dialog not found (all)")
+                    self.state.save()
+                    self.after(
+                        0,
+                        lambda i=idx: (
+                            self.update_patient_status(i, "FAILED", "red"),
+                            self.log("  FAIL: file dialog not found for all files"),
+                        ),
+                    )
+                    operator.close_attachment_popup()
+                    operator.clear_search_box()
+                    continue
+
+                operator.type_folder_path_and_open(folder_path)
+                self.after(0, lambda: self.log("  All files attached"))
+
+                # Step 5: Attach XML files
+                self.after(0, lambda: self.log("  Attaching XML files..."))
+                import time
+                time.sleep(1.0)
+                operator.click_popup_attach_button()
+
+                if not operator.wait_for_file_dialog():
+                    self.state.mark_failed(patient.patient_name, "file dialog not found (XML)")
+                    self.state.save()
+                    self.after(
+                        0,
+                        lambda i=idx: (
+                            self.update_patient_status(i, "FAILED", "red"),
+                            self.log("  FAIL: file dialog not found for XML files"),
+                        ),
+                    )
+                    operator.close_attachment_popup()
+                    operator.clear_search_box()
+                    continue
+
+                operator.select_xml_type_and_open()
+                self.after(0, lambda: self.log("  XML files attached"))
+
+                # Step 5.5: Assign doc types per row, then Upload → OK → Close
+                self.after(0, lambda: self.log("  Assigning doc types..."))
+                if not operator.assign_doc_types_and_upload(folder_path):
+                    self.state.mark_failed(patient.patient_name, "doc type assignment failed")
+                    self.state.save()
+                    self.after(
+                        0,
+                        lambda i=idx: (
+                            self.update_patient_status(i, "FAILED", "red"),
+                            self.log("  FAIL: doc type assignment failed"),
+                        ),
+                    )
+                    operator.close_attachment_popup()
+                    operator.clear_search_box()
+                    continue
+
+                # Step 6: Close popup and verify it's gone
+                operator.close_attachment_popup()
+                time.sleep(1.0)  # extra wait for popup to fully close
 
                 # Success
                 self.state.mark_processed(patient.patient_name)
                 self.state.save()
                 self.after(
                     0,
-                    lambda i=idx: (
+                    lambda i=idx, n=patient.patient_name: (
                         self.update_patient_status(i, "DONE", "green"),
-                        self.log(f"  OK: {patient.patient_name}"),
+                        self.log(f"  OK: {n}"),
                     ),
                 )
                 operator.clear_search_box()
 
-            # Finalize
-            self.after(0, lambda: self.log("Finalizing: Click Add..."))
-            operator.click_add()
-
-            self.after(0, lambda: self.log("Finalizing: Click OK..."))
-            operator.click_ok()
-
-            self.after(0, lambda: self.log("Finalizing: Click Close..."))
-            operator.click_close()
-
+            # Completed
             self.state.mark_completed()
             self.state.save()
 
@@ -514,14 +522,14 @@ class AddClaimsUploadFrame(ttk.Frame):
 
         if self.state.failed:
             messagebox.showwarning(
-                "Add Claims Upload",
-                f"Upload completed with {len(self.state.failed)} failure(s).\n\n"
+                "Claim Attachments",
+                f"Attachments completed with {len(self.state.failed)} failure(s).\n\n"
                 f"Failed patients:\n" + "\n".join(f"  - {name}" for name in self.state.failed),
             )
         else:
             messagebox.showinfo(
-                "Add Claims Upload",
-                f"Upload completed successfully!\n\n"
+                "Claim Attachments",
+                f"Attachments completed successfully!\n\n"
                 f"Processed: {self.state.processed}/{self.state.total_patients}",
             )
 
@@ -530,10 +538,10 @@ class AddClaimsUploadFrame(ttk.Frame):
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("Add Claims Upload - Test")
+    root.title("Claim Attachments - Test")
     root.geometry("900x700")
 
-    frame = AddClaimsUploadFrame(
+    frame = ClaimAttachmentsFrame(
         root,
         settings_getter=lambda: {},
         log_callback=print,
