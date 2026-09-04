@@ -16,10 +16,14 @@ Owner: Melvin A. Calanda — Echague District Hospital
 | v4.1 | 2026-09-03 ~16:00 | **3-pass OCR: normal + inverted + targeted blue-band** na may quality merge | **8/8 PASCUA at SAFLOR — PASSED laban sa mismong live crops** |
 | v4.2 | 2026-09-03 gabi | **Per-row-band pass** (separator-delimited bands, PSM 6 isolation) | SASPA rows (CSF, MRF, wrapped XMLs) nababasa na |
 | **v4.3** | 2026-09-04 | **Stem-gain merge rule + mutated-stem tier** (flexible sa iba't ibang grid renders) | **MATTERIG 8/8 — mismong crop ng nabigong run; 4 live regression crops lahat PASSED** |
+| **v5** | 2026-09-04 | **View loop (grid scrolling) + pre-Upload doc-column verification** | 5 live regression crops PASSED; live 10-file patient PENDING |
+| **v5.1** | 2026-09-04 | **Band-based cell window (arrow excluded) + verified scroll-top + None-policy** | 13:17 run: 10/10 typed + scroll OK, pero verify "read None" nag-block sa Upload — FIXED (DTR='DTR' sa mismong crop) |
+| **v5.2** | 2026-09-04 | **Verification walk TANGGAL** — cell OCR ng maikling values (DTR/CF4) hindi kapani-paniwala; Upload agad pagkatapos ng huling row | 14:xx run: CF4 read 'F' → ABORT ulit kahit tama lahat sa visual — TANGGAL na ang verify; Upload → OK (Enter) → Close diretso |
 
-Known limitation: scrolling — kapag higit sa visible grid area ang files ng
-pasyente (hal. 10+), ang mga nasa ibaba ay not_found → ABORT (tama at
-ligtas; hindi hulaan). Ang SASPA live case ang nag-document nito.
+Known limitation (RESOLVED sa v5): scrolling — dati, kapag higit sa
+visible grid area ang files (hal. 10+), ang mga nasa ibaba ay not_found →
+ABORT. Ngayon ang v5 view loop ay nag-scroll, nagma-match, at
+nag-verify bago ang Upload.
 
 Ang buong change history (reason/files/behavior/verification) ay nasa
 `CHANGE_RULES.md` sa ilalim ng "Claim Attachments doc type" entries

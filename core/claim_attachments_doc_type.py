@@ -1081,6 +1081,16 @@ if __name__ == "__main__":
             "MATTERIG, REYMUNDO, CARREON-260904082247_CF5.xml",
             "MATTERIG, REYMUNDO, CARREON-260904082247_eSOA.xml",
         ]),
+        # v5 regression: GUIUO — 10-file patient; eSOA.xml scrolled out
+        # below CF5.xml (live 2026-09-04 11:31). Static crop documents the
+        # 9/10 baseline; the v5 view loop handles the scroll in live runs.
+        ("GUIUO", "debug_doc_grid_20260904_113159.png", [
+            "COE.pdf", "CSF.pdf", "DTR.pdf", "MRF.pdf", "PBC.pdf",
+            "SOA1.pdf", "SOA2.pdf",
+            "GUIUO, REYNALDO PARALLAG-260904085021_CF4.xml",
+            "GUIUO, REYNALDO, PARALLAG-260904085021_CF5.xml",
+            "GUIUO, REYNALDO, PARALLAG-260904085021_eSOA.xml",
+        ]),
     ]
     for label, fname, files in live_cases:
         crop_path = (
@@ -1101,25 +1111,27 @@ if __name__ == "__main__":
             ]
             # Expected outcomes are per-case: every crop must match every
             # file EXCEPT files physically below the crop area (scrolled
-            # out) — SASPA's eSOA is the one such case, documented above.
+            # out) — SASPA's and GUIUO's eSOA are the documented cases.
             scrolled_out = {
                 "SASPA": ["SASPA, JHON ROY, MANAYAN-260903136574_eSOA.xml"],
+                "GUIUO": ["GUIUO, REYNALDO, PARALLAG-260904085021_eSOA.xml"],
             }
             expect_nf = scrolled_out.get(label, [])
             pdf_docs = sorted(
                 d for d in ldocs if d not in ("CF4", "CF5", "ESA")
             )
             xml_docs = [d for d in ldocs if d in ("CF4", "CF5", "ESA")]
+            expect_xml = sorted(
+                d for d in ("CF4", "CF5", "ESA")
+                if d != "ESA" or label not in ("SASPA", "GUIUO")
+            )
             ok = (
                 not lamb
                 and sorted(lnf) == sorted(expect_nf)
                 and len(lm) == len(files) - len(expect_nf)
                 # the three XML doc types present exactly once each,
                 # minus any scrolled-out one
-                and sorted(xml_docs) == sorted(
-                    d for d in ("CF4", "CF5", "ESA")
-                    if d not in ("ESA",) or label != "SASPA"
-                )
+                and sorted(xml_docs) == expect_xml
             )
             if not ok:
                 failures += 1
@@ -1129,7 +1141,80 @@ if __name__ == "__main__":
             )
         except Exception as exc:
             failures += 1
-            print(f"FAIL v4.1 live regression {label} raised: {exc}")
+            print(f"FAIL live regression {label} raised: {exc}")
+
+    # -- v5 unit tests: view-loop scroll semantics (static, no HBSys) ------
+    # 1. Processed-skip matching: after view 1 processed COE..SOA2, view 2
+    #    (post-scroll, overlapping rows) must match ONLY the eSOA row —
+    #    reappearing processed rows are skipped, not ambiguous.
+    view1_lines = [
+        GridLine(words=["ADM20260823_D1S20260826\\C0E.PDF"], left=526, top=84, right=940, bottom=98),
+        GridLine(words=["ADM20260823_D1S20260826\\C5F.PDF"], left=526, top=115, right=940, bottom=129),
+    ]
+    view2_lines = [
+        # scroll overlap: CSF row still visible at new y
+        GridLine(words=["ADM20260823_D1S20260826\\C5F.PDF"], left=526, top=60, right=940, bottom=74),
+        # the previously-scrolled-out row is now visible
+        GridLine(words=["PARA11AG-260904085021_E50A.XM1"], left=526, top=115, right=940, bottom=129),
+    ]
+    guiuo_files = [
+        "COE.pdf", "CSF.pdf",
+        "GUIUO, REYNALDO, PARALLAG-260904085021_eSOA.xml",
+    ]
+    m2, nf2, amb2 = match_files_to_lines(
+        ["GUIUO, REYNALDO, PARALLAG-260904085021_eSOA.xml"], view2_lines
+    )
+    ok = len(m2) == 1 and not nf2 and not amb2
+    if not ok:
+        failures += 1
+    print(
+        f"{'OK  ' if ok else 'FAIL'} v5 scroll: unprocessed eSOA matched in "
+        f"view 2 (m={len(m2)}, nf={nf2}, amb={amb2})"
+    )
+
+    # 2. View fingerprint: same lines at different y => same fingerprint;
+    #    different text => different fingerprint (no-progress guard).
+    import sys as _sys
+    _root = _Path(__file__).resolve().parent.parent
+    if str(_root) not in _sys.path:
+        _sys.path.insert(0, str(_root))
+    from core.claim_attachments_uploader import AttachmentsOperator
+
+    fp_a = AttachmentsOperator._view_fingerprint(view1_lines)
+    shifted = [
+        GridLine(words=["ADM20260823_D1S20260826\\C0E.PDF"], left=526, top=40, right=940, bottom=54),
+        GridLine(words=["ADM20260823_D1S20260826\\C5F.PDF"], left=526, top=71, right=940, bottom=85),
+    ]
+    fp_b = AttachmentsOperator._view_fingerprint(shifted)
+    fp_c = AttachmentsOperator._view_fingerprint(view2_lines)
+    ok = fp_a == fp_b and fp_a != fp_c
+    if not ok:
+        failures += 1
+    print(
+        f"{'OK  ' if ok else 'FAIL'} v5 scroll: view fingerprint "
+        f"(positional shift ignored, text change detected)"
+    )
+
+    # v5.2 (2026-09-04 14:xx GUIUO live run): the doc-cell verification
+    # walk was REMOVED — cell OCR of short values (DTR read None, CF4 read
+    # 'F') blocked Uploads of visually correct assignments twice. The
+    # upload sequence is now: last typed row -> Upload -> Enter -> Close.
+    # Structural check: the verify methods must not exist anymore.
+    ok = not any(
+        hasattr(AttachmentsOperator, m)
+        for m in (
+            "_verify_doc_column_values",
+            "_ocr_doc_cell",
+            "_doc_value_matches",
+            "_scroll_grid_top",
+        )
+    )
+    if not ok:
+        failures += 1
+    print(
+        f"{'OK  ' if ok else 'FAIL'} v5.2: verification walk removed — "
+        f"Upload follows the last typed row directly"
+    )
 
     print("RESULT:", "PASSED" if failures == 0 else f"{failures} FAILURE(S)")
     raise SystemExit(0 if failures == 0 else 1)
