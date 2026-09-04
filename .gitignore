@@ -112,3 +112,7 @@ venv/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Agent skills (external tool, has own git repo)
+.agents/
+promt.txt

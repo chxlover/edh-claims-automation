@@ -135,6 +135,8 @@ def main():
             "PDF E-Sign",
             "PDF Compress",
             "PDF Split",
+            "Add Claims Upload",
+            "Claim Attachments",
             "Preferences",
             "About",
         ]

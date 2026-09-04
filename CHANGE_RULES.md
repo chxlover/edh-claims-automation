@@ -39,6 +39,545 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-09-04 — Claim Attachments doc type v4.3: LIVE TEST PASSED + GitHub backup
+
+Reason:
+
+- Live re-run matapos ang v4.3 fixes: matagumpay na nagtakda ang
+  doc-type step at nag-Upload ang system (gumagana na — kumpirmasyon ng
+  may-ari, "guamgana na"). Ang v4.1-v4.3 na live regression suite laban
+  sa apat na totoong debug crops ang naging sagwasyon bago ang live run.
+- I-backup ang bagong ayos na system sa GitHub (kasama ang buong
+  doc-type step: v2 NameError repair, v3, v4, v4.1, v4.2, v4.3).
+
+Files:
+
+- Updated `CHANGE_RULES.md` — ang record na ito.
+- Updated `README.md`, `DOC_TYPE_ASSIGNMENT_PLAN.md` (nauna nang
+  in-update sa v4.3 session).
+
+Behavior:
+
+- Walang code change sa step na ito — documentation at backup lang.
+
+Verification:
+
+- LIVE RUN PASSED (2026-09-04, kumpirmasyon ng may-ari): ang
+  doc-type assignment + Upload flow ay gumagana na sa totoong HBSys.
+- `python core/claim_attachments_doc_type.py` — RESULT: PASSED (4 live
+  regression crops: PASCUA 8/8, SAFLOR 8/8, SASPA 9/10 documented
+  scrolled-out, MATTERIG 8/8).
+- GitHub push: bagong commit sa `chxlover/edh-claims-automation`
+  (main) na may lahat ng Claim Attachments modules + doc-type step
+  v4.3 + markdowns.
+
+### 2026-09-04 — Claim Attachments doc type: v4.3 flexible merge + mutated-stem tier (MATTERIG fix)
+
+Reason:
+
+- Live run 08:35 (MATTERIG): 6/8 lang — nawawala ang COE.pdf at _CF4.xml.
+  Iba-iba ang grid render kada pasyente (PASCUA/SAFLOR ok sa v4.1; SASPA
+  kailangan ng v4.2; MATTERIG nag-expose ng dalawang bagong gap), kaya
+  case-by-case patch ang dating approach — hindi flexible.
+- Diagnosis sa logs/debug_doc_grid_20260904_083557.png:
+  (1) COE: ang band pass ay TAMA na binabasa ang '\COE.pdf' (conf=25),
+      pero ang merge rule ay "multi-overlap -> conservative keep normals"
+      — nag-overlap ang band reading sa DALAWANG basurang normal fragments
+      ('5E0EEE' + '1CARRE0N-000...'), kaya natapon ang TAMA na reading.
+      Sa PASCUA/SAFLOR kagabi, ISANG fragment lang ang overlap kaya
+      gumana ang v4.1 rule.
+  (2) CF4: binasa ng OCR ang '_CF4.xml' bilang 'C4.XM1' — nawala ang F sa
+      stem; walang tumugma sa strict/loose tiers.
+
+Files:
+
+- Modified `core/claim_attachments_doc_type.py` (flexible rules, hindi
+  case patches):
+  - `merge_dual_pass_lines()` — bagong STEM-GAIN rule sa multi-overlap:
+    kapag ang incoming line ay may known stem at WALA sa kahit alin sa
+    mga overlapping lines, papalitan nito lahat ng stem-less fragments.
+    Stem-less line ay hindi kailanman makakapag-match ng file, kaya
+    zero information loss; pure gain ang stem. Kapag stem-less din ang
+    incoming, mananatili ang conservative keep.
+  - `match_files_to_lines()` — bagong TIERTENG MUTATED (tier 3): stems na
+    may 1-edit distance (substitution/deletion/insertion) sa known stem,
+    kung ang extension letter (P/X) ay tumutugma. `New _edit_distance_le1()`
+    helper. Hindi maaaring mag-cross-match ang SOA1/SOA2 o CF4/CF5 sa
+    pamamagitan ng tier na ito (may distinct digits); ginagamit lang
+    kapag walang mas malakas na kandidato.
+  - Live regression tests: 4 na totoong debug crops na ngayon (PASCUA,
+    SAFLOR, SASPA, MATTERIG) + per-case expectations (ang SASPA eSOA ay
+    documented na scrolled-out — 9/10 + not_found ang tama, ABORT sa
+    live). Nag-aassert na rin ang v4.3 merge sa stem-gain replacement at
+    stem-less conservative keep.
+
+Behavior:
+
+- Bago (v4.2): multi-overlap ay laging conservative — natatapon ang
+  nag-iisang magandang reading kapag 2+ basurang fragments ang overlap
+  (guaranteed COE failure sa MATTERIG-type renders). Stem mutations
+  ('C4' para sa CF4) ay guaranteed not_found.
+- Ngayon: flexible sa lahat ng nakitang render variations — ang mga
+  gaps ng bawat version (v4.1: single-fragment overlap; v4.2:
+  full-crop misses; v4.3: multi-fragment overlap + stem mutations) ay
+  sakop na ng mga general rules, hindi case patches.
+
+Safety:
+
+- Never-guess policy nanatili: stem-gain ay nagpapalit lang ng
+  stem-LESS fragments (hindi kailanman kapalit ng stem-bearing line);
+  mutated tier ay nire-require ang extension letter at hindi
+  nagma-match sa distinct-digit twins; ambiguous/not_found = ABORT
+  parin bago ang Upload.
+- Walang binago sa working OCR engine, XML generator, claims checker,
+  signing engine, o processing flow.
+
+Verification:
+
+- `python core/claim_attachments_doc_type.py` — RESULT: PASSED (lahat ng
+  lumang cases + v4.3 merge cases + 4 live regressions: PASCUA 8/8,
+  SAFLOR 8/8, SASPA 9/10 na may documented eSOA scrolled-out, MATTERIG
+  8/8 — mismong crop ng nabigong run ngayong umaga).
+- `py_compile` — OK; buong GUI import chain — OK.
+- Live test PENDING: i-run muli ang MATTERIG (at iba pang pasyente) —
+  inaasahang hindi na ma-ABORT; kung may ABORT pa, may bagong debug crop
+  na naman para sa diagnosis.
+
+### 2026-09-03 — Claim Attachments doc type: v4.1 blue-row recovery (quality merge + targeted band OCR)
+
+Reason:
+
+- Live retest 15:38-15:40 pagkatapos ng v4: 7/8 (PASCUA) at 6/8 (SAFLOR)
+  na lang ang hindi mahanap — COE.pdf sa dalawa, at CSF.pdf sa SAFLOR.
+  Malaki ang improvement pero may natitira pa: ang mga files na iyon ay
+  ang UNANG row(s) ng grid — ang auto-selected na row na white-on-blue.
+- Diagnosis gamit ang bagong debug screenshots
+  (logs/debug_doc_grid_20260903_153917.png / _154006.png):
+  (1) ang lumang "discard ANY overlapping inverted line" rule sa
+  `ocr_grid_lines()` ay nagtatapon ng magandang inverted reading kapag
+  may kahit fragment na ang normal pass (ito ang CSF sa SAFLOR);
+  (2) mas malalim — sa totoong live crops, BOTH passes ay basura lang ang
+  nababasa sa blue row ('5NEEE'), kaya walang merge strategy na
+  makakarecover sa COE. Ang offline reference screenshot ay nagkataong
+  nababasa, kaya hindi ito nahuli ng v4 integration test.
+
+Files:
+
+- Modified `core/claim_attachments_doc_type.py`:
+  - New `_line_quality()` — ranking key: may stem > may extension
+    marker ('.P'/'.X') > mas mahabang alnum reading.
+  - New `merge_dual_pass_lines()` — pinalitan ang "normal-pass always
+    wins" rule: sa isang overlap, ang mas mataas ang quality ang mananalo;
+    walang overlap -> idagdag; dalawa o higit na overlap -> konservatibong
+    manatili sa normal readings (inverted pass merged rows).
+  - New `find_highlight_band()` — hinahanap ang blue selection band via
+    blue-dominant pixel counting (b > 120 at b - max(r,g) > 40, >= 50% ng
+    sampled width per row; pinakamalaking contiguous run).
+  - New `ocr_highlight_band()` — hiwalay na OCR ng band gamit ang manual
+    binarization (luminance > 170 -> itim na text sa puting background),
+    PSM 6, 1x scale para eksakto ang coordinates. Validado sa totoong
+    live crops: binabasa nito ang '\\C0E.NDF' (stem 'C0E' present) na
+    hindi kayang basahin ng dalawang full-crop passes.
+  - `ocr_grid_lines()` — ngayon 3 passes: normal + inverted + targeted
+    band pass (kapag may blue band), lahat pinagsasama via
+    `merge_dual_pass_lines`.
+  - Standalone tests: dagdag na v4.1 merge cases (inverted replaces
+    garbled normal; good normal kept over weak inverted; multi-overlap
+    conservative), find_highlight_band synthetic (may band / wala), at
+    LIVE REGRESSION tests laban sa dalawang totoong debug crops mula sa
+    mismong nabigong 15:38/15:40 runs (PASCUA + SAFLOR, 8 files each).
+
+Behavior:
+
+- Bago (v4): COE.pdf (auto-selected blue row) laging "not found" -> ABORT;
+  paminsan-minsan pati CSF.pdf (SAFLOR).
+- Ngayon: ang quality merge ay nagligtas sa CSF (6/8 -> 7/8 sa SAFLOR),
+  at ang targeted band pass ay nagbibigay ng maaasahang COE reading —
+  parehong live crops ay 8/8 na may tamang doc sequence [COE, CSF, DTR,
+  SOA, SOA, CF4, CF5, ESA]. Kung walang blue band o kabiguan ang band
+  OCR, hindi nagbabago ang kilos ng matcher — not_found pa rin ang
+  malinaw na ABORT.
+
+Safety:
+
+- Walang binago sa working OCR engine, XML generator, claims checker,
+  signing engine, o processing flow — doc-type step pa rin lang.
+- Ang band detection ay purely passive pixel scanning ng screenshot na
+  hawak na; walang bagong dependency (pytesseract + PIL lang).
+- Never-guess policy nanatili: ambiguous/not_found/unclassifiable = ABORT
+  bago ang Upload; may debug_doc_grid_*.png kada run.
+- Ang live regression tests ay naka-depende sa logs/debug_doc_grid_*.png;
+  kapag na-delete ang mga ito, ang mga test ay mag-SKIP nang maayos
+  (hindi nag-fail).
+
+Verification:
+
+- `python core/claim_attachments_doc_type.py` — RESULT: PASSED: lahat ng
+  lumang cases OK + v4.1 (3 merge cases; find_highlight_band band=(20,34)/
+  None; live regression PASCUA 8/8 at SAFLOR 8/8 na may tamang docs).
+- `py_compile` dalawang files — OK; import chain (uploader + GUI tab) — OK.
+- Live test PENDING: i-run muli ang PASCUA/SAFLOR (i-check muna na walang
+  natirang luma rows sa popup — kung mayroon, i-Delete muna; aabutan ng
+  duplicate-row guard ang run: ABORT, hindi mali ang maitype).
+
+### 2026-09-03 — Claim Attachments doc type: v4 line-based matching (fix sa laging ABORT)
+
+Reason:
+
+- Live test 14:51-14:53: dalawang pasyente (PASCUA, SAFLOR) ay ABORT sa
+  doc-type step na may "8 file(s) not visible in the grid (scrolling not
+  supported)" kahit kumpleto naman ang 8 rows sa popup grid.
+- Root cause #1 (SAFLOR): `_pop_matched_file()` sa
+  `core/claim_attachments_uploader.py` ay nag-return ng matched file
+  pero HINDI talaga nag-remove sa `unmatched` list (kahit "Remove and
+  return" ang docstring), at binabalewala rin ng caller ang return value.
+  Kaya laging may natitira sa `unmatched` — palaging ABORT kahit perpekto
+  ang matching. Guaranteed failure sa bawat live run.
+- Root cause #2 (PASCUA): ang "File Name" column ng grid ay nagpapakita
+  ng FULL LOCAL PATH na nagwa-wrap sa 2-3 text lines sa loob ng ISANG
+  row. Ang pixel-separator band detection ay maaaring mag-split ng isang
+  row sa dalawang bands (band 3 sa live log ay "C:\claims_bot\...READY\
+  PASCUA, VIOLETA " lang — walang filename, walang extension) — skip,
+  kaya may file na hindi na-match. Bukod dito, ang selected (blue) row ay
+  white-on-blue text na hindi nababasa ng normal na OCR pass (dahilan
+  kung bakit laging nawawala ang COE sa v3 integration test).
+
+Files:
+
+- Modified `core/claim_attachments_doc_type.py`:
+  - New `GridLine` dataclass — OCR text line na may screen coords at
+    `center_y` (ang y na pinipindot sa Doc Type cell).
+  - New `extract_grid_lines()` — pag-group ng pytesseract words sa text
+    lines gamit ang tesseract (block, par, line) ids; stable kahit
+    nagwa-wrap ang path rows. Conf thresholds: 10 kapag may .pdf/.xml/
+    .xmi ang word, else 20 (live-proven thresholds).
+  - New `ocr_grid_lines()` — OCR gamit ang PSM 6 (talo ang PSM 3 sa
+    offline validation: 8/8 vs 7/8 files) + colour-inverted pass para sa
+    blue selected row; overlapping duplicate lines ay dine-dedupe.
+  - New `match_files_to_lines()` — folder-driven 1:1 matching: bawat file
+    ay dapat tumugma sa EXACTLY ISANG line. Strict tier: stem + ".P"/".X"
+    (tumatagal ng ".PDFF"/".XM1" OCR noise); loose tier: stem lang (para
+    sa rows na nawalan ng dot, hal. "50A2PDF"). Fixpoint consumption para
+    hindi makuha ng dalawang files ang iisang row (SOA1/SOA2 twins,
+    duplicate rows). Return: (matched, not_found, ambiguous) — walang
+    guessing, lahat ng hindi tiyak ay ABORT.
+  - `match_row_to_file()` at iba pang lumang functions: naka-retain para
+    sa backward compatibility at sariling tests.
+  - Standalone tests: dagdag na synthetic grid (wrapped paths, blue row,
+    split "\D"+"TR.PDF", ".PDFF", dot-less "50A2PDF", 3-line XML wrap,
+    title/header/note junk), duplicate-row -> ambiguous, missing-row ->
+    not_found, at integration test laban sa totoong
+    SS_choose_doc_type.png (8/8, kasama ang blue COE row).
+- Modified `core/claim_attachments_uploader.py`:
+  - Inalis: `_is_light_gray_row_separator()`, `_detect_grid_row_bands()`
+    (separator-band approach) at `_pop_matched_file()` (buggy).
+  - New `_popup_crop_box()` — crop sa live popup rect mula sa window
+    handle (fallback: DOC_GRID_BOUNDS) at `_save_doc_grid_debug()` —
+    nagse-save ng `logs/debug_doc_grid_<ts>.png` KADA run para madaling
+    i-diagnose ang anumang ABORT.
+  - `assign_doc_types_and_upload()` v4: crop -> OCR text lines (PSM 6 +
+    inverted) -> i-classify ang lahat ng folder files (unknown stem =
+    ABORT) -> 1:1 line matching -> rows_plan sorted by y -> per-row
+    type/arrow/TAB -> Upload -> OK -> Close. Bagong ABORT messages:
+    ambiguous (duplicate/twin rows), not_found (scrolled out/unreadable),
+    MAX_DOC_ROWS file cap.
+  - Workflow docstring: nadagdag ang Step 12 (doc types + Upload).
+
+Behavior:
+
+- Bago: ang doc-type step ay laging/nag-ABORT na "N file(s) not visible
+  in the grid" dahil hindi nababawasan ang unmatched list at sa wrapped-
+  path band splits; walang doc types na naibibigay.
+- Ngayon: bawat folder file ay 1:1 sa isang grid TEXT LINE; ang doc type
+  ay ini-type sa row kung saan NANDOON ang filename text (y mula sa line
+  itself, hindi mula sa separator bands). Kapag may kulang, dobleng,
+  o di-kilalang file: ABORT bago pa ang Upload — walang mali na
+  maipapadala sa HBSys.
+
+Safety:
+
+- Walang binago sa working OCR engine, XML generator, claims checker,
+  signing engine, o sa existing processing flow — doc-type step lang
+  (bagong module mula 2026-09-02/03) ang inayos.
+- Never-guess policy: ambiguous / not_found / unclassifiable = ABORT na
+  may malinaw na dahilan sa log + debug screenshot.
+- Walang bagong external dependency (pytesseract + PIL lang, existing).
+
+Verification:
+
+- `python core/claim_attachments_doc_type.py` — RESULT: PASSED (32 lumang
+  cases OK + v4: synthetic 20/20 lines, 8/8 match na may tamang docs
+  [COE, CSF, DTR, SOA, SOA, CF4, CF5, ESA] at ys=[406,437,467,497,527,
+  571,615,659]; duplicate CSF -> ambiguous; missing eSOA -> not_found;
+  v4 integration sa SS_choose_doc_type.png: 8/8 kasama ang blue COE row).
+- `py_compile` sa dalawang files — OK; import chain (uploader + GUI tab)
+  — OK.
+- Live test PENDING: patakbuhin muli ang PASCUA/SAFLOR. MAHALAGA: i-check
+  muna na walang natirang luma rows sa popup ng mga pasyenteng na-ABORT
+  noon (kung may natira, i-Delete muna — aabutan ng duplicate-row guard
+  ang run: ABORT ulit itaas, hindi mali ang maitype). I-verify rin na
+  ang pag-close ng popup nang walang Upload ay hindi nag-iiwan ng
+  attachments sa HBSys.
+
+### 2026-09-03 — Claim Attachments doc type: live-test fixes (v3 — pixel rows + folder-driven matching)
+
+Reason:
+
+- Unang live test (2026-09-03 ~11:30): ABORT ang dalawang pasyente dahil
+  (1) ini-count ang header rows ("Doc File Document PHIC...", "Cloud
+  Storage URL Transmitt") at path-only fragments bilang "unclassified
+  rows", at (2) nag-split ang OCR ng mga suffix ("\D" + "TR.pdf" para sa
+  DTR; "\SOA1" na hiwalay ang ".pdf"). Root cause: cropped-region PSM 6
+  OCR na mababa ang quality + row clustering via OCR text positions lang.
+
+Files:
+
+- Modified `core/claim_attachments_doc_type.py`:
+  - New `detect_doc_type_from_words()` — per-row fallback (per-word regex
+    + joined normalised substring) para sa OCR-split tokens.
+  - New `match_row_to_file()` — FOLDER-DRIVEN matching: para sa bawat grid
+    row band, hanapin kung alin sa mga hindi pa na-match na folder files
+    ang tumutugma (stem sa normalised row-text tail; pure-letter stems
+    >=3 chars ay may subsequence fallback para sa "\D"+"TR.pdf" splits;
+    digit stems (SOA1/CF4) ay exact substring lang para iwasan false
+    positives). Return: doc type / None / "?" (ambiguous).
+  - New `doc_types_from_folder_files()` at `_file_stem()` helpers.
+  - Standalone tests: 32 cases PASSED — kasama ang lahat ng live-test OCR
+    fragments (DTR split, SOA1 split, e50A.xmi, header junk na hindi
+    dapat mag-match).
+
+- Modified `core/claim_attachments_uploader.py`:
+  - Detection strategy v3: (1) pixel-based row bands — light-gray
+    full-width separator lines (y=413,443,473,... sa screenshot; 80%
+    threshold sa x=700..1350) na nagbibigay ng eksaktong row boundaries;
+    (2) FULL-screenshot OCR (hindi na cropped PSM 6) na may band
+    assignment via word top position; (3) folder-driven matching per band.
+  - Confidence rule: extension-bearing words (.pdf/.xml/.xmi) ay
+    tinatanggap hanggang conf>10 (ibang words conf>20) — ang SOA2 token
+    (conf=17) ay nawawala sa lumang threshold.
+  - Band skip rules: symbol-only bands (scrollbar arrows "«" ">") at
+    non-file text bands (header remnants) ay skip, HINDI abort. Abort
+    lang kapag may filename token na walang match o ambiguous.
+  - Coordinates: DOC_FIELD_X 505→497, DOC_ARROW_X 537→519 (pixel recon:
+    ang Doc Type column ay x=470..524 — ang lumang 537 ay LABAS na ng
+    column).
+  - Leftover files (nasa scroll area, wala sa visible bands) → ABORT na
+    may explicit reason "scrolling not supported" — hindi partial
+    upload.
+
+Behavior:
+
+- Kapag kumpleto ang files sa visible grid (7 rows o mas kaunti):
+  per-row type + arrow + TAB, saka Upload → OK → Close.
+- Kapag may scrolled-out files (hal. 15 files): ABORT bago mag-Upload,
+  walang mali maaaring maipadala; listahan ng mga hindi visible sa log.
+
+Verification:
+
+- `python core/claim_attachments_doc_type.py` — 32/32 PASSED.
+- Integration test laban sa aktwal na SS_choose_doc_type.png (parehong
+  logic ng uploader): 8 bands detected eksakto; 7 file rows → CSF, DTR,
+  SOA, SOA, CF4, CF5, ESA na may tamang row centers (428/458/488/518/
+  555/599/643); scrollbar band skip; 8 scrolled-out files tama ang
+  identification. RESULT: PASSED.
+- `py_compile` tatlong files — malinis; buong GUI import chain OK.
+- Live test PENDING: `--live --confirm-each --limit 1` — susunod na
+  live run ang magpapatunay ng combo field/arrow coordinates (497/519)
+  at ng Upload→OK→Close flow.
+
+### 2026-09-03 — Claim Attachments: Doc Type Assignment step (after 2nd Open) + NameError repair
+
+Reason:
+
+- Ayon sa may-ari (spec 2026-09-02): pagkatapos ng pangalawang click Open
+  (XML attach), may Doc Type column ang grid sa attachments popup. Bawat
+  file row ay kailangang mabigyan ng doc type base sa filename suffix,
+  bago i-click ang Upload. Implementasyon ayon sa
+  `DOC_TYPE_ASSIGNMENT_PLAN.md`.
+- Kasabay nito: na-repair ang `NameError: name 'Point' is not defined` na
+  humarang sa pagbukas ng buong GUI (corrupted indentation mula sa
+  nabigong edit noong 2026-09-02 session).
+
+Files:
+
+- New `core/claim_attachments_doc_type.py`:
+  - `detect_doc_type(word)` — suffix-to-doc-type mapping gamit ang regex +
+    OCR-noise-tolerant normalisation (O↔0, S↔5, I/L↔1, B↔8, Z↔2; ".xmi"
+    tinatanggap bilang OCR misread ng ".xml"). PDF map: COE, CSF, DTR,
+    SOA1/SOA2→SOA, MRF, PBC, MMC, OPR, ANR, CF3, CF2. XML map: CF4, CF5,
+    eSOA→ESA. May `__main__` standalone test (19 cases mula sa aktwal na
+    OCR recon ng SS_choose_doc_type.png).
+- Modified `core/claim_attachments_uploader.py`:
+  - Repaired ang sira na `Point` dataclass definition (indentation) at
+    inayos ang mga na-duplicate na doc-type constants — ito ang sanhi ng
+    GUI NameError.
+  - Idinagdag ang `MAX_DOC_ROWS = 40` guardrail at import ng
+    `detect_doc_type`.
+  - New method `AttachmentsOperator.assign_doc_types_and_upload()`:
+    OCR ng popup grid (region-based screenshot + pytesseract) → row
+    clustering (15px tolerance) → doc type detection per row → per-row:
+    click combo field, i-type ang doc type, click arrow down (combo),
+    TAB → Upload (598,730) → Enter (OK) → Close (1408,734). Dry-run mode:
+    log lang ng mga idedetect mula sa patient folder, walang clicks.
+  - Guardrails: unknown suffix sa kahit anong row → ABORT (walang Upload
+    click — hindi papayagang maipadala ang maling doc type sa HBSys);
+    row count cross-check vs patient folder (scrolling hindi pa suportado
+    → abort + escalate); MAX_DOC_ROWS cap laban sa runaway TAB loop.
+  - Integrated sa `run_attachments_loop()` bilang Step 5.5 pagkatapos ng
+    `select_xml_type_and_open()`, bago ang `close_attachment_popup()`;
+    kapag nag-fail, `mark_failed` + existing consecutive-failure guardrail.
+- Modified `gui/claim_attachments_tab.py`:
+  - Same Step 5.5 insertion sa `_upload_worker` pagkatapos ng XML attach;
+    may log messages at FAILED status handling na kaparehas ng ibang steps.
+- Modified `tests/test_gui_verify_panel_removal.py`:
+  - In-update ang expected notebook tabs list (idinagdag ang "Add Claims
+    Upload" at "Claim Attachments" — pre-existing FAIL mula 2026-08-28/09-01
+    na hindi pa naaayos sa test expectations).
+
+Behavior:
+
+- Before: pagkatapos i-attach ang XML files, isara agad ang popup — walang
+  doc type assignment, walang Upload click sa loob ng popup.
+- After: pagkatapos ng 2nd Open, ang bawat grid row ay bibigyan ng doc type
+  (type + arrow down + TAB), saka i-click ang Upload → OK (Enter) → Close.
+  Ang `close_attachment_popup()` ay nagsisilbing safety net (kapag nag-close
+  na ang popup via Close button, confirmation lang ito).
+- Dry-run: nag-log lang ng mga idedetect na doc types mula sa folder
+  contents ("would set doc type 'CF4' for ...") — ligtas i-test nang walang
+  HBSys.
+
+Safety / compatibility:
+
+- Walang binagong working OCR, PDF Merge, Auto Sign, XML Generator, o Claims
+  Checker. Ang panibagong step ay nasa loob lang ng claim attachments flow.
+- Ang doc type step ay nag-a-abort (hindi nagha-hula) kapag may unknown suffix
+  o kulang na rows — walang maling doc type ang makakarating sa HBSys.
+- Backward compatible ang `CalibratedPoints.load()` — ang mga bagong field
+  ay may defaults kahit luma ang calibration JSON.
+
+Verification:
+
+- `python -m py_compile` sa tatlong modified files — malinis.
+- `python core/claim_attachments_doc_type.py` — 19/19 cases PASSED
+  (kasama ang aktwal na OCR-noise strings mula sa screenshot: "SOAL.pdfF"
+  → SOA, "e50A.xmi" → ESA, "D1S20260822" prefix, atbp.).
+- Dry-run `assign_doc_types_and_upload()` sa totoong READY patient
+  (CABERO, ROSEMARIE SALUD - 8 files): tama ang lahat ng detections —
+  CF4, CF5, ESA, COE, CSF, DTR, SOA, SOA. RESULT: PASSED.
+- `python tests/test_gui_verify_panel_removal.py` — ALL CHECKS PASSED
+  (inayos na ang pre-existing tab list FAIL).
+- Buong import chain ng GUI (`start_claims_gui` → `edh_claims_gui_XML_COPY_BUTTON`
+  → `gui.claim_attachments_tab` → `core.claim_attachments_uploader`) —
+  OK na; gumagana na ulit ang pagbukas ng system.
+- Live test PENDING: `--live --confirm-each --limit 1` — inaasahang i-run ng
+  may-ari para sa OCR grid detection at combo field/arrow coordinates
+  (DOC_FIELD_X=505, DOC_ARROW_X=537 ay derived mula sa OCR recon; kung
+  mag-miss, i-calibrate gamit ang Coordinate Getter).
+
+### 2026-09-02 — Add Claims Upload GUI: restore Coordinate Getter button; loop-engineering skill: markdown-update rule
+
+Reason:
+
+- Bawi ng may-ari ang isa sa mga inalis na calibration buttons: ibalik ang
+  `Coordinate Getter` (Calibrate Coordinates at Detect Popup ay mananatiling
+  tinanggal).
+- Idagdag sa `.agents/skills/loop-engineering/SKILL.md` ang mandatory rule na
+  pagkatapos ng anumang code edit o addition ay i-update ang mga kaugnay na
+  markdown docs sa same work session.
+
+Files:
+
+- Modified `gui/add_claims_upload_tab.py` (minimal):
+  - Binalik ang `Coordinate Getter` button pagkatapos ng Resume Batch
+    (padx 20) at ang `open_coordinate_getter()` method (subprocess launcher
+    para sa `core.coordinate_getter`).
+  - Binalik ang `import os` (gagamitin ulit ng method).
+  - Ang `Calibrate Coordinates` at `Detect Popup` buttons/methods ay
+    mananatiling WALA ayon sa nakaraang change.
+- Modified `.agents/skills/loop-engineering/SKILL.md`:
+  - Design mode list: bagong step 8 — "Update the markdowns": after any code
+    edit or addition, laging i-update ang relevant markdown documentation
+    sa same work session; hindi kumpleto ang code change hangga't hindi
+    na-update ang docs na naglalarawan nito. Nabanggit na ito ay nag-aapply
+    sa lahat ng mode (design, review, implementation).
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Add Claims Upload tab: Start Upload | Stop | Resume Batch | Coordinate
+  Getter (balik sa dating layout para sa coordinate getter tool); ang
+  calibrate/detect entry points ay CLI lang (`--calibrate`/`--detect`).
+- loop-engineering skill: ang mga agent sessions na gumagamit ng skill ay
+  obligadong i-update ang markdowns pagkatapos ng bawat code edit/add.
+
+Safety / compatibility:
+
+- GUI-only change sa tab; walang core module, database, o processor na
+  naapektuhan. Ang `core/coordinate_getter.py` ay hindi kailanman binura at
+  walang ibang caller ang mga inalis na calibrate/detect methods.
+- SKILL.md ay documentation-only para sa agent behavior; walang production
+  code na naapektuhan.
+
+Verification:
+
+- `python -m py_compile gui/add_claims_upload_tab.py` — malinis (.venv).
+- Headless GUI test — PASSED: Coordinate Getter button present; Calibrate
+  Coordinates/Detect Popup ay wala pa rin; `open_coordinate_getter`
+  restored; core buttons (Start Upload/Stop/Resume Batch/Browse/Refresh)
+  intact.
+
+### 2026-09-02 — Add Claims Upload GUI: remove Calibrate Coordinates / Detect Popup / Coordinate Getter buttons
+
+Reason:
+
+- Ayon sa may-ari, tanggalin na ang calibration buttons sa Add Claims Upload
+  tab. Buttons lang ang inalis — hindi binago ang core automation, hindi
+  binura ang calibration modules mismo.
+
+Files:
+
+- Modified `gui/add_claims_upload_tab.py` (minimal):
+  - Removed the three buttons sa Controls section: `Calibrate Coordinates`
+    (`open_calibration`), `Detect Popup` (`detect_popup`), at `Coordinate
+    Getter` (`open_coordinate_getter`), kasama ang vertical separator at ang
+    buong "Calibration" method section (subprocess launchers).
+  - Removed the now-unused `import os`.
+  - Walang binago sa patient list, mode selection, Start/Stop/Resume,
+    upload worker, at log display.
+
+Behavior:
+
+- Before: may tatlong calibration buttons (Calibrate Coordinates, Detect
+  Popup, Coordinate Getter) pagkatapos ng Resume Batch button.
+- After: ang Controls section ay Start Upload | Stop | Resume Batch lamang.
+  Ang CLI (`--calibrate`/`--detect` sa `core.add_claims_uploader`) at ang
+  modules `core/add_claims_calibration.py` at `core/coordinate_getter.py` ay
+  hindi ginalaw at pwede pa ring i-run nang direkta.
+
+Safety / compatibility:
+
+- GUI-only removal; walang production/core module, database, o processor
+  na naapektuhan.
+- Ang mga calibration method ay walang ibang caller (verified via code
+  search), kaya walang nasirang ibaing functionality.
+- Backward compatible: ang upload workflow mismo (dry-run/live, state,
+  resume) ay walang pinagbago.
+
+Verification:
+
+- `python -m py_compile gui/add_claims_upload_tab.py` — malinis (system
+  at .venv Python).
+- Headless GUI instantiation test: WALA nang calibration button text sa
+  tab (Calibrate Coordinates / Detect Popup / Coordinate Getter — lahat
+  absent), present pa rin ang Start Upload/Stop/Resume Batch/Browse/
+  Refresh, at ang mga core upload method (`start_upload`, `stop_upload`,
+  `resume_upload`, `refresh_patient_list`) ay nandoon pa rin; ang tatlong
+  calibration method ay wala na. RESULT: PASSED.
+- `python tests/test_gui_verify_panel_removal.py` — 1 pre-existing FAIL
+  (notebook tabs list: hindi pa kasama sa expected list ng test ang "Add
+  Claims Upload"/"Claim Attachments" na tabs mula 2026-08-28/09-01);
+  hindi kaugnay ng change na ito — lahat ng Quick Actions checks ay PASS.
+
 ### 2026-08-26 — Date Fill: skip patients whose HBSys dates are already complete (pre-check)
 
 Reason:
@@ -1906,3 +2445,582 @@ Verification:
 - `python -m py_compile core/add_claims_ocr.py` — passed.
 - Live test PENDING — re-run the upload loop and verify all 4 patients
   (ACOSTA, MASIBAG, SALVADOR, VENTURA) are detected with OCR text.
+
+### 2026-09-01 — Claim Attachments Uploader: new module for attaching documents
+
+Reason:
+
+- Automate the HBSys UPLOAD CLAIM ATTACHMENTS workflow: for each patient
+  in the READY folder, search the patient, click "attach..." on the
+  highlighted row, attach all files from the patient folder, then attach
+  XML files specifically. This eliminates manual per-patient clicking.
+
+Files:
+
+- Added `core/attachments_state.py` — batch state persistence module:
+  - `AttachmentsState` dataclass with `save()`/`load()`, `mark_started()`,
+    `mark_processed()`, `mark_failed()`, `mark_completed()`.
+  - Stores batch ID, progress, failed patients + reasons.
+  - State file: `logs/claim_attachments_state.json`.
+  - Standalone self-test via `if __name__ == "__main__"`.
+
+- Added `core/claim_attachments_uploader.py` — main automation module:
+  - `CalibratedPoints` dataclass with all workflow coordinates (search box,
+    search button, attach column X, popup attach button, file dialog
+    elements). Loads from `logs/claim_attachments_calibration.json` with
+    defaults for 1920x1080.
+  - `AttachmentsOperator` class: UI automation with dry-run/live modes,
+    focus_hbsys(), search_patient(), click_attach_on_highlighted_row()
+    (blue band detection), find_attachment_popup(), file dialog
+    interaction (type path, change file type to XML).
+  - `run_attachments_loop()`: goal-based loop with state persistence,
+    consecutive failure guardrail (MAX=3), resume support.
+  - CLI entry point with `--live`, `--confirm-each`, `--resume`,
+    `--pause`, `--limit`, `--ready-dir` flags.
+
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: manual per-patient attachment in HBSys UPLOAD CLAIM ATTACHMENTS.
+- After: automated loop that processes all READY patients — search,
+  detect highlighted row, attach all files, attach XMLs, close popup,
+  move to next patient. Supports dry-run for safe testing.
+
+Safety / compatibility:
+
+- Independent new module; does not modify any existing code.
+- Uses pyautogui/pywinauto for UI automation (same as existing modules).
+- Read-only on HBSys/MySQL; only performs UI clicks.
+- State persistence enables resume after interruption.
+- MAX_CONSECUTIVE_FAILURES=3 guardrail stops the loop on persistent errors.
+
+Verification:
+
+- `python -m py_compile core/attachments_state.py` — passed.
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- `python core/attachments_state.py` — standalone self-test passed
+  (state save/load, mark_processed, mark_failed, mark_completed).
+- Dry-run mode PENDING: `python -m core.claim_attachments_uploader --live --limit 1 --confirm-each`.
+
+### 2026-09-01 — Claim Attachments GUI tab: integrated into main EDH Claims GUI
+
+Reason:
+
+- Magkaroon ng GUI entry point para sa Claim Attachments Upload, para
+  hindi na kailangan i-run ang CLI nang mag-isa. Pareho ng pattern ng
+  existing Add Claims Upload tab — may patient list, dry-run/live toggle,
+  Start/Stop/Resume buttons, at real-time log.
+
+Files:
+
+- Added `gui/claim_attachments_tab.py` — Tkinter frame class:
+  - `ClaimAttachmentsFrame(ttk.Frame)` — patient list, mode selection,
+    Start/Stop/Resume buttons, progress bar, real-time log.
+  - `_upload_worker()` — background thread na tumatawag ng
+    `AttachmentsOperator` methods at nag-uupdate ng GUI.
+  - `browse_ready_dir()`, `refresh_patient_list()`, `log()`,
+    `update_patient_status()`.
+  - Standalone test via `if __name__ == "__main__"`.
+
+- Modified `edh_claims_gui_XML_COPY_BUTTON.py`:
+  - Import: `from gui.claim_attachments_tab import ClaimAttachmentsFrame`.
+  - `notebook`: added `self.claim_attachments_tab` frame with
+    text="Claim Attachments" (after Add Claims Upload, before Preferences).
+  - `build_tabs()`: added `self.build_claim_attachments_tab()` call.
+  - Quick Actions grid: added "Claim Attachments" button at (7, 0)
+    that selects the notebook tab.
+  - New `build_claim_attachments_tab()`: instantiates
+    `ClaimAttachmentsFrame` with `settings_getter` and `log_callback`.
+
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: Claim Attachments was only accessible via CLI.
+- After: "Claim Attachments" tab in the main GUI notebook, with
+  patient list, dry-run/live mode, Start/Stop/Resume buttons, and
+  real-time log. Quick Actions button also available.
+
+Safety / compatibility:
+
+- Additive change; no existing code modified.
+- Same pattern as existing Add Claims Upload tab.
+- Uses the same `AttachmentsOperator` and `AttachmentsState` from
+  `core/claim_attachments_uploader.py`.
+
+Verification:
+
+- `python -m py_compile gui/claim_attachments_tab.py` — passed.
+- `python -m py_compile edh_claims_gui_XML_COPY_BUTTON.py` — passed.
+- `python gui/claim_attachments_tab.py` — standalone GUI test launched
+  (window opens, patient list loads from READY folder).
+- Live smoke test PENDING: open GUI → Claim Attachments tab →
+  verify patient list, controls, and dry-run mode.
+
+### 2026-09-01 — Claim Attachments: fix folder path to use patient name only
+
+Reason:
+
+- Ang folder path na ita-type sa file dialog ay dapat patient name lang
+  (hal. `READY\ECHANES, PAUL GEORGE DE GUZMAN`), hindi ang buong
+  folder name na may hospital number at confinement period.
+- Ang dating format (`PATIENT NAME - HOSPITAL_NO - ADMYYYYMMDD_...`) ay
+  hindi tugma sa aktwal na folder naming sa READY directory.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `build_folder_path()`:简化 sa `ready_dir / patient.patient_name`
+    (dating buong folder name format).
+- Modified `gui/claim_attachments_tab.py`:
+  - `_upload_worker()`: parehong simplification sa folder_path construction.
+
+Behavior:
+
+- Before: file dialog tinatype ang buong folder name
+  (`READY\ECHANES, PAUL GEORGE DE GUZMAN - 000000000020743 - ADM...`).
+- After: file dialog tinatype ang patient name lang
+  (`READY\ECHANES, PAUL GEORGE DE GUZMAN`).
+
+Safety / compatibility:
+
+- Minimal change; walang ibang behavior ang naapektuhan.
+- Ang `load_patients()` function ay hindi binago (gumagamit pa rin ng
+  `parse_folder_name()` para sa internal patient list).
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- `python -m py_compile gui/claim_attachments_tab.py` — passed.
+- `python gui/claim_attachments_tab.py` — standalone GUI test passed.
+
+### 2026-09-01 — Claim Attachments: fix Attach button click + popup close verification
+
+Reason:
+
+- Live test showed two bugs:
+  1. "Attach..." button click at (513, 732) was not opening the file
+     dialog — fixed coordinates may not match the actual popup layout.
+  2. After closing the popup, it was not fully dismissed before the next
+     patient search, causing the old popup to still be visible.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `click_popup_attach_button()`: 3-strategy approach:
+    1. pywinauto `child_window(title="Attach...").click_input()`
+       (most reliable — finds the actual button control)
+    2. Fallback: calculate click position from popup rectangle
+       (rect.left + 49, rect.bottom - 26)
+    3. Fallback: absolute coordinates (513, 732)
+  - `close_attachment_popup()`: added verification loop (3 attempts)
+    to confirm the popup is actually gone before returning;
+    uses `child_window(title="Close").click_input()` instead of
+    `.click()` for better reliability.
+  - `run_attachments_loop()`: added `sleep_short(1.0)` after
+    `close_attachment_popup()` to ensure full dismissal.
+
+- Modified `gui/claim_attachments_tab.py`:
+  - `_upload_worker()`: added `time.sleep(1.0)` after popup close.
+
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: fixed coordinate click (513, 732) for Attach button;
+  popup close not verified; next patient could see old popup.
+- After: pywinauto finds and clicks the actual Attach button control;
+  popup close is verified (3 retry attempts); extra wait ensures
+  full dismissal before next patient.
+
+Safety / compatibility:
+
+- No new dependencies (pywinauto already in requirements.txt).
+- `click_input()` is pywinauto's click method that sends input
+  to the actual control, more reliable than screen-coordinate click.
+- Fail-safe: if pywinauto fails, falls back to screen coordinates.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- `python -m py_compile gui/claim_attachments_tab.py` — passed.
+- Live test PENDING: re-run with --confirm-each --limit 2 to verify
+  Attach button opens file dialog and popup closes between patients.
+
+### 2026-09-01 — Claim Attachments: fix file dialog detection + 2-popup workflow
+
+Reason:
+
+- Live test showed "File dialog NOT found" — the code was not detecting
+  the 2nd popup (Windows file dialog) that opens after clicking
+  "Attach..." in the 1st popup (Attachments popup).
+- The user clarified the workflow: 2 separate popups — (1) Attachments
+  popup with "Attach..." button, (2) Windows file dialog for file
+  selection.
+- Original detection was too strict: required exact class (#32770) AND
+  title containing OPEN/SAVE/BROWSE. Many file dialogs have different
+  classes or titles.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `wait_for_file_dialog()`: 3-strategy detection:
+    1. Class="#32770" or "FileDialog" (excluding attachment popup)
+    2. Title contains OPEN/SAVE/BROWSE
+    3. Class pattern match (Dialog/FileDialog/ToolbarWindow)
+    Timeout increased to 8s; debug logging lists all windows on failure.
+  - `click_popup_attach_button()`: increased wait to 2.0s after click
+    (was 1.5s) to give file dialog more time to appear.
+  - `type_folder_path_and_open()`: added Enter key after typing path
+    (to navigate to folder), increased delays for reliability.
+  - `select_xml_type_and_open()`: increased delays for dropdown and
+    filter operations.
+
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: file dialog detection required exact class + title match;
+  often failed to find the dialog.
+- After: 3-strategy detection catches file dialogs with various classes
+  and titles; debug logging shows all windows on failure for diagnosis.
+
+Safety / compatibility:
+
+- More lenient detection = fewer false negatives.
+- Excludes attachment popup from detection (title contains "ATTACHMENTS").
+- Debug logging on failure helps diagnose future issues.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- Live test PENDING: re-run with --confirm-each --limit 1 to verify
+  file dialog is found and path is typed correctly.
+
+### 2026-09-01 — Claim Attachments: fix pywinauto DialogWrapper button click
+
+Reason:
+
+- Live test showed `'DialogWrapper' object has no attribute 'child_window'`
+  — the popup is found as a pywinauto `DialogWrapper`, not a full
+  `WindowSpecification` object. `child_window()` is only available on
+  objects returned by `Application.window()`.
+- The debug window list revealed that the actual button container is
+  a `#32770` window with title `'Attachments'` (separate from the
+  `FNWNS3115` popup frame).
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `click_popup_attach_button()`: 4-strategy approach:
+    1. `Application(backend='win32').connect(handle=popup.handle)`
+       → `dialog.child_window(title="Attach...").click_input()`
+    2. Find `#32770` 'Attachments' dialog directly → connect → click
+    3. Screen coordinates from popup rect (fallback)
+    4. Absolute coordinates (final fallback)
+  - `close_attachment_popup()`: same Application-based approach for
+    the Close button click.
+
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: pywinauto `child_window()` failed on DialogWrapper; button
+  click fell through to screen coordinates which missed the button.
+- After: `Application(backend='win32').connect()` creates a proper
+  `WindowSpecification` that supports `child_window()`; button is
+  found and clicked reliably.
+
+Safety / compatibility:
+
+- No new dependencies (pywinauto already in requirements.txt).
+- 4-strategy fallback ensures at least one approach works.
+- Debug logging shows which strategy succeeded/failed.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- Live test PENDING: re-run with --confirm-each --limit 1 to verify
+  Attach button opens the file dialog.
+
+### 2026-09-01 — Claim Attachments: fix file dialog detection + full folder path
+
+Reason:
+
+- Live test showed file dialog NOT found after clicking Attach... button.
+  Root cause: the file dialog has class `#32770` and title `Attachments`
+  (same as the dialog inside the popup), but the detection code excluded
+  all windows with "ATTACHMENTS" in the title — so it could never find
+  the file dialog.
+- Also: the folder path typed into the file dialog should use the FULL
+  folder name (with hospital number and confinement period), not just the
+  patient name.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `build_folder_path()`: changed from `ready_dir / patient.patient_name`
+    to `ready_dir / f"{patient.patient_name} - {patient.hospital_no} -
+    ADM{...}_DIS{...}"`.  Verified the resulting path exists on disk.
+  - `click_popup_attach_button()`: now records ALL existing window handles
+    BEFORE clicking Attach... (`self._pre_attach_handles`).  4 strategies:
+    1. `Application.connect(handle=popup.handle)` → `child_window()`
+    2. Find `#32770` dialog → connect → `child_window()`
+    3. Calculate from popup rect
+    4. Absolute coordinates
+  - `wait_for_file_dialog()`: completely rewritten with handle-based
+    detection.  Any NEW top-level window (not in `_pre_attach_handles`)
+    with class `#32770` is the file dialog.  Ignores known system windows
+    (Shell_TrayWnd, tooltips, etc.).  Debug logs list only NEW windows
+    on failure.
+  - `close_attachment_popup()`: now has 3-strategy fallback:
+    1. pywinauto Close button
+    2. Coordinate-based Close from popup rect
+    3. Escape key
+- Modified `gui/claim_attachments_tab.py`:
+  - Import `build_folder_path` from core module.
+  - `_upload_worker()`: uses `build_folder_path(ready_dir, patient)`
+    instead of inline `str(ready_dir / patient.patient_name)`.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: file dialog was never detected (title "Attachments" was
+  excluded); folder path was just the patient name (folder didn't exist).
+- After: file dialog is detected by its NEW handle (not present before
+  clicking Attach...); folder path uses the full name with hospital
+  number and confinement period (verified to exist on disk).
+
+Safety / compatibility:
+
+- Handle-based detection is reliable — it doesn't depend on window title
+  or class, only on whether the window is NEW.
+- 4-strategy button click + 3-strategy close ensures fallback.
+- No new dependencies.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- `python -m py_compile gui/claim_attachments_tab.py` — passed.
+- `build_folder_path()` test: returns
+  `READY\CABERO, ROSEMARIE SALUD - 000000000020958 - ADM20260821_DIS20260824`
+  and `Path(...).exists() = True`.
+- Live test PENDING: re-run with --confirm-each --limit 1 to verify
+  file dialog opens and path is typed correctly.
+
+### 2026-09-01 — Claim Attachments: add file list focus click before Ctrl+A
+
+Reason:
+
+- After typing the folder path (or selecting XML from dropdown), the
+  keyboard focus was still on the "File name:" field.  Ctrl+A would
+  select text in that field instead of selecting files in the list.
+  Need to LEFT CLICK inside the file list area (595, 509) first to
+  transfer focus to the file list before Ctrl+A.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - Added `FILE_LIST_FOCUS = Point(595, 509)` to the `P` class.
+  - `type_folder_path_and_open()`: added click at FILE_LIST_FOCUS after
+    pressing Enter (navigate to folder) and before Ctrl+A.
+  - `select_xml_type_and_open()`: added click at FILE_LIST_FOCUS after
+    selecting XML from dropdown and before Ctrl+A.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: Ctrl+A selected text in the File name field; no files were
+  selected; Open button did nothing useful.
+- After: click at (595, 509) focuses the file list; Ctrl+A selects all
+  files; Open attaches them.
+
+Safety / compatibility:
+
+- Single extra click per step; no new dependencies.
+- Coordinates match user-provided screenshots.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- Live test PENDING: re-run with --confirm-each --limit 1.
+
+### 2026-09-01 — Claim Attachments: add debug logging for patient-to-patient transition
+
+Reason:
+
+- After processing the first patient, the highlight doesn't move to the
+  next patient when clicking Search.  Added detailed logging to diagnose
+  the issue: search box click coordinates, text selection, typing,
+  search button click, and post-search highlight detection.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `search_patient()`: added detailed logging for each step (search
+    box click, Ctrl+A, delete, type, search button click); added
+    post-search screenshot + highlight detection to verify the
+    search worked; added extra wait after focusing main window.
+  - `clear_search_box()`: added main window focus before clearing;
+    added logging for each step.
+  - `run_attachments_loop()`: added 2s wait after popup close; added
+    main window re-focus after popup closes.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: minimal logging between patients; hard to debug transition.
+- After: detailed logs show exactly what's happening at each step;
+    debug screenshots saved when no highlight is detected.
+
+Safety / compatibility:
+
+- Logging-only changes; no behavior changes to the core workflow.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- Live test PENDING: re-run to see the new debug logs.
+
+### 2026-09-01 — Claim Attachments: add --watch auto-reload on code changes
+
+Reason:
+
+- When debugging, the user has to manually restart the script every time
+  code changes.  Add a `--watch` flag that monitors all .py files and
+  automatically restarts the script when changes are detected.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - Added `_get_source_mtimes()` — records mtime of all .py files.
+  - Added `check_for_code_changes(stored_mtimes)` — compares current
+    mtimes against stored; returns list of changed files.
+  - Added `restart_script()` — uses `os.execv()` to restart the
+    process with the same CLI args.
+  - `run_attachments_loop()`: added `watch_mtimes` parameter; checks
+    for code changes before each patient; saves state and restarts
+    if changes detected.
+  - CLI: added `--watch` flag.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: manual restart required after every code change.
+- After: `--watch` flag monitors .py files; auto-restarts between
+  patients when changes are detected (state is saved first).
+
+Safety / compatibility:
+
+- State is always saved before restart — no data loss.
+- Only checks between patients, not mid-action.
+- `os.execv()` replaces the process cleanly.
+- No new dependencies.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- Live test PENDING: run with --live --watch to test auto-reload.
+
+### 2026-09-01 — Claim Attachments: fix Search button not triggering for next patient
+
+Reason:
+
+- After processing the first patient and closing the popup, the Search
+  button click at (410, 139) was not triggering a new search for the
+  next patient.  The highlight stayed on the previous patient's row.
+  Root cause: focus was not fully restored after popup close, and a
+  single click on the Search button wasn't registering.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `search_patient()`: focus main window with 3 retries; click search
+    box twice to ensure focus; double-click Search button instead of
+    single click; press Enter as fallback search trigger.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: single click on Search button after popup close didn't
+  trigger a new search; highlight stayed on previous patient.
+- After: double-click + Enter ensures the search executes; focus
+  retries ensure the main window is active.
+
+Safety / compatibility:
+
+- Double-click + Enter is safe; no side effects.
+- Focus retries handle transient focus loss after popup close.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- Live test PENDING: run with --live --confirm-each --limit 2.
+
+### 2026-09-01 — Claim Attachments: use keyboard navigation for XML dropdown
+
+Reason:
+
+- Clicking a specific coordinate in the "Files of type" dropdown to
+  select "XML files" was unreliable (dropdown position can vary).  Use
+  keyboard navigation instead: click the dropdown → arrow down → Enter.
+  This is more reliable and doesn't depend on exact dropdown position.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `select_xml_type_and_open()`: replaced `pyautogui.click()` on the
+    XML option coordinate with `pyautogui.press("down")` +
+    `pyautogui.press("enter")` keyboard navigation.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: clicked a fixed coordinate in the dropdown to select XML;
+  coordinate could miss if dropdown position changed.
+- After: arrow down + Enter navigates to and selects XML files;
+  works regardless of dropdown position.
+
+Safety / compatibility:
+
+- Keyboard navigation is more reliable than coordinate clicking.
+- No new dependencies.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- Live test PENDING: re-run with --confirm-each --limit 1.
+
+### 2026-09-01 — Claim Attachments: fix XML dropdown option coordinate
+
+Reason:
+
+- The XML files option in the "Files of type" dropdown was at
+  coordinate (595, 509) which is inside the file list area, not the
+  dropdown.  The correct coordinate for the XML option in the opened
+  dropdown is (745, 613).
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `CalibratedPoints.file_dialog_xml_option`: changed from
+    `(595, 509)` to `(745, 613)`.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: clicking "XML files" hit the file list area instead of the
+  dropdown option; XML filter was never applied.
+- After: click lands on the actual "XML files" option in the dropdown;
+  filter is applied correctly.
+
+Safety / compatibility:
+
+- Single coordinate change; no logic changes.
+- Coordinates match user-provided screenshots.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — passed.
+- Live test PENDING: re-run with --confirm-each --limit 1.
