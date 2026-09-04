@@ -78,6 +78,11 @@ MAX_CONSECUTIVE_FAILURES = 3
 # runaway TAB loops if the grid layout is misdetected)
 MAX_DOC_ROWS = 40
 
+# Maximum grid scroll attempts per patient before ABORT (v5 view loop
+# guardrail: 10 files visible ~9 rows means ~1 scroll; 40 files worst-case
+# needs ~5; 12 leaves generous margin while bounding the loop)
+MAX_SCROLL_ITERATIONS = 12
+
 
 # -- auto-reload (watch mode) ---------------------------------------------
 
@@ -810,43 +815,111 @@ class AttachmentsOperator:
                 )
         return DOC_GRID_BOUNDS
 
-    def _save_doc_grid_debug(self, crop: Image.Image) -> None:
+    def _save_doc_grid_debug(
+        self, crop: Image.Image, name: str | None = None
+    ) -> None:
         """Persist the popup-grid OCR crop for failure diagnosis."""
         try:
             LOG_DIR.mkdir(parents=True, exist_ok=True)
-            path = LOG_DIR / f"debug_doc_grid_{datetime.now():%Y%m%d_%H%M%S}.png"
+            if name:
+                stem = f"{name}_{datetime.now():%Y%m%d_%H%M%S}"
+            else:
+                stem = f"debug_doc_grid_{datetime.now():%Y%m%d_%H%M%S}"
+            path = LOG_DIR / f"{stem}.png"
             crop.save(path)
             self.log_action(f"DEBUG screenshot saved: {path}")
         except Exception as exc:
             self.log_action(f"WARNING: could not save doc grid debug: {exc}")
 
+    # -- v5 scroll helpers ---------------------------------------------------
+
+    def _scroll_grid_down(self) -> None:
+        """Scroll the attachment grid down by a few rows (mouse wheel)."""
+        crop_box = self._last_crop_box or DOC_GRID_BOUNDS
+        cx = (crop_box[0] + crop_box[2]) // 2
+        cy = (crop_box[1] + crop_box[3]) // 2
+        self.log_action(f"scrolling grid down (wheel at {cx},{cy})")
+        pyautogui.moveTo(cx, cy)
+        sleep_short(0.2)
+        pyautogui.scroll(-2)  # 2 notches down (~2-6 rows)
+        sleep_short(0.8)
+
+    def _ocr_doc_grid_view(
+        self, view_no: int, tag: str = ""
+    ) -> tuple[list, tuple]:
+        """Screenshot the popup grid, OCR it, save a per-view debug crop.
+
+        Returns (lines, crop_box) — lines carry screen coordinates.
+        """
+        screenshot = pyautogui.screenshot()
+        crop_box = self._popup_crop_box(screenshot)
+        self._last_crop_box = crop_box
+        crop = screenshot.crop(crop_box)
+        if view_no == 1:
+            self._save_doc_grid_debug(crop)
+        else:
+            self._save_doc_grid_debug(
+                crop, name=f"debug_doc_grid_view{view_no}_{tag}"
+            )
+        lines = ocr_grid_lines(crop, crop_box[0], crop_box[1])
+        return lines, crop_box
+
+    @staticmethod
+    def _view_fingerprint(lines: list) -> str:
+        """Stable text fingerprint of one OCR view (no-progress guard).
+
+        Uses the normalised text of each line sorted by y — positions
+        shift when the grid scrolls; identical fingerprint across views
+        means the scroll did not move the grid.
+        """
+        import hashlib
+
+        parts = [ln.norm_text for ln in sorted(lines, key=lambda l: l.top)]
+        return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
+    def _type_row_doc(self, doc: str, row_y: int, idx: int, total: int) -> None:
+        """Click field, type doc type, click arrow, press TAB (one row)."""
+        self.log_action(f"row {idx}/{total}: doc type {doc} (y={row_y})")
+        self.click(Point(DOC_FIELD_X, row_y), f"doc field row {idx}")
+        sleep_short(0.3)
+        self.write(doc)
+        sleep_short(0.3)
+        self.click(Point(DOC_ARROW_X, row_y), f"doc arrow row {idx}")
+        sleep_short(0.5)
+        self.press("tab")
+        sleep_short(0.3)
+
     def assign_doc_types_and_upload(self, folder_path: str) -> bool:
         """Assign doc types to attached files and perform Upload/OK/Close.
 
-        Runs after the 2nd Open (XML files) in the attachment popup:
+        Runs after the 2nd Open (XML files) in the attachment popup.
+        v5.2 VIEW LOOP (grid scrolling, no post-type verification):
 
-            1. Screenshot; crop to the attachment popup (live rect when
-               available, fixed DOC_GRID_BOUNDS fallback).
-            2. OCR the crop (PSM 6, normal + colour-inverted pass for the
-               blue selected row) and group the words into TEXT LINES via
-               tesseract line ids — wrapped path rows never break this.
-            3. Folder-driven 1:1 matching: every patient folder file must
-               match exactly ONE grid line (strict stem+extension tier,
-               loose stem fallback). Any not-found or ambiguous file is an
-               ABORT (no Upload click); the patient is marked failed for
-               human review — doc types are never guessed.
-            4. Per row (top to bottom): click the doc type combo field,
-               type the doc type, click the combo arrow, press TAB.
-            5. After all rows: click Upload (598,730), press Enter (OK),
-               click Close (1408,734).
+            1. OCR the visible grid (existing 4-pass pipeline unchanged);
+               match UNPROCESSED folder files to visible lines 1:1
+               (3-tier matcher unchanged).
+            2. Per new match (top→bottom): click doc field, type doc type,
+               click combo arrow, TAB. Mark the file PROCESSED (row identity
+               = filename stem+ext in the line text, NOT screen position).
+            3. While files remain: scroll the grid down, re-OCR, match only
+               the unprocessed files; rows already processed that reappear
+               in the scroll overlap are SKIPPED (not re-typed, not
+               ambiguous).
+            4. When all files are typed: Upload (598,730) immediately ->
+               Enter (OK) -> Close (1408,734) -> popup-gone verify.
+               (The v5.1 doc-cell verification walk was REMOVED after the
+               2026-09-04 live runs — the OCR of short cell values (DTR,
+               CF4, ESA) was unreliable and blocked Uploads of visually
+               correct assignments. The duplicate-row guard remains in the
+               per-view 1:1 matching during typing.)
 
         Guardrails (loop-engineering Principle 4):
-            - Any not-found/ambiguous/unclassifiable file -> ABORT
-              (no Upload click; partial doc-type assignment is unsafe).
-            - File cap (MAX_DOC_ROWS) against runaway loops.
-            - A debug crop (logs/debug_doc_grid_*.png) is saved every run.
-            - Scrolling is not handled: only rows visible in the popup are
-              matched; scrolled-out files surface as not_found -> ABORT.
+            - Never-guess: not-found / ambiguous / scroll failure ->
+              ABORT before any Upload click.
+            - MAX_SCROLL_ITERATIONS caps the view loop.
+            - No-progress detection: two consecutive identical view
+              fingerprints -> heavier scroll retry -> ABORT if stuck.
+            - MAX_DOC_ROWS file cap; debug crop saved every view.
 
         Returns True on success; False on failure.
         """
@@ -871,29 +944,6 @@ class AttachmentsOperator:
             )
             return False
 
-        if not self.live:
-            for name in folder_files:
-                if name.lower().endswith(".pdf"):
-                    doc = detect_doc_type("\\" + name)
-                else:
-                    doc = detect_doc_type("_" + name)
-                self.log_action(f"  would set doc type {doc!r} for {name}")
-            self.log_action("would click Upload -> Enter (OK) -> Close")
-            return True
-
-        # --- 1. Popup crop + OCR text lines ---------------------------------
-        sleep_short(1.5)  # let the grid settle after the 2nd Open
-        screenshot = pyautogui.screenshot()
-        crop_box = self._popup_crop_box(screenshot)
-        crop = screenshot.crop(crop_box)
-        self._save_doc_grid_debug(crop)
-        lines = ocr_grid_lines(crop, crop_box[0], crop_box[1])
-        self.log_action(f"OCR: {len(lines)} text line(s) in popup crop")
-        if not lines:
-            self.log_action("ABORT: no OCR text lines found in popup crop")
-            return False
-
-        # --- 2. Classify every folder file (unknown stem -> ABORT) ----------
         file_docs: dict[str, str] = {}
         for name in folder_files:
             prefix = "\\" if name.lower().endswith(".pdf") else "_"
@@ -905,51 +955,89 @@ class AttachmentsOperator:
                 return False
             file_docs[name] = doc
 
-        # --- 3. 1:1 file <-> grid-line matching ------------------------------
-        matched, not_found, ambiguous = match_files_to_lines(
-            folder_files, lines
-        )
-        for name, line in matched:
+        if not self.live:
+            for name in folder_files:
+                self.log_action(f"  would set doc type {file_docs[name]!r} for {name}")
+            self.log_action("would click Upload -> Enter (OK) -> Close")
+            return True
+
+        # --- 1. VIEW LOOP -----------------------------------------------------
+        sleep_short(1.5)  # let the grid settle after the 2nd Open
+        self._last_crop_box = None
+        processed: set[str] = set()
+        typed_rows = 0
+
+        for view_no in range(1, MAX_SCROLL_ITERATIONS + 1):
+            lines, _ = self._ocr_doc_grid_view(view_no)
             self.log_action(
-                f"  {name} -> row y={line.center_y} "
-                f"({line.norm_text[-40:]!r})"
+                f"view {view_no}: {len(lines)} line(s), "
+                f"{len(processed)}/{len(folder_files)} files processed"
             )
-        if ambiguous:
-            for name, count in ambiguous:
+            if not lines:
+                self.log_action("ABORT: no OCR text lines found in popup crop")
+                return False
+
+            unprocessed = [f for f in folder_files if f not in processed]
+            matched, not_found, ambiguous = match_files_to_lines(
+                unprocessed, lines
+            )
+            if ambiguous:
+                for name, count in ambiguous:
+                    self.log_action(
+                        f"ABORT: {name} matches {count} grid rows — "
+                        f"duplicate or twin-stem rows need human review"
+                    )
+                return False
+
+            # Type doc types for newly matched rows (top to bottom)
+            rows_plan = sorted(
+                ((file_docs[name], line.center_y) for name, line in matched),
+                key=lambda item: item[1],
+            )
+            for i, (doc, row_y) in enumerate(rows_plan, start=1):
+                self._type_row_doc(doc, row_y, typed_rows + i, len(folder_files))
+            for name, _line in matched:
+                processed.add(name)
+            typed_rows += len(rows_plan)
+
+            if len(processed) == len(folder_files):
+                break  # all files typed — go straight to Upload
+
+            # --- scroll down for the remaining files -----------------------
+            remaining = [f for f in folder_files if f not in processed]
+            fingerprint = self._view_fingerprint(lines)
+            self._scroll_grid_down()
+            new_lines, _ = self._ocr_doc_grid_view(
+                view_no + 1, tag="post-scroll"
+            )
+            new_fingerprint = self._view_fingerprint(new_lines)
+
+            if new_fingerprint == fingerprint:
+                # grid did not move — retry once via heavier scroll
                 self.log_action(
-                    f"ABORT: {name} matches {count} grid rows — duplicate "
-                    f"or twin-stem rows need human review"
+                    "scroll had no effect; retrying with heavier scroll"
                 )
-            return False
-        if not_found:
+                pyautogui.scroll(-5)
+                sleep_short(0.8)
+                new_lines, _ = self._ocr_doc_grid_view(
+                    view_no + 1, tag="retry"
+                )
+                if self._view_fingerprint(new_lines) == fingerprint:
+                    self.log_action(
+                        f"ABORT: cannot scroll to remaining files: "
+                        f"{', '.join(remaining)}"
+                    )
+                    return False
+
+        if len(processed) != len(folder_files):
+            remaining = [f for f in folder_files if f not in processed]
             self.log_action(
-                f"ABORT: {len(not_found)} file(s) not found in the grid "
-                f"text (scrolled out, unreadable, or leftover rows): "
-                f"{', '.join(not_found)}"
+                f"ABORT: {len(remaining)} file(s) still not found after "
+                f"{MAX_SCROLL_ITERATIONS} views: {', '.join(remaining)}"
             )
             return False
-        if len(matched) != len(folder_files):  # paranoia guard
-            self.log_action("ABORT: file/line count mismatch after matching")
-            return False
 
-        rows_plan: list[tuple[str, int]] = sorted(
-            ((file_docs[name], line.center_y) for name, line in matched),
-            key=lambda item: item[1],
-        )
-
-        # --- 4. Per-row: click field, type, arrow down, TAB -----------------
-        for idx, (doc, row_y) in enumerate(rows_plan, start=1):
-            self.log_action(f"row {idx}/{len(rows_plan)}: doc type {doc}")
-            self.click(Point(DOC_FIELD_X, row_y), f"doc field row {idx}")
-            sleep_short(0.3)
-            self.write(doc)
-            sleep_short(0.3)
-            self.click(Point(DOC_ARROW_X, row_y), f"doc arrow row {idx}")
-            sleep_short(0.5)
-            self.press("tab")
-            sleep_short(0.3)
-
-        # --- 5. Upload, OK, Close ------------------------------------------
+        # --- 2. Upload, OK, Close (immediately after the last typed row) ----
         self.click(Point(*DOC_UPLOAD_BUTTON), "Upload")
         sleep_short(2.0)  # wait for the OK confirmation dialog
         self.press("enter")  # OK
@@ -958,7 +1046,7 @@ class AttachmentsOperator:
         sleep_short(1.0)
 
         self.log_action(
-            f"doc types assigned ({len(rows_plan)} rows) and uploaded"
+            f"doc types assigned ({typed_rows} rows across views) and uploaded"
         )
         return True
 

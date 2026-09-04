@@ -39,6 +39,221 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-09-04 — Claim Attachments doc type: v5.2 verification REMOVED (Upload agad pagkatapos ng huling row)
+
+Reason:
+
+- Live run 14:xx (GUIUO): v5.1 ay naayos na ang DTR cell read (band
+  window + arrow exclusion gumana), PERO nag-VERIFY FAIL ulit sa
+  iba pang file — "expected 'CF4', doc cell read 'F'" (partial read ng
+  maikling value). Dalawang beses na (DTR None, CF4 'F') na-block ng
+  cell OCR ang Upload kahit TAMA ang lahat ng doc types sa visual
+  (kumpirmasyon ng may-ari).
+- Desisyon ng may-ari: tanggalin na ang verification — pagkatapos i-type
+  ang huling doc type (eSOA/ESA), direktang Upload → OK (Enter) → Close.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `assign_doc_types_and_upload()`: pagkatapos ng view loop (lahat ng
+    files PROCESSED) — DIRETSA sa Upload (598,730) → Enter (OK) →
+    Close (1408,734). Walang verification pass. Docstring updated.
+  - Binura (dead code): `_verify_doc_column_values()`,
+    `_ocr_doc_cell()`, `_doc_value_matches()`, `_scroll_grid_top()`,
+    at `DOC_COLUMN_PAD` constant — lahat ng caller ay verify pass lang.
+  - Mananatili: `_scroll_grid_down()`, `_ocr_doc_grid_view()`,
+    `_view_fingerprint()`, `_type_row_doc()` (gagamit pa ng view loop),
+    at ang unused na `find_row_separator_lines` import ay inalis.
+  - Ang duplicate-row guard ay NASA TAMANG lugar pa rin: per-view 1:1
+    matching habang nagta-type (1 file = 2+ rows sa isang view = ABORT
+    bago mag-type ng kahit ano).
+- Modified `core/claim_attachments_doc_type.py` (tests lang):
+  - Binura ang v5.1 band-window/policy/doc-value tests (naka-depend sa
+    mga buradong methods).
+  - Bagong v5.2 structural test: kumukumpirma na wala na ang verify
+    methods sa operator (upload sequence = last typed row → Upload).
+  - Mananatili ang lahat ng matching/fingerprint/5 live-crop tests.
+
+Behavior:
+
+- Bago: 10/10 rows typed, pero nag-a-ABORT ang verify pass sa flaky
+  cell reads (DTR None / CF4 'F') — hindi nakaka-click ng Upload kahit
+  tama ang lahat.
+- Ngayon: view 1 (rows 1-9) → scroll → view 2 (eSOA/ESA) → **Upload →
+  OK (Enter) → Close** — tuloy-tuloy, walang verification step.
+
+Safety:
+
+- Never-guess policy buo pa rin sa view loop: ambiguous/duplicate rows
+  sa typing phase, not_found files, scroll failure, MAX_SCROLL_ITERATIONS
+  — lahat ABORT bago ang Upload. Ang tinanggal LANG ay ang post-type
+  cell OCR na hindi kapani-paniwala sa maikling values.
+- Walang binago sa 4-pass OCR/matching pipeline at Upload/OK/Close coords.
+
+Verification:
+
+- `python core/claim_attachments_doc_type.py` — RESULT: PASSED (5 live
+  regression crops + v5 scroll tests + v5.2 structural test).
+- `py_compile` — OK; GUI import chain — OK.
+- Live test PENDING: GUIUO ulit — inaasahang log: view 1 (9 rows) →
+  scroll → view 2 (ESA) → Upload → OK (Enter) → Close → "doc types
+  assigned (10 rows across views) and uploaded". WALA nang verify lines.
+
+### 2026-09-04 — Claim Attachments doc type: v5.1 verify fix (band window + arrow exclusion + verified scroll-top)
+
+Reason:
+
+- Live run 13:17 (GUIUO, 10 files): GUMANA ang v5 view loop — view 1
+  typed 9 rows (COE..CF5), scroll OK, view 2 typed eSOA/ESA (10/10).
+  Pero nag-ABORT bago ang Upload: "VERIFY FAIL: DTR.pdf expected 'DTR',
+  doc cell read None". Hindi na-click ang Upload → Enter → Close.
+- Root causes (sa mismong debug_doc_grid_20260904_131759.png):
+  (1) `_ocr_doc_cell()` ay gumagamit ng ±11px window sa paligid ng
+      matched FILE-PATH line center_y — pero ang doc cell text ay
+      vertically centered sa ROW BAND, at ang wrapped paths (2-3 OCR
+      lines) ay naglalagay ng filename line malayo sa cell center
+      (DTR filename line y=467 vs band 443..473) → clipped glyphs → None.
+  (2) Kasama ng window ang combo ARROW glyph (x≈519..525) — binabasa
+      bilang stray letters ('TR V', 'TRJC') na nagpapabula sa cell value.
+  (3) `_scroll_grid_top()` ay isang beses lang na scroll(20) — naiwan
+      ang grid MID-SCROLL: ang verify view ay nawalan ng COE/CSF rows
+      (nasa itaas), at ang blue band ay nasa CF5 row pa rin.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - `_ocr_doc_cell()` v5.1: band-based vertical window (buong
+    separator-delimited row band, fallback ±14px), X-WINDOW NA WALANG
+    ARROW (x=467..509 — text column lang; ang arrow glyph ay nagbibigay
+    ng stray letters), 4x upscale, multi-threshold (150/190/120) PSM 7
+    reads, plain-gray fallback, alnum whitelist. Optional
+    view_image/crop_box params — nagre-reuse ng verify screenshot
+    (hindi per-row full-screen capture).
+  - `_scroll_grid_top()` — pulsed scroll-up (scroll(10) x hanggang 6)
+    na may fingerprint equality check: garantisadong nasa top kapag
+    tumigil na ang paggalaw ng view. Returns bool na.
+  - `_verify_doc_column_values()` — None-policy: MISMATCH (may nabasang
+    IBA) → ABORT pa rin (evidence ng mali/duplicate/leftover row);
+    UNREADABLE (None after 1 retry) → WARNING at magpatuloy — ang
+    duplicate-row threat ay huli na ng per-view 1:1 matching (ambiguous
+    check bago pa ang cell reads); hindi dapat mag-block ang OCR
+    flakiness sa Upload.
+  - Import ng `find_row_separator_lines`.
+- Modified `core/claim_attachments_doc_type.py` (tests lang):
+  - v5.1 band-window tests laban sa mismong 13:17 verify crop:
+    DTR doc cell reads 'DTR' (dati None) — PASSED; COE skip ay inaasahan
+    (mid-scroll crop). None/empty→proceed, mismatch→abort policy test.
+
+Behavior:
+
+- Bago: verify pass ay nag-a-ABORT sa unreadable cells (None) kahit
+  tama ang 1:1 matching at walang duplicates — na-block ang Upload sa
+  10-file patients kahit kumpleto na ang 10/10.
+- Ngayon: pagkatapos ng huling row (eSOA) → verified scroll-to-top →
+  walk ng views → band-based cell reads (DTR='DTR', COE='COE', atbp.)
+  → VERIFY PASS → **click Upload (598,730) → popup OK → press Enter →
+  click Close (1408,734)** → popup-gone verify. Mismatch lang (tunay
+  na mali/duplicate) o ambiguous rows ang nag-a-ABORT.
+
+Safety:
+
+- Never-guess policy nanatili: mismatch/ambiguous/duplicate = ABORT
+  bago ang Upload. Ang None-policy ay nagpapatakbo lamang sa mga
+  rows na pasado na sa 1:1 matching — walang nadadagdag na guess.
+- Walang binago sa 4-pass OCR/matching pipeline, Upload/OK/Close
+  coords, at buong attach flow bago ang doc-type step.
+
+Verification:
+
+- `python core/claim_attachments_doc_type.py` — RESULT: PASSED (5 live
+  regression crops + v5 unit tests + v5.1: DTR 'DTR' band read mula
+  sa mismong verify crop na dating None; policy decision table).
+- `py_compile` — OK; GUI import chain — OK.
+- Live test PENDING: GUIUO ulit — inaasahang log: 10/10 typed →
+  scroll-top verified → VERIFY PASS (posibleng WARNING sa ilang cell)
+  → Upload → OK (Enter) → Close → "doc types assigned (10 rows across
+  views) and uploaded".
+
+### 2026-09-04 — Claim Attachments doc type: v5 grid scrolling (view loop + pre-Upload verification)
+
+Reason:
+
+- Live run 11:31 (GUIUO, 10 files): 9/10 lang — ang `_eSOA.xml` ay nasa
+  ILALIM ng visible grid (below CF5.xml). Kailangan i-scroll down ang
+  popup grid. Dating behavior: not_found → ABORT (ligtas pero hindi
+  kumpleto — documented limitation simula v4).
+- Plan: `.kilo/plans/grid-scrolling-v5.md` (inaprubahan, implementado).
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py`:
+  - New constants: `MAX_SCROLL_ITERATIONS = 12`, `DOC_COLUMN_PAD = 6`.
+  - New helpers: `_scroll_grid_down()` (wheel -2 sa grid center),
+    `_scroll_grid_top()` (wheel +20), `_ocr_doc_grid_view()` (per-view
+    OCR na may debug screenshot naming), `_view_fingerprint()` (MD5 ng
+    normalised text lines sorted by y — positional shift ay hindi
+    nagbabago ng fingerprint, text change OO — no-progress guard),
+    `_type_row_doc()` (click field → type → arrow → TAB, one row),
+    `_ocr_doc_cell()` (Doc column strip OCR: 2x upscale, binarize,
+    PSM 7, alnum whitelist), `_doc_value_matches()` (OCR-noise tolerant
+    comparison gamit ang shared `_norm`).
+  - New `_verify_doc_column_values()`: PRE-UPLOAD VERIFICATION — scroll
+    sa taas, walk ng views, bawat file row ay i-OCR ang Doc column cell;
+    dapat tugma ang na-type na doc type (1 retry bago fail). Huli nitong
+    mahuhuli ang leftover duplicate rows mula sa mga na-ABORT na runs
+    (file-text row na walang laman na Doc cell → ABORT, walang Upload).
+  - `assign_doc_types_and_upload()` v5 VIEW LOOP: per view — OCR (4-pass
+    pipeline HINDI binago) → match UNPROCESSED files lang (processed
+    rows na nagre-reappear sa scroll overlap ay skip, hindi ambiguous) →
+    type rows top-to-bottom → mark PROCESSED (identity = text, hindi
+    position). May natira → scroll down → re-OCR. No-progress: pareho
+    ang fingerprint pagkatapos ng scroll → heavier scroll retry → kung
+    pareho pa rin → ABORT "cannot scroll to remaining files". Break sa
+    lahat PROCESSED → verify → Upload (598,730) → Enter → Close
+    (1408,734).
+  - `_save_doc_grid_debug()` may `name` parameter na para sa per-view
+    debug crops (view2_post-scroll, verify, atbp.).
+- Modified `core/claim_attachments_doc_type.py` (tests only, walang
+  pipeline change):
+  - GUIUO crop (debug_doc_grid_20260904_113159.png) idinagdag sa live
+    regression suite bilang documented scrolled-out case (9/10 sa
+    static crop; ang v5 loop ang nag-handle ng scroll sa live).
+  - v5 unit tests: unprocessed-eSOA matching sa view-2 overlap lines
+    (skip semantics), view fingerprint (positional shift ignored, text
+    change detected), doc cell value matching (E5A==ESA, S0A==SOA na
+    lehitimong OCR noise; CF4 != CF5; empty fails).
+
+Behavior:
+
+- Bago: 10+ files na pasyente → huling rows not_found → ABORT (walang
+  Upload, kailangan ng manu-manong intervention).
+- Ngayon: ang loop ay nag-scroll hanggang ma-process lahat ng files,
+  tapos nag-verify na ang LAHAT ng doc column cells ay may tamang doc
+  type bago i-click ang Upload. Never-guess policy nanatili: scroll
+  failure / verify mismatch / ambiguous = ABORT, walang Upload click.
+
+Safety:
+
+- Walang binago sa working OCR engine, XML generator, claims checker,
+  signing engine, o sa 4-pass OCR/matching pipeline mismo — view loop
+  at verification layer lang ang idinagdag.
+- Ang pre-Upload verification ay laging nangyayari BAGO ang Upload
+  click — verify-before-irreversible-action (loop-engineering
+  Principle 3).
+- Ang mga debug crop kada view (debug_doc_grid_view*.png) ay
+  nagpapahintulot ng post-mortem diagnosis ng anumang ABORT.
+
+Verification:
+
+- `python core/claim_attachments_doc_type.py` — RESULT: PASSED (5 live
+  regression crops: PASCUA 8/8, SAFLOR 8/8, SASPA 9/10, MATTERIG 8/8,
+  GUIUO 9/10 — parehong documented scrolled-out eSOA) + 3 v5 unit
+  tests (unprocessed matching, fingerprint, doc value matching).
+- `py_compile` tatlong files — OK; buong GUI import chain — OK.
+- Live test PENDING: `--live --confirm-each --limit 1` sa 10-file
+  patient (GUIUO) — inaasahang sa log: view 1 (9 rows typed) → scroll
+  → view 2 (eSOA typed) → verify pass → Upload → OK → Close.
+
 ### 2026-09-04 — Claim Attachments doc type v4.3: LIVE TEST PASSED + GitHub backup
 
 Reason:
