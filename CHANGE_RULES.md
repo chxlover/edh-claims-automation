@@ -39,6 +39,518 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-09-09 — Claim Attachments v7: DOCTYPE SOURCE-to-DESTINATION AUDIT (OCR readback removed)
+
+Reason:
+
+- Owner directive (2026-09-09): ang v6.2 OCR-readback audit ay lumikha ng
+  maraming "REVIEW - READ_FAILED" (ang HBSys grid cells ay hindi mabasa
+  ng OCR nang maaasahan). Bagong verification model: i-verify ang
+  SOURCE (processing order + existing extracted DOCTYPE) laban sa
+  ACTUAL DESTINATION FILES sa
+  `C:\Shared Folder\eClaimsDoc\<CLAIM_SERIES>\` — ang destination
+  FILENAME (`...-RAW-<DOCTYPE>-<NUMBER>.pdf/.xml`) ang tanging
+  verification source; WALANG OCR, screenshot OCR, image recognition,
+  o visual text recognition sa bagong verification. Ang existing
+  extraction at assignment (v6.1 tab-walk) ay HINDI binago — audit
+  layer LANG.
+
+Files:
+
+- REWRITTEN `core/claim_attachments_doctype_audit.py` (v6.2 OCR
+  readback modules REPLACED — the readback approach is what produced
+  READ_FAILED noise; task explicitly forbids keeping OCR in the new
+  verification):
+  - `normalize_doctype()` — pinned (strip/upper/None).
+  - NEW `normalize_sequence()` — "01"/"1"/1 ay logically equal (int
+    compare); original display value preserved sa report.
+  - `extract_claim_series_from_title()` — pinned (existing popup-title
+    value; walang second extraction mechanism).
+  - NEW `SourceAuditRecord` + `SourceAuditCollector` — in-memory source
+    records; `start_series()` resets the per-claim-series sequence to
+    01 (destination files ay per-claim-series ang numbering);
+    `add()` assigns "01","02",... sa ACTUAL processing order.
+  - NEW `parse_destination_filename()` — deterministic generic regex
+    `-RAW-([A-Za-z0-9]{2,4})-(\d{1,3})$` on the extension-stripped
+    stem: `DOH-PDFA-1b-RAW-CF4-08.xml` → ("CF4","08"); walang
+    hardcoded doc-type vocabulary, walang AI/fuzzy.
+  - NEW `scan_destination_folder()` — single listing ng claim series
+    destination folder; None kapag wala ang folder (caller records
+    REVIEW, hindi crash).
+  - NEW `audit_claim_series()` — source vs destination comparison:
+    number+doctype MATCH; missing destination number → MISMATCH
+    "Destination file not found"; DOCTYPE mismatch → MISMATCH;
+    duplicate destination numbers → MISMATCH "Duplicate destination
+    sequence number" (never silently chosen); destination number na
+    walang source record → "UNEXPECTED DESTINATION"; unparseable
+    destination filename → REVIEW "Unable to parse destination
+    filename"; missing claim series folder → REVIEW "Claim Series
+    destination folder not found" (hindi-crash).
+  - REMOVED: `interpret_doc_ocr()`, `read_doc_type_cell()`,
+    `DocTypeAuditRecord` (actual_selected_doctype), OCR cell geometry
+    constants, pytesseract usage — ang buong OCR readback path ay
+    tinanggal sa audit (task §2/§22).
+  - `build_doctype_audit_excel()` / `finalize_doctype_audit()` — bagong
+    12-column report (Status, Reason, Claim Series Number, Source
+    Number, Source Filename, Source Full Path, Extracted DOCTYPE,
+    Destination Number, Destination Filename, Destination Full Path,
+    Destination DOCTYPE, Timestamp — WALANG "Actual Selected DOCTYPE"
+    o OCR readback fields); summary: DOCTYPE SOURCE-DESTINATION AUDIT /
+    TOTAL RECORDS / MATCH / MISMATCH / REVIEW / UNEXPECTED DESTINATION
+    (calculated mula sa actual records); bold headers, freeze panes,
+    auto-filter, column widths, status colors (MATCH=green,
+    MISMATCH=red, REVIEW=yellow, UNEXPECTED=red error-highlight);
+    ONE build pagkatapos ng buong batch + auto-open (os.startfile).
+- `core/claim_attachments_uploader.py`:
+  - `AttachmentsOperator.__init__` — `doctype_audit_records` (v6.2) →
+    `source_audit: SourceAuditCollector` + `doctype_audit_results`
+    (audit rows). 
+  - NEW `_current_claim_series()` — claim series mula sa EXISTING
+    popup title (reuse ng `extract_claim_series_from_title`).
+  - REMOVED `_audit_doc_type_selection()` (OCR readback + screenshot
+    kada row) — REPLACED ng:
+    - `_audit_source_document()` — tinatawag IMMEDIATELY pagkatapos ng
+      bawat successful copy + existing extraction sa v6.1 tab-walk;
+      nagre-record ng source record KASAMA ang per-series source number
+      (01, 02, ... processing order, hindi sorted filenames, hindi
+      Explorer order); consumed value = existing
+      `file_docs[matched_file]`.
+    - `_audit_destination_for_series()` — ONE destination folder scan
+      pagkatapos ng Upload/OK/Close ng claim series
+      (`audit_claim_series`); results appended in-memory.
+  - `assign_doc_types_and_upload()` — `start_series()` bago ang
+    tab-walk; `_audit_source_document()` kada row (pagkatapos ng
+    `_type_row_doc`, kung saan nag-success ang copy); destination
+    audit pagkatapos ng Upload→OK→Close. Ang tab-walk, extraction,
+    selection, Upload sequence ay HINDI ginalaw.
+  - `run_attachments_loop()` — finalize ng bagong report (pagkatapos ng
+    buong batch, auto-open).
+  - Imports updated (WALANG pyautogui screenshot / OCR sa audit path).
+- `gui/claim_attachments_tab.py` — `_upload_worker` finalize block:
+  `doctype_audit_records` → `doctype_audit_results`. Walang iba pang
+  GUI changes.
+
+Behavior:
+
+- Per document (LIVE): existing copy → existing extraction → existing
+  selection (lahat HINDI binago) → source record na may next na
+  per-series sequence number (01, 02, ...).
+- Per claim series (pagkatapos ng Upload): isang scan ng
+  `C:\Shared Folder\eClaimsDoc\<SERIES>\`; kada source record: hanapin
+  ang destination entry na may PAREHONG filename sequence number →
+  compare number + normalized DOCTYPE → MATCH/MISMATCH; detect
+  unexpected destinations, duplicate numbers, unparseable filenames,
+  missing folder (REVIEW, hindi crash).
+- Pagkatapos ng buong batch (CLI at GUI): isang Excel report na may
+  summary + colored rows, auto-open.
+- Dry-run: walang source records (walang aktwal na copy sa live grid
+  loop) → walang report.
+
+Safety / compatibility:
+
+- Never-guess: duplicate destination numbers ay laging MISMATCH
+  (listed lahat ng candidates sa reason); missing folder ay REVIEW;
+  unparseable filename ay REVIEW — hindi kailanman MATCH.
+- Performance: +1 in-memory record kada row (microseconds); +1 folder
+  listing kada claim series; WALANG OCR, WALANG screenshots, WALANG
+  per-document Excel writes — mas mabilis pa sa v6.2 (na may +1
+  screenshot + 2 OCR passes kada row).
+- Ang v6.1 ABORT guards (copy fail / foreign path / duplicate focus /
+  no focused row) ay hindi ginalaw — source records lang ang nadadagdag
+  pagkatapos ng successful copy/match.
+- Walang binagong: doc_type extraction tables, tab-walk flow, Upload
+  sequence, XML/PDF handling, claims processing, database, ibang GUI
+  components. `normalize_doctype` signature unchanged (pinned).
+
+Verification:
+
+- `python -m core.claim_attachments_doctype_audit` — 29/29 PASSED
+  (normalize doctype/sequence, generic destination parsing kasama ang
+  XML/3-digit/OTH + junk cases, popup-title claim series, per-series
+  sequence reset, TEST 1 normal match, TEST 2 DOCTYPE mismatch, TEST 3
+  number mismatch, TEST 4 missing destination, TEST 5 unexpected
+  destination, TEST 6 duplicate number, TEST 7 10-document perfect
+  match in processing order, TEST 8 multiple claim series +
+  mixed-batch filtering, missing folder REVIEW, unparseable filename
+  REVIEW, Excel summary counts/columns/colors/freeze/auto-filter,
+  finalize empty→None).
+- `python -m core.claim_attachments_doc_type` — PASSED (59/59
+  regression — extraction untouched).
+- `python -m unittest discover tests` — 87/87 OK (no regressions).
+- `python -m py_compile` (uploader + audit + gui tab) + `-W error`
+  import — passed.
+- Uploader dry-run — malinis (HBSys window error lang, inaasahan).
+- End-to-end vs REAL destination folders: VILORIA/260909144200 →
+  10/10 MATCH; VENTURA/260818103440 → 8/8 MATCH (parehong claim series
+  folders sa `C:\Shared Folder\eClaimsDoc`).
+- Live batch re-test PENDING (kailangan ng live HBSys run; tingnan ang
+  per-row "doctype audit: source NN -> DOC" logs at ang "claim series
+  X vs eClaimsDoc destination — MATCH=n, ..." log kada patient).
+
+### 2026-09-09 — Claim Attachments v6.2: DOCTYPE selection AUDIT + Excel verification report
+
+Reason:
+
+- Owner directive (2026-09-09): kailangan ng deterministic audit na
+  nagpapatunay na ang DOCTYPE na EXTRACTED mula sa source filename ay
+  talagang ang NAPILI sa HBSys UI — hindi lang ang internal variable.
+  "Did the DOCTYPE that the automation extracted from the source
+  filename/path actually become the DOCTYPE selected in the HBSys UI?"
+- Ang existing extraction/selection flow (v6.1 tab-walk) ay HINDI
+  binago — readback + comparison + audit logging LANG ang dinagdag.
+
+Files:
+
+- NEW `core/claim_attachments_doctype_audit.py` — self-contained audit
+  module (AGENTS.md modularity rule):
+  - `normalize_doctype()` — deterministic strip/upper/None lang.
+  - `interpret_doc_ocr()` — STRICT-VOCABULARY OCR interpretation: ang
+    reading ay tinatanggap LANG kapag normalise (project OCR-confusion
+    mapping _norm: O/0, S/5, I/L/1, B/8, Z/2) patung sa EXACT na isa sa
+    14 known doc values; kung hindi → None (READ_FAILED). Walang fuzzy,
+    walang AI.
+  - `read_doc_type_cell(image, row_y)` — actual HBSys cell readback: crop
+    ng Doc Type cell (x=468..512, row_y±12px, arrow excluded), 3x scale
+    grayscale + fixed-threshold OCR passes (PSM 7, A-Z0-9 whitelist).
+    Bakit OCR: ang HBSys grid cells ay walang control-level text API
+    (custom FNWNS3115 painting — parehong dahilan bakit OCR ang grid
+    reading stack ng project mula v4).
+  - `extract_claim_series_from_title()` — claim series mula sa EXISTING
+    popup title ('Attachments for X - 260907095364' → '260907095364');
+    walang second extraction mechanism.
+  - `DocTypeAuditRecord` dataclass — in-memory record kada document:
+    status, claim_series_number, source_filename, source_full_path,
+    extracted_doctype, actual_selected_doctype, timestamp.
+  - `build_doctype_audit_excel()` / `finalize_doctype_audit()` — Excel
+    report: DOCTYPE VERIFICATION SUMMARY section (TOTAL/MATCH/MISMATCH/
+    REVIEW counts mula sa actual records), bold header + freeze panes +
+    auto-filter + column widths, status highlighting (MATCH=green,
+    MISMATCH=red, REVIEW=yellow), ONE build pagkatapos ng BUONG batch,
+    auto-open via os.startfile. SHA-256 fields ay HINDI idinagdag (walang
+    existing hash data sa doc-type flow; task §8 ay optional).
+- `core/claim_attachments_uploader.py`:
+  - `AttachmentsOperator.__init__` — `doctype_audit_records: list`
+    (in-memory lang habang nagpaprocess).
+  - Bagong `_audit_doc_type_selection()` — tinatawag IMMEDIATELY pagkatapos
+    ng bawat `_type_row_doc` (pagkatapos ng arrow click, bago ang TAB
+    focus move): readback ng ACTUAL selected value → comparison →
+    MATCH/MISMATCH/REVIEW record + log. Hindi blocking — record lang,
+    tuloy ang workflow (audit, hindi bagong fail-safe).
+  - `run_attachments_loop()` — pagkatapos ng buong batch: isang tawag sa
+    `finalize_doctype_audit()` (Excel build + auto-open), live records
+    lang (dry-run ay walang records — walang pinili sa HBSys).
+  - Imports updated. Ang v6.1 tab-walk, extraction, at selection flow ay
+    HINDI ginalaw.
+- `gui/claim_attachments_tab.py` — `_upload_worker`: pagkatapos ng
+  buong batch (mark_completed), isang tawag sa `finalize_doctype_audit()`
+  + log sa GUI. Walang iba pang GUI changes.
+
+Behavior:
+
+- Per document (LIVE lang): extracted = existing `file_docs[matched_file]`
+  (HINDI binago) → existing `_type_row_doc` selection (HINDI binago) →
+  NEW readback ng actual cell value → compare:
+  extracted == actual → MATCH; actual == READ_FAILED → REVIEW (hindi
+  kailanman MATCH); iba → MISMATCH. Isang audit record kada document,
+  in-memory; tuloy ang processing anuman ang status.
+- Dry-run: walang records (walang aktwal na selection sa HBSys).
+- Pagkatapos ng buong batch (CLI at GUI): isang Excel report na may
+  summary + colored rows, auto-open.
+
+Safety / compatibility:
+
+- Never-guess: unreadable cell → REVIEW, hindi MATCH; MISMATCH ay hindi
+  pwedeng maging MATCH (strict vocabulary, walang fuzzy).
+- Ang mismong existing ABORT guards (copy fail / foreign path /
+  duplicate focus / no focused row) ay hindi ginalaw — ang audit ay
+  non-blocking at nangyayari LANG kapag successful na ang selection.
+- Performance: +1 screenshot + 2 OCR passes sa maliit na cell crop kada
+  row (~0.3-0.5s) — walang full-screen OCR, walang hash recomputation,
+  walang per-row Excel writes.
+- Walang binagong: doc_type extraction tables, tab-walk flow, Upload
+  sequence, XML/PDF handling, claims processing, database, ibang GUI
+  components. openpyxl ay existing dependency na (fees_checker,
+  not_transmitted_batches).
+
+Verification:
+
+- `python -m core.claim_attachments_doctype_audit` — 16/16 PASSED
+  (normalize, MATCH/MISMATCH comparisons, strict-vocabulary interpretation
+  kasama ang garbage→None, synthetic cell readback COE/CF4/empty, claim
+  series parsing, Excel build: summary counts, freeze panes, auto-filter,
+  status colors, one row per document, finalize no-records→None).
+- `python -m core.claim_attachments_doc_type` — 59/59 PASSED (regression).
+- `python -m py_compile` (warnings-as-errors) sa uploader + audit +
+  gui tab — passed.
+- Uploader dry-run — malinis (READY folder ay walang laman ngayon; HBSys
+  window focus error lang ang inaasahan nang walang bukas na HBSys).
+- `import gui.claim_attachments_tab` — passed.
+- Live test PENDING: isang LIVE batch; tingnan ang per-row
+  "doctype audit: MATCH/MISMATCH/REVIEW" logs at ang auto-open na Excel
+  report pagkatapos ng batch.
+
+### 2026-09-08 — Claim Attachments doc type v6.1: TAB-WALK (walang scroll, hanggang ESA)
+
+Reason:
+
+- Live run 2026-09-08 09:10 (ANDAYA + VENTURA, 15 files): rows 1-9 OK
+  via clipboard copy (tamang doc type, tamang row — "...\ANR.pdf" hanggang
+  "...\OPR.pdf" ang naka-log na path). PBC (row 10) ay "no context menu
+  appeared" — ito ang partially-visible last row sa viewport, hindi
+  pwedeng i-right-click. Pagkatapos, ang OCR-fallback anchor ay nagbigay
+  ng y=998 (LABAS ng popup — bottom=758) at nag-type doon; ang wheel
+  scroll (960,540) ay sumira ng grid state (0 bands, garbage anchors
+  y=1419/1446) → lahat ng right-click nag-fail → ABORT sa dalawang patient.
+- Owner directive (2026-09-08): "after mapili ng doc type TAB lang
+  pindutin wag na scroll hanggang matapos ang files bale ESA ang
+  pinakalast" — TAB ang gumagalaw ng focus, HBSys mismo ang nag-a-auto-
+  scroll ng focused row, ESA ang huling doc type, at dapat malagyan ng
+  doc type ang LAHAT ng na-upload na documents.
+
+Files:
+
+- `core/claim_attachments_uploader.py`:
+  - `assign_doc_types_and_upload()` — pinalitan ang v6.0 view/scroll
+    loop ng v6.1 TAB-WALK: focused (blue) row → right-click "copy" →
+    clipboard FULL ABSOLUTE PATH → match sa patient file (exact basename
+    + expected parent) → type doc type → arrow → TAB → next focused row,
+    kada row hanggang mabuo ang `len(processed) == len(folder_files)`;
+    pagkatapos ay Upload → Enter (OK) → Close (v5.2, unchanged). Step 0
+    (folder listing, file_docs, expected_parent, dry-run) HINDI binago.
+  - Bagong `_focused_row_y()` — focused row detection via blue highlight
+    band (`find_highlight_band`, pixel scan, WALANG OCR); band top >= 50px
+    mula sa popup top (title/header excluded), height >= 8px; retry
+    hanggang 2.0s (0.15s interval); None kapag walang valid focus.
+  - TINANGGAL (dead live machinery): `_scroll_grid_down()`,
+    `_ocr_doc_grid_view()`, `_row_bands_from_screenshot()`,
+    `_bands_from_lines()`, constant `MAX_SCROLL_ITERATIONS`, at ang
+    buong no-progress/heavier-scroll logic.
+  - `_view_fingerprint()` — PINANATILI (ginagamit ng offline test suite
+    ng doc_type module); docstring updated.
+  - Imports pruned: tanggal `find_row_separator_lines`,
+    `match_files_to_lines`, `ocr_grid_lines`; dagdag
+    `find_highlight_band`; panatili `detect_doc_type`,
+    `match_copied_path_to_file`.
+- `CHANGE_RULES.md` (this record) at `DOC_TYPE_ASSIGNMENT_PLAN.md`
+  (v6.1 history row + status) — updated.
+- `core/claim_attachments_doc_type.py` — WALANG production changes.
+- `requirements.txt` — WALANG changes (pyperclip==1.11.0 na mula v6.0).
+
+Behavior:
+
+- Before (v6.0): pixel band scan ng visible rows + wheel scroll + OCR
+  fallback — nagiging unstable kapag >10 files (partially-visible row 10
+  ay hindi ma-right-click; wheel scroll sumira ng state).
+- After (v6.1): kada row — blue focused band → copy path → type → TAB.
+  WALANG manual scrolling KAHIT KAILAN: ang TAB ang nag-a-advance ng
+  grid focus at si HBSys ang nag-a-auto-scroll ng focused row papunta
+  sa view (na-solve ang >10-file case). Row identity = clipboard full
+  absolute path (hindi position, hindi row number, hindi OCR). Inaasahan
+  ang ESA (eSOA.xml) bilang huling doc type, pero ang authoritative
+  completion condition ay `len(processed) == len(folder_files)`.
+
+Safety:
+
+- Never-guess ABORTs (lahat bago ang anumang Upload click, na may buong
+  path sa log): no focused blue row, copy failure, foreign path (hal.
+  VILLARUEL XML sa maling grid), duplicate focus (bumalik ang focus sa
+  nagawang row).
+- Upload ay nangyayari LANG pagkatapos mabuo ang LAHAT ng expected files
+  — walang partial upload.
+- MAX_DOC_ROWS = 40 cap — pinanatili.
+- WALANG OCR sa live path; WALANG scroll sa live path; dry-run unchanged
+  (log lang).
+
+Verification:
+
+- `python -m py_compile` (warnings-as-errors) sa uploader + doc_type
+  modules — passed.
+- `python -m core.claim_attachments_doc_type` — 59/59 PASSED (hindi
+  binago ang tests).
+- `python -m core.claim_attachments_uploader` (dry-run) — malinis:
+  "assigning doc types for attached files (v6.1 tab-walk)" +
+  "would right-click the focused row, copy, type, TAB — until ESA".
+- `python -c "import gui.claim_attachments_tab"` — passed.
+- Live test PENDING (owner protocol): `--live --confirm-each --limit 1`
+  sa ~15-file patient; visual check ng doc type column bago iwan ang
+  Upload. Dapat ma-prove: row 10+ (dati partially-visible) ay napopro-
+  seso na, walang wheel scroll, tuloy hanggang ESA, at Upload lang sa
+  dulo.
+
+### 2026-09-08 — Claim Attachments doc type v6.0: CLIPBOARD-PRIMARY matching (owner-verified context menu)
+
+Reason:
+
+- Live run 2026-09-07 15:03 (15-file patients): 3 ABORT — MANAYAN
+  (CF2.pdf, CF3.pdf), ROY (MMC.pdf), VENTURA (MRF.pdf) — "still not
+  found after 12 views": may mga grid rows na HINDI mabasa ng kahit
+  anong OCR pass (normal/inverted/blue-band/row-band), kaya hindi
+  na-match ang file. Offline OCR trace sa mga saved debug crops ang
+  nagpatunay: purong garbage ('=~000000000020838-') ang nababasa sa
+  mga row na iyon.
+- FEDERIZO (owner-reported) at iba pang "successful" patients:
+  maling doc type assignment sa ilang rows (band-vs-line y offsets sa
+  wrapped rows, walang row-identity verification).
+- Research finding (kritikal): sa LAHAT ng 8 patients ng 15:03 batch,
+  ang XML rows sa grid ay file ni VILLARUEL, JUAN JR BAUTISTA-260825157234
+  (iba pang patient, Aug 25 claim) — nasa loob ng mga patient folder ang
+  mga XML na may VILLARUEL filename. Upstream issue ito (XML
+  generation/copy), HINDI doc type selection, at kailangang ayusin sa
+  XML generation step.
+- Owner-verified HBSys capability (probe, 2026-09-07): right-click sa
+  grid row → context menu na may tatlong items — "view", "copy", "open
+  location". Ang "copy" (single click) ay naglalagay sa clipboard ng
+  FULL ABSOLUTE PATH ng row (path + filename + extension) — 100%
+  deterministic, walang OCR noise.
+- Desisyon ng may-ari: clipboard-primary matching. Ang path mula sa
+  clipboard ang row identity; OCR ay fallback na lang.
+
+Files:
+
+- `requirements.txt`: idinagdag ang pyperclip==1.11.0 (dati transitive
+  dep; gagamitin na ng production code).
+- `core/claim_attachments_doc_type.py`:
+  - Added `match_copied_path_to_file(path, folder_files, expected_parent)`
+    — exact basename + patient-folder parent match; foreign folder o
+    unknown basename → None (never-guess).
+  - Added v6 unit tests (path match, foreign-folder guard,
+    case-insensitivity, unknown basename).
+- `core/claim_attachments_uploader.py`:
+  - Added `ROW_COPY_X = 700` (File Name column, safe sa Doc Type column).
+  - Added `_row_bands_from_screenshot()` — pixel-based row bands via
+    `find_row_separator_lines()` (no OCR; reliable sa hindi mababasang rows).
+  - Added `_bands_from_lines()` — OCR-line fallback anchors (v5-proven
+    click targets) kapag walang pixel separators.
+  - Added `_copy_row_path(row_y)` — right-click → #32768 menu →
+    MN_GETHMENU/GetMenuItemRect → click "copy" → poll clipboard change;
+    keyboard down+enter fallback (menu-confirm lang); Escape cleanup.
+  - Added `_find_context_menu()`, `_context_menu_copy_rect()`,
+    `_poll_clipboard_change()` helpers.
+  - Reworked `assign_doc_types_and_upload()` sa v6 clipboard-primary loop:
+    per-row INTERLEAVED flow (copy → type doc → arrow → TAB → next row),
+    band-center typing (FEDERIZO fix), scroll overlap skip by path
+    identity, duplicate-row ABORT (>20px apart sa isang view), foreign
+    path ABORT, OCR fallback para sa mga hindi ma-copy na row (unresolved
+    bands lang), v5 OCR-fingerprint no-progress detection (retained),
+    guardrails unchanged (MAX_SCROLL_ITERATIONS=12, MAX_DOC_ROWS=40).
+
+Behavior:
+
+- Before: OCR-text matching lang ang row identity; unreadable rows →
+  not_found → ABORT; band/line y-offset mismatch → maling row typing.
+- After: ang row identity ay ang COPIED PATH (exact) — deterministic;
+  unreadable-OCR rows ay nagagawa pa rin (pixel bands + clipboard);
+  typing sa band center; foreign/duplicate rows → ABORT (may path sa
+  log) bago mag-Upload; upload flow (v5.2) at guardrails unchanged.
+
+Safety / compatibility:
+
+- Never-guess guardrail palaban: foreign path, duplicate row, copy
+  failure + OCR not-found/ambiguous → ABORT bago ang Upload click.
+- Right-click ay nasa File Name column (x=700) — malayo sa Doc Type
+  combo column; walang click sa maling column.
+- Escape cleanup sa lahat ng failed menu paths; walang stray keypress
+  sa grid (keyboard fallback ay menu-confirmed lang).
+- OCR pipeline (4-pass) at 3-tier matcher unchanged — OCR fallback ang
+  gamit, hindi pinalitan.
+- Dry-run mode: walang clicks; log lang.
+- No GUI changes; pyperclip na lang ang bagong direct dep (naka-install
+  na sa venv).
+
+Verification:
+
+- `python -m core.claim_attachments_doc_type` — 59/59 PASSED (55 dati +
+  4 bagong v6 tests).
+- `python -m py_compile` (warnings-as-errors) sa uploader + doc_type —
+  passed.
+- Dry-run (`python -m core.claim_attachments_uploader`) — malinis ang
+  log flow, walang clicks.
+- GUI tab import check (`import gui.claim_attachments_tab`) — passed.
+- Live protocol PENDING: `--live --confirm-each --limit 1` — bago i-click
+  ang Upload, i-visual check ng may-ari ang doc type column; pag OK,
+  full batch. Inaasahan: wala nang ABORT sa klase ng MANAYAN/ROY/VENTURA
+  (unreadable rows), at tama ang row assignment (clipboard identity).
+
+### 2026-09-07 — Claim Attachments doc type v5.3: near-stem merge + twin-safe mutated tier (SORIANO CSF fix)
+
+Reason:
+
+- Live run 2026-09-07 11:44 (batch 20260907_114445): SORIANO, RODRIGO
+  REYES ay nag-ABORT sa doc type assignment — "1 file(s) still not
+  found after 12 views: CSF.pdf" — kahit visible naman lahat ng 8
+  files at hindi kailangang mag-scroll. (PALAMING, OK sa same batch.)
+- Root cause (2 defects, isolated via pass-by-pass trace sa saved
+  debug crops):
+  1. `merge_dual_pass_lines` v4.3 stem-gain rule: EXACT known stem
+     lang ang tinatanggap bilang "gain". Ang row-band pass ay nabasa
+     nang tama ang CSF row bilang '...C5E.PDF' (F->E OCR misread),
+     pero dahil hindi exact stem, itinapon ng merge rule ang tanging
+     mabuting pagbasa; nanatili ang garbage fragments ('-' + path).
+  2. `match_files_to_lines` mutated tier (v4.3): DEAD CODE pala —
+     pinatunayan ng repro na kahit ang documented na MATTERIG case
+     ('C4.XM1' para sa CF4) ay hindi kailanman tumama. Mali ang window
+     construction (end-trim ng pre-marker text sa halip na suffix
+     adjacent sa marker, kung saan talaga nakalagay ang stem).
+- HINDI dahil ito sa pagtatanggal ng v5.1 verification walk — ang ABORT
+  ay PRE-typing matching failure, hindi post-typing verify.
+
+Files:
+
+- Modified `core/claim_attachments_doc_type.py` (v5.3):
+  - Added `_PDF_STEM_SET` / `_XML_STEM_SET` / `_KNOWN_STEM_SET`
+    vocabulary tables.
+  - Added `_mutated_stem_match` — twin-safe 1-edit comparator: pinapayagan
+    ang letter substitutions/dropped chars (F->E, 'C4' for 'CF4') PERO
+    tinatanggihan ang digit-for-digit mutations (4->5, 1->2) para hindi
+    kailanman mag-cross-match ang SOA1/SOA2 at CF4/CF5.
+  - Added `_near_stem_before_marker` + `_has_near_stem` — 1-edit mutated
+    stem na adjacent lang sa extension marker ('.P'/'.X') ang tinatanggap;
+    stray mutated stem sa gitna ng path ay hindi.
+  - `merge_dual_pass_lines`: ang multi-overlap stem-gain rule ay
+    gumagamit na ng `_has_near_stem` (near-stem form) — mutated-stem
+    readings ('C5E.PDF') ay buhay na sa merged output.
+  - `_mutated_stem_candidates`: window ay SUFFIX adjacent sa marker na
+    may stem-1..stem+1 lengths, gamit ang `_mutated_stem_match`.
+  - Removed dead code: `_has_stem`, `_edit_distance_le1` (both fully
+    superseded).
+- Updated `DOC_TYPE_ASSIGNMENT_PLAN.md` (v5.3 history row + status).
+- Updated `CHANGE_RULES.md` (this record).
+
+Behavior:
+
+- Before: '\CSF.pdf' na nabasa bilang 'C5E.PDF' ay itinatapon sa merge
+  at hindi tumatama sa kahit anong tier -> not_found -> 12 views na
+  walang progress -> ABORT ng buong patient.
+- After: ang 'C5E.PDF' reading ay nakaligtas sa merge (near-stem gain)
+  AT tumatama sa mutated tier -> CSF.pdf matched -> tuloy ang typing
+  at Upload. Verified sa mismong failed SORIANO crop: 8/8 matched,
+  0 not_found, 0 ambiguous.
+- Twin safety preserved: CF4 never matches a 'CF5.XM1' row; SOA1 never
+  matches a 'S0A2.PDF' row (digit mutations rejected).
+
+Safety / compatibility:
+
+- Never-guess guardrail unchanged: not_found/ambiguous -> ABORT pa rin
+  bago mag-Upload.
+- Strict tier at loose tier unchanged; ang mutated tier lang (3rd/
+  weakest) at ang merge rule ang pinalawak.
+- No GUI changes; no new dependencies; no changes sa production engine.
+
+Verification:
+
+- `python -m core.claim_attachments_doc_type` — 55/55 PASSED,
+  kabilang ang 2 bagong live crop regressions (PALAMING 8/8 — OK
+  patient ng batch; SORIANO 8/8 — dati FAILED patient) at 4 bagong
+  v5.3 unit tests (near-stem merge survival, mutated-tier MATTERIG/
+  SORIANO cases, twin safety, marker adjacency).
+- `python -m py_compile` (warnings-as-errors) sa doc_type + uploader
+  modules — passed.
+- Offline re-run ng mismong failed SORIANO debug crop
+  (debug_doc_grid_20260907_114645.png): matched 8/8, not_found=[],
+  ambiguous=[] — dati 7/8 na may CSF.pdf not_found sa LAHAT ng views.
+- Live re-test PENDING: ulitin ang SORIANO patient via
+  `--live --confirm-each --limit 1` (o ang 2-patient READY batch).
+
 ### 2026-09-04 — Claim Attachments doc type: v5.2 verification REMOVED (Upload agad pagkatapos ng huling row)
 
 Reason:
