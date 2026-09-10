@@ -1,7 +1,19 @@
 # Claim Attachments — Doc Type Assignment Step
 
-Status: **LIVE TEST PASSED (v4.3, 2026-09-04)** — validated sa totoong HBSys;
-4 live regression crops (PASCUA, SAFLOR, SASPA, MATTERIG) ang sinalalabak.
+Status: **v7 SOURCE-to-DESTINATION AUDIT (2026-09-09)** — ang v6.1 TAB-WALK flow ay
+nananatili ( focused blue row → right-click "copy" → clipboard path identity → type →
+TAB, walang scroll, walang OCR sa matching). Ang v6.2 OCR-readback selection audit ay
+REPLACED: ang bagong verification ay SOURCE vs DESTINATION — kada successful copy,
+naitatala ang source record na may per-claim-series sequence number (01, 02, ... sa
+aktwal na processing order); pagkatapos ng Upload ng claim series, ISANG scan ng
+`C:\Shared Folder\eClaimsDoc\<SERIES>\` at deterministic parse ng
+`...-RAW-<DOCTYPE>-<NUMBER>.pdf/.xml` → compare ng number + extracted DOCTYPE →
+MATCH / MISMATCH / UNEXPECTED DESTINATION / REVIEW (duplicate numbers, unparseable
+names, missing folder). WALANG OCR sa verification (filename lang ang source ng
+destination DOCTYPE/number). Isang Excel report (12 columns, summary, colored) pagkatapos
+ng buong batch (auto-open). 29/29 audit module tests + 59/59 doc_type tests + 87/87
+project tests PASSED; live re-test PENDING. Open pa rin ang VILLARUEL XML upstream
+issue (XML generation step, hindi doc type).
 
 Owner: Melvin A. Calanda — Echague District Hospital
 
@@ -19,11 +31,23 @@ Owner: Melvin A. Calanda — Echague District Hospital
 | **v5** | 2026-09-04 | **View loop (grid scrolling) + pre-Upload doc-column verification** | 5 live regression crops PASSED; live 10-file patient PENDING |
 | **v5.1** | 2026-09-04 | **Band-based cell window (arrow excluded) + verified scroll-top + None-policy** | 13:17 run: 10/10 typed + scroll OK, pero verify "read None" nag-block sa Upload — FIXED (DTR='DTR' sa mismong crop) |
 | **v5.2** | 2026-09-04 | **Verification walk TANGGAL** — cell OCR ng maikling values (DTR/CF4) hindi kapani-paniwala; Upload agad pagkatapos ng huling row | 14:xx run: CF4 read 'F' → ABORT ulit kahit tama lahat sa visual — TANGGAL na ang verify; Upload → OK (Enter) → Close diretso |
+| **v5.3** | 2026-09-07 | **Near-stem merge gain + twin-safe mutated tier** — tinanggap ang 1-edit mutated stems ('C5E.PDF' para sa CSF) sa merge at mutated tier; digit-for-digit mutations (CF4↔CF5, SOA1↔SOA2) ay laging tinatanggihan | SORIANO live FAIL (11:48: CSF.pdf not_found sa 12 views → ABORT) ay FIXED offline sa mismong debug crop: 8/8 matched; 55/55 test suite; live re-test PENDING |
+| **v6.0** | 2026-09-08 | **CLIPBOARD-PRIMARY row identity** — right-click row → context menu "copy" → full absolute path sa clipboard (owner-verified); pixel row bands (separator lines, no OCR) + band-center typing; per-row interleaved flow (copy → type → arrow → TAB); foreign-path/duplicate-row ABORT; OCR fallback (v5.3 matcher) para sa mga hindi ma-copy na row | 15:03 batch failures na-diagnose offline (3 ABORT = unreadable OCR rows; FEDERIZO = band-vs-line offset); 59/59 offline tests; live re-test PENDING |
+| **v6.1** | 2026-09-08 | **TAB-WALK** — WALANG scroll: focused blue band (`find_highlight_band`, pixel scan) → right-click copy → type → TAB, kada row hanggang ESA; si HBSys ang nag-a-auto-scroll ng focused row; tanggal ang buong scroll/OCR-fallback machinery; duplicate-focus ABORT | 09:10 live run: PBC (row 10, partially visible) hindi ma-right-click + wheel scroll sumira ng state → ABORT ×2 (ANDAYA, VENTURA). v6.1 implemented; 59/59 offline tests; live re-test PENDING |
+| **v6.2** | 2026-09-09 | **SELECTION AUDIT** — pagkatapos ng bawat selection: actual HBSys cell readback (strict-vocabulary OCR: exact known-value lang ang tinatanggap, kundi READ_FAILED) → compare sa extracted → MATCH/MISMATCH/REVIEW record (in-memory, kada document) → isang Excel report pagkatapos ng buong batch (summary + colored rows + auto-filter + freeze panes + auto-open); non-blocking audit, hindi fail-safe | Audit module 16/16 tests; 59/59 doc_type regression PASSED; uploader dry-run + GUI import OK; live re-test PENDING |
+| **v7** | 2026-09-09 | **SOURCE-to-DESTINATION AUDIT** — tinanggal ang OCR readback (maraming REVIEW - READ_FAILED); bagong model: per-claim-series source sequence (01, 02, ... aktwal na copy order) + existing extracted DOCTYPE vs ACTUAL destination filenames sa `C:\Shared Folder\eClaimsDoc\<SERIES>\` (deterministic `RAW-<DOCTYPE>-<NUMBER>` parse, walang OCR/AI/fuzzy); MATCH/MISMATCH/UNEXPECTED DESTINATION/REVIEW (missing file, DOCTYPE mismatch, duplicate number, unparseable name, missing folder); isang folder scan kada claim series pagkatapos ng Upload; isang Excel report (12 columns) pagkatapos ng buong batch + auto-open | 29/29 audit module tests; 59/59 doc_type regression; 87/87 project tests PASSED; end-to-end vs real eClaimsDoc folders (260909144200 10/10, 260818103440 8/8 MATCH); live re-test PENDING |
 
 Known limitation (RESOLVED sa v5): scrolling — dati, kapag higit sa
 visible grid area ang files (hal. 10+), ang mga nasa ibaba ay not_found →
 ABORT. Ngayon ang v5 view loop ay nag-scroll, nagma-match, at
 nag-verify bago ang Upload.
+
+Open issue (v6 research, 2026-09-08): sa 15:03 batch, LAHAT ng 8 patient
+grids ay may VILLARUEL, JUAN JR BAUTISTA-260825157234 XML rows — ang mga
+XML file sa loob ng bawat READY patient folder ay may VILLARUEL filename.
+Upstream ito (XML generation/copy step), hindi doc type assignment. Ang
+v6 foreign-path ABORT guard ay hahuli ito sa susunod na run kung hindi
+pa naaayos.
 
 Ang buong change history (reason/files/behavior/verification) ay nasa
 `CHANGE_RULES.md` sa ilalim ng "Claim Attachments doc type" entries

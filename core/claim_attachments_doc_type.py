@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import PureWindowsPath
 from typing import Optional
 
 
@@ -63,6 +64,14 @@ _ALL_STEMS_NORM: list[tuple[str, str]] = sorted(
     {_norm(stem): doc for stem, doc in {**PDF_SUFFIXES, **XML_SUFFIXES}.items()}.items(),
     key=lambda kv: -len(kv[0]),
 )
+
+# v5.3 stem vocabulary tables (near-stem / mutated-stem recognition).
+# PDF and XML stems are disjoint (COE/CSF/DTR/... vs CF4/CF5/ESOA), so the
+# extension marker decides which vocabulary applies to a given line.
+_PDF_STEM_SET = {_norm(stem) for stem in PDF_SUFFIXES}
+_XML_STEM_SET = {_norm(stem) for stem in XML_SUFFIXES}
+_STEMS_BY_EXT: dict[str, set[str]] = {"P": _PDF_STEM_SET, "X": _XML_STEM_SET}
+_KNOWN_STEM_SET: set[str] = _PDF_STEM_SET | _XML_STEM_SET
 
 
 def detect_doc_type(word: str) -> Optional[str]:
@@ -126,6 +135,42 @@ def doc_types_from_folder_files(filenames: list[str]) -> list[str]:
     return docs
 
 
+def match_copied_path_to_file(
+    path: str,
+    folder_files: list[str],
+    expected_parent: str,
+) -> Optional[str]:
+    """Match a clipboard-copied full path (v6) to ONE patient-folder file.
+
+    Source of truth is the HBSys row right-click "copy" (owner-verified
+    2026-09-07): the clipboard receives the FULL ABSOLUTE PATH of the
+    attached file, e.g.
+        C:\\claims_bot\\claims_checker_results\\READY\\VENTURA, JERRY BAUIT -
+        000000000018008 - ADM20260806_DIS20260808\\ANR.pdf
+
+    Rules (never-guess):
+        1. The basename must match exactly ONE folder file
+           (case-insensitive; Windows is case-insensitive).
+        2. The parent directory of the path must equal *expected_parent*
+           (the patient folder name — guard: the 2026-09-07 15:03 batch
+           had foreign VILLARUEL XMLs inside other patients' folders, so
+           a same basename from a different folder must NOT match).
+        3. Anything else -> None (caller must ABORT, not guess).
+
+    Returns the canonical folder filename, or None.
+    """
+    p = PureWindowsPath(path)
+    base = p.name
+    if not base:
+        return None
+    if p.parent.name.lower() != expected_parent.lower():
+        return None
+    matches = [f for f in folder_files if f.lower() == base.lower()]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
 def _file_stem(name: str) -> str:
     """Extract the doc-type stem from a patient folder filename.
 
@@ -184,6 +229,77 @@ def _is_subsequence(needle: str, haystack: str) -> bool:
     """True if all chars of needle appear in haystack in order."""
     it = iter(haystack)
     return all(ch in it for ch in needle)
+
+
+def _mutated_stem_match(read: str, stem: str) -> bool:
+    """Twin-safe 1-edit comparison between an OCR reading and a stem.
+
+    Allows the mutations OCR actually produces on stems (letter
+    substitutions like F->E, dropped/inserted letters like 'C4' for
+    'CF4') but REJECTS any mutation whose only difference is a
+    digit-for-digit change (4->5, 1->2, 0->8): the digit is what
+    separates the twin stems (SOA1/SOA2, CF2/CF3, CF4/CF5), so twins
+    can never cross-match through the mutated tier (docstring contract
+    of v4.3, now actually enforced).
+    """
+    if read == stem:
+        return True
+    if abs(len(read) - len(stem)) > 1:
+        return False
+    if len(read) == len(stem):
+        diffs = [(x, y) for x, y in zip(read, stem) if x != y]
+        if len(diffs) != 1:
+            return False
+        x, y = diffs[0]
+        return not (x.isdigit() and y.isdigit())
+    shorter, longer = (read, stem) if len(read) < len(stem) else (stem, read)
+    for i in range(len(longer)):
+        if longer[:i] + longer[i + 1:] == shorter:
+            return not longer[i].isdigit()
+    return False
+
+
+def _near_stem_before_marker(
+    text: str, marker: str, stems: set[str]
+) -> bool:
+    """True when a known stem (or a twin-safe 1-edit mutation of one)
+    ends directly before the *marker* ('.P' of '.PDF', '.X' of '.XM1').
+
+    The stem always sits adjacent to the extension marker
+    ('...D1S20260830\\C5E.pdf'), so the candidates are the SUFFIXES of
+    the pre-marker window of length stem-1..stem+1. A stray 'C5E' in
+    the middle of a path does not count.
+    """
+    pos = text.find(marker)
+    while pos != -1:
+        window = text[max(0, pos - 5):pos]
+        for stem in stems:
+            for length in (len(stem) - 1, len(stem), len(stem) + 1):
+                if length <= 0 or length > len(window):
+                    continue
+                cand = window[-length:]
+                if _mutated_stem_match(cand, stem):
+                    return True
+        pos = text.find(marker, pos + 1)
+    return False
+
+
+def _has_near_stem(line: "GridLine") -> bool:
+    """True when the line carries a known or 1-edit-mutated stem.
+
+    v5.3 generalises the v4.3 exact-stem rule: the SORIANO live run
+    (2026-09-07 11:48) lost the ONLY good reading of the CSF row
+    ('...D1S20260830\\C5E.PDF' — F read as E) because the merge rule
+    demanded an EXACT known stem; the near-stem form keeps such
+    readings alive.
+    """
+    text = line.norm_text
+    if any(stem in text for stem in _KNOWN_STEM_SET):
+        return True
+    return (
+        _near_stem_before_marker(text, ".P", _PDF_STEM_SET)
+        or _near_stem_before_marker(text, ".X", _XML_STEM_SET)
+    )
 
 
 # -- grid line extraction & folder-driven line matching (v4) -----------------
@@ -307,11 +423,6 @@ def _line_quality(line: GridLine) -> tuple[bool, bool, int]:
     return (has_stem, has_ext, alnum)
 
 
-def _has_stem(line: GridLine) -> bool:
-    """True when the line's normalised text contains a known file stem."""
-    return any(stem in line.norm_text for stem, _doc in _ALL_STEMS_NORM)
-
-
 def merge_dual_pass_lines(
     normal_lines: list[GridLine], inverted_lines: list[GridLine]
 ) -> list[GridLine]:
@@ -327,12 +438,16 @@ def merge_dual_pass_lines(
     Rule per incoming line:
         - no overlap            -> append (a row only this pass saw)
         - exactly one overlap   -> keep the higher _line_quality reading
-        - several overlaps      -> stem-gain (v4.3): when the incoming
-          reading carries a known file stem and NONE of the overlapping
-          lines does, the stem-less fragments are garbage for matching
-          purposes — replace them all with the incoming line. Otherwise
-          keep the normal readings (conservative: the incoming pass
-          merged rows, and dropping normal rows could lose a stem).
+        - several overlaps      -> stem-gain (v4.3, v5.3 near-stem):
+          when the incoming reading carries a known or 1-edit-mutated
+          file stem and NONE of the overlapping lines does, the
+          stem-less fragments are garbage for matching purposes —
+          replace them all with the incoming line. Otherwise keep the
+          normal readings (conservative: the incoming pass merged rows,
+          and dropping normal rows could lose a stem). The v5.3
+          near-stem form (2026-09-07 SORIANO run) also accepts mutated
+          stems ('C5E.PDF' for CSF); the 1-overlap quality rule is
+          unchanged.
     """
     lines = list(normal_lines)
     for inv_line in inverted_lines:
@@ -348,14 +463,18 @@ def merge_dual_pass_lines(
             if _line_quality(inv_line) > _line_quality(lines[i]):
                 lines[i] = inv_line
         else:
-            # v4.3 stem-gain: live-proven in the 2026-09-04 MATTERIG run —
-            # the isolated band reading '...\COE.pdf' overlapped TWO garbage
-            # fragments ('5E0EEE' + '1CARRE0N-000...') and the conservative
-            # rule discarded the ONLY good reading. A stem-less line can
-            # never match a file, so replacing stem-less fragments loses
-            # nothing; the stem is pure information gain.
-            if _has_stem(inv_line) and not any(
-                _has_stem(lines[i]) for i in overlap_idx
+            # v4.3 stem-gain (v5.3 near-stem): live-proven in the
+            # 2026-09-04 MATTERIG run — the isolated band reading
+            # '...\COE.pdf' overlapped TWO garbage fragments ('5E0EEE' +
+            # '1CARRE0N-000...') and the conservative rule discarded the
+            # ONLY good reading. A line with no (near-)stem can never
+            # match a file, so replacing stem-less fragments loses
+            # nothing; the stem is pure information gain. v5.3: a
+            # 1-edit MUTATED stem ('C5E.PDF' for CSF, 2026-09-07 SORIANO
+            # run) counts as gain too; lines already carrying a (near-)
+            # stem are never dropped.
+            if _has_near_stem(inv_line) and not any(
+                _has_near_stem(lines[i]) for i in overlap_idx
             ):
                 for i in sorted(overlap_idx, reverse=True):
                     del lines[i]
@@ -579,27 +698,6 @@ def _file_ext_letter(name: str) -> str:
     return "P" if name.lower().endswith(".pdf") else "X"
 
 
-def _edit_distance_le1(a: str, b: str) -> bool:
-    """True when the edit distance between *a* and *b* is at most 1.
-
-    Covers the OCR stem mutations seen in live runs (a dropped character
-    such as 'C4' for 'CF4'). Lengths differing by more than 1 fail fast;
-    equal lengths require at most one substituted character.
-    """
-    if abs(len(a) - len(b)) > 1:
-        return False
-    if len(a) == len(b):
-        return sum(1 for x, y in zip(a, b) if x != y) <= 1
-    # length differs by exactly 1: single insertion or deletion
-    if len(a) > len(b):
-        a, b = b, a
-    # a is shorter; try deleting each char of b in turn
-    for i in range(len(b)):
-        if b[:i] + b[i + 1:] == a:
-            return True
-    return False
-
-
 def match_files_to_lines(
     files: list[str], lines: list[GridLine]
 ) -> tuple[list[tuple[str, GridLine]], list[str], list[tuple[str, int]]]:
@@ -610,15 +708,16 @@ def match_files_to_lines(
         strict tier — normalised stem + "." + extension letter
                       ("C0E.P", "CF4.X" — tolerates ".PDFF"/".XM1" noise)
         loose tier  — normalised stem anywhere ("50A1" in "50A1PDF")
-        mutated tier (v4.3) — the stem lost/gained ONE character to OCR
-                      ("C4.X" for CF4, "S0A1" variants...) AND the line
-                      still carries the right extension letter. Covers
-                      the 2026-09-04 MATTERIG live case where tesseract
-                      read '_CF4.xml' as 'C4.XM1'. Edit distance is
-                      computed on a short window before the extension
-                      marker; digit-vs-letter confusions (4/CF4) do NOT
-                      match, so SOA1/SOA2 twins and CF4/CF5 can never
-                      cross-match through this tier.
+        mutated tier (v4.3, fixed v5.3) — the stem lost/gained/changed
+                      ONE character to OCR ("C4.X" for CF4, "C5E.P" for
+                      CSF) AND the line still carries the right
+                      extension letter. Covers the 2026-09-04 MATTERIG
+                      case ('_CF4.xml' read as 'C4.XM1') and the
+                      2026-09-07 SORIANO case ('CSF.pdf' read as
+                      'C5E.PDF'). Digit-for-digit mutations are
+                      rejected (`_mutated_stem_match`), so SOA1/SOA2
+                      twins and CF4/CF5 can never cross-match through
+                      this tier.
 
     The stronger tier wins whenever it has candidates. Lines are consumed
     1:1 via a fixpoint pass (one line per file, one file per line), so
@@ -634,25 +733,37 @@ def match_files_to_lines(
     def _mutated_stem_candidates(
         stem_norm: str, ext: str, lines_list: list[GridLine]
     ) -> list[GridLine]:
-        """Lines whose text contains a 1-edit mutation of *stem_norm*
-        directly followed by the '.' + extension marker."""
+        """Lines carrying a twin-safe 1-edit mutation of *stem_norm*
+        directly before the '.' + extension marker ('C5E.P' for CSF,
+        'C4.X' for CF4).
+
+        v5.3 fixes the v4.3 window bug that made this tier dead code
+        (even its own documented MATTERIG case 'C4.XM1' never matched):
+        the window was end-trimmed instead of taking the SUFFIX
+        adjacent to the marker, where the stem always sits. Digit
+        mutations are rejected by `_mutated_stem_match`, so the twins
+        (SOA1/SOA2, CF4/CF5) can never cross-match through this tier.
+        """
         results: list[GridLine] = []
+        marker = "." + ext
         for ln in lines_list:
             text = ln.norm_text
-            # find the extension marker occurrences
-            marker = "." + ext
             pos = text.find(marker)
             while pos != -1:
-                window_start = max(0, pos - (len(stem_norm) + 2))
-                window = text[window_start:pos]
-                # try all suffixes of the window as candidate stems
-                for cut in range(0, min(2, len(window)) + 1):
-                    cand = window[: len(window) - cut] if cut else window
-                    if not cand:
+                window = text[max(0, pos - (len(stem_norm) + 1)):pos]
+                matched_here = False
+                for length in (
+                    len(stem_norm) - 1, len(stem_norm), len(stem_norm) + 1
+                ):
+                    if length <= 0 or length > len(window):
                         continue
-                    if _edit_distance_le1(cand, stem_norm):
+                    cand = window[-length:]
+                    if _mutated_stem_match(cand, stem_norm):
                         results.append(ln)
+                        matched_here = True
                         break
+                if matched_here:
+                    break
                 pos = text.find(marker, pos + 1)
         return results
 
@@ -1091,6 +1202,25 @@ if __name__ == "__main__":
             "GUIUO, REYNALDO, PARALLAG-260904085021_CF5.xml",
             "GUIUO, REYNALDO, PARALLAG-260904085021_eSOA.xml",
         ]),
+        # v5.3 regression: PALAMING — the OK patient of the 2026-09-07
+        # 11:44 live batch (8 files, all matched, uploaded).
+        ("PALAMING", "debug_doc_grid_20260907_114526.png", [
+            "COE.pdf", "CSF.pdf", "DTR.pdf", "SOA1.pdf", "SOA2.pdf",
+            "PALAMING, ROBERTO SR VIERNES-260907094315_CF4.xml",
+            "PALAMING, ROBERTO SR, VIERNES-260907094315_CF5.xml",
+            "PALAMING, ROBERTO SR, VIERNES-260907094315_eSOA.xml",
+        ]),
+        # v5.3 regression: SORIANO — the FAILED patient of the same
+        # batch. The row-band pass read the CSF row as 'C5E.PDF' (F->E);
+        # the v4.3 exact-stem merge rule discarded that only good
+        # reading and the (dead) mutated tier never matched, so CSF.pdf
+        # went not_found in ALL 12 views -> ABORT. v5.3 must match 8/8.
+        ("SORIANO", "debug_doc_grid_20260907_114645.png", [
+            "COE.pdf", "CSF.pdf", "DTR.pdf", "SOA1.pdf", "SOA2.pdf",
+            "SORIANO, RODRIGO REYES-260907095272_CF4.xml",
+            "SORIANO, RODRIGO, REYES-260907095272_CF5.xml",
+            "SORIANO, RODRIGO, REYES-260907095272_eSOA.xml",
+        ]),
     ]
     for label, fname, files in live_cases:
         crop_path = (
@@ -1215,6 +1345,145 @@ if __name__ == "__main__":
         f"{'OK  ' if ok else 'FAIL'} v5.2: verification walk removed — "
         f"Upload follows the last typed row directly"
     )
+
+    # -- v5.3 unit tests: near-stem merge + twin-safe mutated tier -------
+    # Live bug (2026-09-07 11:48 SORIANO): the row-band pass read the
+    # CSF row as '...C5E.PDF' (F->E). The v4.3 multi-overlap merge rule
+    # demanded an EXACT stem and discarded that only good reading, so
+    # CSF.pdf went not_found in ALL 12 views -> ABORT. The mutated tier
+    # that should have caught it was dead code (window bug).
+    norm_garbage = [
+        GridLine(words=["READY\\SORIANO,"], left=526, top=422, right=900, bottom=436),
+        GridLine(words=["-"], left=526, top=437, right=540, bottom=451),
+    ]
+    inv_csf = [
+        GridLine(
+            words=["000000000021211~ADM20260827D1520260830\\C5E.pdf"],
+            left=526, top=422, right=940, bottom=451,
+        )
+    ]
+    merged_csf = merge_dual_pass_lines(norm_garbage, inv_csf)
+    m53, nf53, amb53 = match_files_to_lines(["CSF.pdf"], merged_csf)
+    ok = len(merged_csf) == 1 and len(m53) == 1 and not nf53 and not amb53
+    if not ok:
+        failures += 1
+    print(
+        f"{'OK  ' if ok else 'FAIL'} v5.3 merge: mutated-stem reading "
+        f"('C5E.PDF') survives the multi-overlap merge — "
+        f"CSF matched={len(m53)}, nf={nf53}, amb={amb53}"
+    )
+
+    # Mutated tier: MATTERIG 'C4.XM1' (documented v4.3 case that the
+    # dead tier never actually matched) and SORIANO 'C5E.PDF'.
+    c4_line = [
+        GridLine(words=["260904082247_C4.xmi"], left=526, top=571, right=940, bottom=585)
+    ]
+    m54, nf54, _ = match_files_to_lines(
+        ["MATTERIG, REYMUNDO CARREON-260904082247_CF4.xml"], c4_line
+    )
+    c5e_line = [
+        GridLine(
+            words=["000000000021211~ADM20260827D1520260830\\C5E.pdf"],
+            left=526, top=432, right=940, bottom=446,
+        )
+    ]
+    m55, nf55, _ = match_files_to_lines(["CSF.pdf"], c5e_line)
+    ok = len(m54) == 1 and not nf54 and len(m55) == 1 and not nf55
+    if not ok:
+        failures += 1
+    print(
+        f"{'OK  ' if ok else 'FAIL'} v5.3 mutated tier: 'C4.XM1'->CF4 and "
+        f"'C5E.PDF'->CSF matched (m={len(m54)}/{len(m55)}, nf={nf54}/{nf55})"
+    )
+
+    # Twin safety: digit-for-digit mutations must NOT cross-match the
+    # twin stems through the mutated tier.
+    cf5_line = [
+        GridLine(words=["260904082247_CF5.xmi"], left=526, top=615, right=940, bottom=629)
+    ]
+    m56, nf56, _ = match_files_to_lines(
+        ["MATTERIG, REYMUNDO CARREON-260904082247_CF4.xml"], cf5_line
+    )
+    soa2_line = [
+        GridLine(words=["ADM20260815_D1520260819\\50A2.pdf"], left=526, top=497, right=940, bottom=511)
+    ]
+    m57, nf57, _ = match_files_to_lines(["SOA1.pdf"], soa2_line)
+    ok = not m56 and nf56 and not m57 and nf57
+    if not ok:
+        failures += 1
+    print(
+        f"{'OK  ' if ok else 'FAIL'} v5.3 twin safety: CF4 does not match "
+        f"a 'CF5.XM1' row, SOA1 does not match a 'S0A2.PDF' row "
+        f"(m={len(m56)}/{len(m57)})"
+    )
+
+    # Near-stem must be adjacent to the extension marker: a stray mutated
+    # stem in the middle of a path must NOT count as a near-stem line.
+    stray = [
+        GridLine(words=["C:\\C5E_80T\\READY\\SORIANO, RODRIGO REYES - 0"], left=526, top=422, right=940, bottom=436)
+    ]
+    ok = not _has_near_stem(stray[0])
+    if not ok:
+        failures += 1
+    print(
+        f"{'OK  ' if ok else 'FAIL'} v5.3 adjacency: mid-path mutated "
+        f"stem is NOT a near-stem line"
+    )
+
+    # -- v6 unit tests: clipboard-path matching (pure logic) --------------
+    # Owner-verified clipboard content (2026-09-07): right-click a grid row
+    # -> "copy" puts the FULL ABSOLUTE PATH on the clipboard.
+    ventura = "VENTURA, JERRY BAUIT - 000000000018008 - ADM20260806_DIS20260808"
+    ventura_files = [
+        "ANR.pdf", "CF2.pdf", "CF3.pdf", "COE.pdf", "CSF.pdf",
+        "DTR.pdf", "MMC.pdf", "MRF.pdf", "OPR.pdf", "PBC.pdf",
+        "SOA1.pdf", "SOA2.pdf",
+        "VENTURA, JERRY BAUIT-260818103440_CF4.xml",
+        "VENTURA, JERRY BAUIT-260818103440_CF5.xml",
+        "VENTURA, JERRY BAUIT-260818103440_eSOA.xml",
+    ]
+    copied = (
+        "C:\\claims_bot\\claims_checker_results\\READY\\"
+        + ventura + "\\MRF.pdf"
+    )
+    ok = (
+        match_copied_path_to_file(copied, ventura_files, ventura) == "MRF.pdf"
+    )
+    if not ok:
+        failures += 1
+    print(f"{'OK  ' if ok else 'FAIL'} v6 path match: MRF.pdf")
+
+    # Foreign patient guard: same basename inside a DIFFERENT folder must
+    # NOT match (VILLARUEL XMLs were found inside other patients' grids).
+    foreign = (
+        "C:\\claims_bot\\claims_checker_results\\READY\\SOMEONE ELSE - 1\\"
+        "CF4.xml"
+    )
+    ok = match_copied_path_to_file(foreign, ventura_files, ventura) is None
+    if not ok:
+        failures += 1
+    print(f"{'OK  ' if ok else 'FAIL'} v6 path guard: foreign folder -> None")
+
+    # Case-insensitive basename; unknown basename -> None.
+    ok = (
+        match_copied_path_to_file(
+            copied.replace("MRF.pdf", "mrf.pdf"), ventura_files, ventura
+        )
+        == "MRF.pdf"
+    )
+    if not ok:
+        failures += 1
+    print(f"{'OK  ' if ok else 'FAIL'} v6 path match: case-insensitive basename")
+
+    ok = (
+        match_copied_path_to_file(
+            copied.replace("MRF.pdf", "NOPE.pdf"), ventura_files, ventura
+        )
+        is None
+    )
+    if not ok:
+        failures += 1
+    print(f"{'OK  ' if ok else 'FAIL'} v6 path match: unknown basename -> None")
 
     print("RESULT:", "PASSED" if failures == 0 else f"{failures} FAILURE(S)")
     raise SystemExit(0 if failures == 0 else 1)

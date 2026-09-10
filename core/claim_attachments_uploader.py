@@ -61,10 +61,17 @@ from pywinauto import Desktop
 
 from core.add_claims_verifier import FolderDates, parse_folder_name
 from core.attachments_state import AttachmentsState
+from core.claim_attachments_doctype_audit import (
+    ECLAIMS_DOC_ROOT,
+    SourceAuditCollector,
+    audit_claim_series,
+    extract_claim_series_from_title,
+    finalize_doctype_audit,
+)
 from core.claim_attachments_doc_type import (
     detect_doc_type,
-    match_files_to_lines,
-    ocr_grid_lines,
+    find_highlight_band,
+    match_copied_path_to_file,
 )
 
 
@@ -77,11 +84,6 @@ MAX_CONSECUTIVE_FAILURES = 3
 # Maximum doc-type grid rows processed per patient (guardrail against
 # runaway TAB loops if the grid layout is misdetected)
 MAX_DOC_ROWS = 40
-
-# Maximum grid scroll attempts per patient before ABORT (v5 view loop
-# guardrail: 10 files visible ~9 rows means ~1 scroll; 40 files worst-case
-# needs ~5; 12 leaves generous margin while bounding the loop)
-MAX_SCROLL_ITERATIONS = 12
 
 
 # -- auto-reload (watch mode) ---------------------------------------------
@@ -145,6 +147,10 @@ DOC_ARROW_X = 519          # X of the combo dropdown arrow (right side of cell)
 # Upload/Close button coordinates in the attachments popup (user-provided)
 DOC_UPLOAD_BUTTON = (598, 730)
 DOC_CLOSE_BUTTON = (1408, 734)
+
+# v6 clipboard copy: X inside the File Name / path column of the popup
+# grid (x≈526..1010), safely right of the Doc Type combo column (x≤524)
+ROW_COPY_X = 700
 
 # Popup grid area for row separator scanning (left, top, right, bottom).
 # The popup rect in the live test was (464,322,1457,758); the grid header
@@ -315,6 +321,12 @@ class AttachmentsOperator:
         self.hbsys_window: Optional[object] = None
         self.attachment_popup: Optional[object] = None
         self._pre_attach_handles: set[int] = set()
+        # v7 source-to-destination audit: source records are collected
+        # in memory in ACTUAL processing order (per claim series); the
+        # destination comparison runs once per claim series after its
+        # upload; the Excel report is built once after the batch.
+        self.source_audit = SourceAuditCollector()
+        self.doctype_audit_results: list = []
 
     def log_action(self, message: str) -> None:
         prefix = "LIVE" if self.live else "DRY"
@@ -831,51 +843,188 @@ class AttachmentsOperator:
         except Exception as exc:
             self.log_action(f"WARNING: could not save doc grid debug: {exc}")
 
-    # -- v5 scroll helpers ---------------------------------------------------
-
-    def _scroll_grid_down(self) -> None:
-        """Scroll the attachment grid down by a few rows (mouse wheel)."""
-        crop_box = self._last_crop_box or DOC_GRID_BOUNDS
-        cx = (crop_box[0] + crop_box[2]) // 2
-        cy = (crop_box[1] + crop_box[3]) // 2
-        self.log_action(f"scrolling grid down (wheel at {cx},{cy})")
-        pyautogui.moveTo(cx, cy)
-        sleep_short(0.2)
-        pyautogui.scroll(-2)  # 2 notches down (~2-6 rows)
-        sleep_short(0.8)
-
-    def _ocr_doc_grid_view(
-        self, view_no: int, tag: str = ""
-    ) -> tuple[list, tuple]:
-        """Screenshot the popup grid, OCR it, save a per-view debug crop.
-
-        Returns (lines, crop_box) — lines carry screen coordinates.
-        """
-        screenshot = pyautogui.screenshot()
-        crop_box = self._popup_crop_box(screenshot)
-        self._last_crop_box = crop_box
-        crop = screenshot.crop(crop_box)
-        if view_no == 1:
-            self._save_doc_grid_debug(crop)
-        else:
-            self._save_doc_grid_debug(
-                crop, name=f"debug_doc_grid_view{view_no}_{tag}"
-            )
-        lines = ocr_grid_lines(crop, crop_box[0], crop_box[1])
-        return lines, crop_box
+    # -- view fingerprint (offline tests) ------------------------------------
 
     @staticmethod
     def _view_fingerprint(lines: list) -> str:
         """Stable text fingerprint of one OCR view (no-progress guard).
 
-        Uses the normalised text of each line sorted by y — positions
-        shift when the grid scrolls; identical fingerprint across views
-        means the scroll did not move the grid.
+        Retained for the doc_type module's offline test suite. The live
+        v6.1 path no longer scrolls the grid (TAB moves the focus and
+        HBSys auto-scrolls the focused row into view), so no live caller
+        remains.
         """
         import hashlib
 
         parts = [ln.norm_text for ln in sorted(lines, key=lambda l: l.top)]
         return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
+    # -- v6 clipboard helpers ------------------------------------------------
+
+    def _copy_row_path(self, row_y: int) -> Optional[str]:
+        """Right-click a grid row, click "copy", and read the clipboard.
+
+        Owner-verified HBSys behavior (2026-09-07): right-clicking a row
+        opens a context menu with three items — "view", "copy", "open
+        location". Clicking "copy" (single click; the menu closes itself)
+        puts the row's FULL ABSOLUTE PATH (path + filename + extension)
+        on the clipboard.
+
+        Strategy 1: locate the #32768 menu window, fetch its item rects
+        via MN_GETHMENU/GetMenuItemRect, and click the item whose text
+        starts with "copy".
+        Strategy 2 (fallback, only when the menu window IS confirmed
+        open but item rects failed): keyboard — Down then Enter selects
+        the 2nd item ("copy" per the owner-verified 3-item order: view,
+        copy, open location). Never used when no menu was detected, so
+        stray keypresses can never hit the grid.
+        Cleanup: Escape closes any leftover menu; returns None on any
+        failure — the caller falls back to OCR for that row (never
+        guesses).
+        """
+        import pyperclip
+
+        try:
+            before = pyperclip.paste()
+        except Exception:
+            before = ""
+
+        self.log_action(f"right-clicking row at ({ROW_COPY_X}, {row_y})")
+        pyautogui.rightClick(ROW_COPY_X, row_y)
+        sleep_short(0.5)
+
+        menu_hwnd = self._find_context_menu()
+
+        if menu_hwnd is None:
+            # No menu opened — nothing to click. Clean up (in case the
+            # menu is drawn but not enumerable) and let OCR handle row.
+            self.log_action("no context menu appeared — pressing Escape")
+            pyautogui.press("escape")
+            sleep_short(0.3)
+            return None
+
+        item_rect = self._context_menu_copy_rect(menu_hwnd)
+        if item_rect is not None:
+            cx = (item_rect[0] + item_rect[2]) // 2
+            cy = (item_rect[1] + item_rect[3]) // 2
+            self.log_action(f"clicking 'copy' menu item at ({cx}, {cy})")
+            pyautogui.click(cx, cy)
+            return self._poll_clipboard_change(before)
+
+        # Menu confirmed open but rects unavailable — keyboard route:
+        # first item is highlighted by default, Down moves to "copy",
+        # Enter triggers it.
+        self.log_action(
+            "menu open, item rect unavailable — keyboard: down + enter"
+        )
+        pyautogui.press("down")
+        sleep_short(0.2)
+        pyautogui.press("enter")
+        result = self._poll_clipboard_change(before)
+        if result is None:
+            pyautogui.press("escape")
+            sleep_short(0.3)
+        return result
+
+    def _find_context_menu(self, timeout: float = 2.0) -> Optional[int]:
+        """Find the top-level #32768 context-menu window handle, if any.
+
+        Returns the hwnd, or None when no context menu is open.
+        """
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            found: Optional[int] = None
+            try:
+                desktop = Desktop(backend="win32")
+                for window in desktop.windows():
+                    try:
+                        if window.class_name() == "#32768":
+                            found = window.handle
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if found is not None:
+                # Verify the menu is still on screen (GetMenuState fails
+                # for dead handles, guarding against stale hwnds).
+                if user32.IsWindow(found):
+                    return found
+            sleep_short(0.1)
+        return None
+
+    def _context_menu_copy_rect(
+        self, menu_hwnd: int
+    ) -> Optional[tuple[int, int, int, int]]:
+        """Screen rect of the context-menu "copy" item, via Win32 menus.
+
+        MN_GETHMENU retrieves the HMENU of a #32768 menu window;
+        GetMenuItemCount/GetMenuString/GetMenuItemRect then locate the
+        item whose text starts with "copy". Returns None on any failure.
+        """
+        import ctypes
+
+        MN_GETHMENU = 0x01E1
+        user32 = ctypes.windll.user32
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        hmenu = user32.SendMessageW(menu_hwnd, MN_GETHMENU, 0, 0)
+        if not hmenu:
+            self.log_action("MN_GETHMENU returned no HMENU")
+            return None
+
+        count = user32.GetMenuItemCount(hmenu)
+        if count <= 0:
+            self.log_action(f"GetMenuItemCount returned {count}")
+            return None
+
+        buf = ctypes.create_unicode_buffer(256)
+        for index in range(count):
+            user32.GetMenuStringW(hmenu, index, buf, 256, 0x400)  # MF_BYPOSITION
+            text = buf.value.strip().lower()
+            if text.startswith("copy"):
+                rect = RECT()
+                if user32.GetMenuItemRect(menu_hwnd, hmenu, index, ctypes.byref(rect)):
+                    return (rect.left, rect.top, rect.right, rect.bottom)
+                self.log_action("GetMenuItemRect failed for 'copy' item")
+                return None
+
+        self.log_action(
+            f"context menu has no 'copy' item ({count} items scanned)"
+        )
+        return None
+
+    def _poll_clipboard_change(
+        self, before: str, timeout: float = 1.0
+    ) -> Optional[str]:
+        """Wait until the clipboard differs from *before* and holds text.
+
+        Returns the new clipboard text, or None when it never changed.
+        """
+        import pyperclip
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                current = pyperclip.paste()
+            except Exception:
+                current = None
+            if current and current != before:
+                self.log_action(f"row copy: {current}")
+                return current
+            sleep_short(0.1)
+        self.log_action("clipboard did not change after copy attempt")
+        return None
 
     def _type_row_doc(self, doc: str, row_y: int, idx: int, total: int) -> None:
         """Click field, type doc type, click arrow, press TAB (one row)."""
@@ -893,37 +1042,46 @@ class AttachmentsOperator:
         """Assign doc types to attached files and perform Upload/OK/Close.
 
         Runs after the 2nd Open (XML files) in the attachment popup.
-        v5.2 VIEW LOOP (grid scrolling, no post-type verification):
+        v6.1 TAB-WALK (owner directive, 2026-09-08 — "after mapili ng
+        doc type TAB lang pindutin, wag na scroll, hanggang ESA"):
 
-            1. OCR the visible grid (existing 4-pass pipeline unchanged);
-               match UNPROCESSED folder files to visible lines 1:1
-               (3-tier matcher unchanged).
-            2. Per new match (top→bottom): click doc field, type doc type,
-               click combo arrow, TAB. Mark the file PROCESSED (row identity
-               = filename stem+ext in the line text, NOT screen position).
-            3. While files remain: scroll the grid down, re-OCR, match only
-               the unprocessed files; rows already processed that reappear
-               in the scroll overlap are SKIPPED (not re-typed, not
-               ambiguous).
-            4. When all files are typed: Upload (598,730) immediately ->
-               Enter (OK) -> Close (1408,734) -> popup-gone verify.
-               (The v5.1 doc-cell verification walk was REMOVED after the
-               2026-09-04 live runs — the OCR of short cell values (DTR,
-               CF4, ESA) was unreliable and blocked Uploads of visually
-               correct assignments. The duplicate-row guard remains in the
-               per-view 1:1 matching during typing.)
+            1. Determine the doc-type sequence from the patient folder
+               (deterministic, same as always).
+            2. Walk the grid with the KEYBOARD TAB flow, ONE row at a
+               time, starting at the auto-selected first row:
+                 a. locate the focused row via its blue highlight band
+                    (`find_highlight_band` — pixel scan, no OCR);
+                 b. right-click the focused row → context menu "copy" →
+                    clipboard holds the row's FULL ABSOLUTE PATH;
+                 c. match the path to a patient-folder file (exact
+                    basename + parent folder);
+                 d. type that file's doc type into the Doc Type combo →
+                    click arrow → press TAB  (TAB moves the grid focus to
+                    the NEXT row — HBSys auto-scrolls the focused row
+                    into view, so the grid handles the >10-row case by
+                    itself; no mouse-wheel scroll is ever performed);
+                 e. repeat until the last file (eSOA -> ESA).
+            3. Upload (598,730) → Enter (OK) → Close (1408,734)
+               (v5.2, unchanged).
+
+        Row identity is the COPIED PATH (exact), never screen position,
+        row number, or OCR text. The screen Y is only used to locate the
+        currently focused blue row.
 
         Guardrails (loop-engineering Principle 4):
-            - Never-guess: not-found / ambiguous / scroll failure ->
-              ABORT before any Upload click.
-            - MAX_SCROLL_ITERATIONS caps the view loop.
-            - No-progress detection: two consecutive identical view
-              fingerprints -> heavier scroll retry -> ABORT if stuck.
-            - MAX_DOC_ROWS file cap; debug crop saved every view.
+            - Never-guess: no focused row, copy failure, foreign path, or
+              duplicate focus → ABORT before any Upload click, with the
+              full copied path logged.
+            - Copied path OUTSIDE the patient folder (foreign row —
+              e.g. the VILLARUEL XMLs found in the 15:03 grids) → ABORT.
+            - Duplicate focus (focus returned to an already-typed row)
+              → ABORT (needs human review).
+            - MAX_DOC_ROWS file cap; Upload only after EVERY expected
+              file has been typed.
 
         Returns True on success; False on failure.
         """
-        self.log_action("assigning doc types for attached files")
+        self.log_action("assigning doc types for attached files (v6.1 tab-walk)")
 
         # --- 0. Folder-driven expected doc types (deterministic) -----------
         folder = Path(folder_path)
@@ -955,87 +1113,84 @@ class AttachmentsOperator:
                 return False
             file_docs[name] = doc
 
+        expected_parent = folder.name
+
         if not self.live:
             for name in folder_files:
                 self.log_action(f"  would set doc type {file_docs[name]!r} for {name}")
+            self.log_action("would right-click the focused row, copy, type, TAB — until ESA")
             self.log_action("would click Upload -> Enter (OK) -> Close")
             return True
 
-        # --- 1. VIEW LOOP -----------------------------------------------------
+        # --- 1. TAB-WALK (clipboard identity + TAB focus walk) ---------------
         sleep_short(1.5)  # let the grid settle after the 2nd Open
-        self._last_crop_box = None
         processed: set[str] = set()
         typed_rows = 0
+        last_focus_y: Optional[int] = None
 
-        for view_no in range(1, MAX_SCROLL_ITERATIONS + 1):
-            lines, _ = self._ocr_doc_grid_view(view_no)
-            self.log_action(
-                f"view {view_no}: {len(lines)} line(s), "
-                f"{len(processed)}/{len(folder_files)} files processed"
-            )
-            if not lines:
-                self.log_action("ABORT: no OCR text lines found in popup crop")
-                return False
+        # v7 audit: source sequence numbering is per claim series (the
+        # destination files are numbered per claim series) and starts
+        # at 01 for this patient's first copied source path.
+        claim_series = self._current_claim_series()
+        self.source_audit.start_series(claim_series)
 
-            unprocessed = [f for f in folder_files if f not in processed]
-            matched, not_found, ambiguous = match_files_to_lines(
-                unprocessed, lines
-            )
-            if ambiguous:
-                for name, count in ambiguous:
-                    self.log_action(
-                        f"ABORT: {name} matches {count} grid rows — "
-                        f"duplicate or twin-stem rows need human review"
-                    )
-                return False
+        # One debug crop of the initial state (diagnosis only — no OCR).
+        screenshot = pyautogui.screenshot()
+        crop_box = self._popup_crop_box(screenshot)
+        self._last_crop_box = crop_box
+        self._save_doc_grid_debug(screenshot.crop(crop_box))
 
-            # Type doc types for newly matched rows (top to bottom)
-            rows_plan = sorted(
-                ((file_docs[name], line.center_y) for name, line in matched),
-                key=lambda item: item[1],
-            )
-            for i, (doc, row_y) in enumerate(rows_plan, start=1):
-                self._type_row_doc(doc, row_y, typed_rows + i, len(folder_files))
-            for name, _line in matched:
-                processed.add(name)
-            typed_rows += len(rows_plan)
-
-            if len(processed) == len(folder_files):
-                break  # all files typed — go straight to Upload
-
-            # --- scroll down for the remaining files -----------------------
-            remaining = [f for f in folder_files if f not in processed]
-            fingerprint = self._view_fingerprint(lines)
-            self._scroll_grid_down()
-            new_lines, _ = self._ocr_doc_grid_view(
-                view_no + 1, tag="post-scroll"
-            )
-            new_fingerprint = self._view_fingerprint(new_lines)
-
-            if new_fingerprint == fingerprint:
-                # grid did not move — retry once via heavier scroll
+        while len(processed) < len(folder_files):
+            row_y = self._focused_row_y()
+            if row_y is None:
                 self.log_action(
-                    "scroll had no effect; retrying with heavier scroll"
+                    "ABORT: no focused (blue) row detected — grid state unknown"
                 )
-                pyautogui.scroll(-5)
-                sleep_short(0.8)
-                new_lines, _ = self._ocr_doc_grid_view(
-                    view_no + 1, tag="retry"
+                return False
+            if last_focus_y is not None and row_y != last_focus_y:
+                self.log_action(
+                    f"note: focus moved from y={last_focus_y} to y={row_y}"
                 )
-                if self._view_fingerprint(new_lines) == fingerprint:
-                    self.log_action(
-                        f"ABORT: cannot scroll to remaining files: "
-                        f"{', '.join(remaining)}"
-                    )
-                    return False
 
-        if len(processed) != len(folder_files):
-            remaining = [f for f in folder_files if f not in processed]
-            self.log_action(
-                f"ABORT: {len(remaining)} file(s) still not found after "
-                f"{MAX_SCROLL_ITERATIONS} views: {', '.join(remaining)}"
+            copied = self._copy_row_path(row_y)
+            if copied is None:
+                self.log_action(
+                    f"ABORT: copy failed on focused row at y={row_y}"
+                )
+                return False
+            matched_file = match_copied_path_to_file(
+                copied, folder_files, expected_parent
             )
-            return False
+            if matched_file is None:
+                self.log_action(
+                    f"ABORT: copied row path is not a patient file: {copied}"
+                )
+                return False
+            if matched_file in processed:
+                self.log_action(
+                    f"ABORT: duplicate focus on {matched_file} "
+                    f"(already typed) — needs human review"
+                )
+                return False
+
+            typed_rows += 1
+            self._type_row_doc(
+                file_docs[matched_file], row_y, typed_rows, len(folder_files)
+            )
+            # v7 audit: record the source document IN PROCESSING ORDER
+            # immediately after the successful copy + existing DOCTYPE
+            # extraction (the sequence is captured here — never
+            # re-derived from filenames or Explorer ordering). The
+            # destination side is verified later from the eClaimsDoc
+            # filenames; no OCR is involved anywhere.
+            self._audit_source_document(
+                source_path=copied,
+                extracted_doctype=file_docs[matched_file],
+            )
+            processed.add(matched_file)
+            last_focus_y = row_y
+            # _type_row_doc ends with TAB: HBSys moves the focus to the
+            # next row and auto-scrolls it into view.
 
         # --- 2. Upload, OK, Close (immediately after the last typed row) ----
         self.click(Point(*DOC_UPLOAD_BUTTON), "Upload")
@@ -1045,10 +1200,108 @@ class AttachmentsOperator:
         self.click(Point(*DOC_CLOSE_BUTTON), "Close")
         sleep_short(1.0)
 
+        # v7 audit: ONE destination scan for this claim series now that
+        # all of its documents have been processed and uploaded (single
+        # folder listing — see audit_claim_series).
+        self._audit_destination_for_series(claim_series)
+
         self.log_action(
-            f"doc types assigned ({typed_rows} rows across views) and uploaded"
+            f"doc types assigned ({typed_rows} rows, tab-walk) and uploaded"
         )
         return True
+
+    def _focused_row_y(self) -> Optional[int]:
+        """Screen Y of the focused (blue-highlighted) grid row, or None.
+
+        Screenshots the popup crop and locates the blue selection band
+        via `find_highlight_band` (pixel scan, no OCR). Bands whose top
+        is within 50px of the popup top are ignored (title bar / grid
+        header); the band must be at least 8px tall. Returns the band
+        center in screen coordinates. Retries up to 2 seconds — the band
+        may take a moment to render after a TAB.
+        """
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            screenshot = pyautogui.screenshot()
+            crop_box = self._popup_crop_box(screenshot)
+            self._last_crop_box = crop_box
+            crop = screenshot.crop(crop_box)
+            band = find_highlight_band(crop)
+            if band is not None:
+                top, bottom = band
+                if top >= 50 and bottom - top >= 8:
+                    return crop_box[1] + (top + bottom) // 2
+            sleep_short(0.15)
+        return None
+
+    def _current_claim_series(self) -> str:
+        """Claim series number of the CURRENT attachment popup (existing value).
+
+        Reuses `extract_claim_series_from_title` on the popup the
+        workflow already holds — no second extraction mechanism.
+        Returns '' when the popup/title is unavailable.
+        """
+        if self.attachment_popup is None:
+            return ""
+        try:
+            return extract_claim_series_from_title(
+                self.attachment_popup.window_text()
+            )
+        except Exception:
+            return ""
+
+    def _audit_source_document(
+        self, source_path: str, extracted_doctype: str
+    ) -> None:
+        """v7 audit: record one processed source document (in memory).
+
+        Called immediately after the existing tab-walk successfully
+        copied the source full path and matched it to a patient file
+        (the EXISTING extracted doc type is consumed as-is — extraction
+        itself is untouched). The collector assigns the per-claim-series
+        source number in ACTUAL processing order. Non-blocking.
+        """
+        record = self.source_audit.add(
+            source_full_path=source_path,
+            extracted_doctype=extracted_doctype,
+        )
+        self.log_action(
+            f"doctype audit: source {record.source_number} -> "
+            f"{extracted_doctype} ({record.source_filename})"
+        )
+
+    def _audit_destination_for_series(self, claim_series: str) -> None:
+        """v7 audit: compare this claim series' sources with eClaimsDoc.
+
+        Runs ONCE per claim series AFTER all of its documents have been
+        processed and uploaded. Scans
+            C:\\Shared Folder\\eClaimsDoc\\<CLAIM_SERIES>\\
+        (single listing) and compares each source record's number +
+        extracted DOCTYPE with the destination filename's
+        '...-RAW-<DOCTYPE>-<NUMBER>' tokens. Never blocks the workflow —
+        missing folders/parse failures become REVIEW records.
+        """
+        series_records = [
+            r
+            for r in self.source_audit.records
+            if r.claim_series_number == claim_series
+        ]
+        if not series_records:
+            return
+        audit = audit_claim_series(
+            series_records, claim_series, dest_root=ECLAIMS_DOC_ROOT
+        )
+        self.doctype_audit_results.extend(audit.results)
+        counts: dict[str, int] = {}
+        for result in audit.results:
+            counts[result.status] = counts.get(result.status, 0) + 1
+        summary = ", ".join(
+            f"{status}={count}" for status, count in sorted(counts.items())
+        )
+        self.log_action(
+            f"doctype audit: claim series {claim_series} vs eClaimsDoc "
+            f"destination — {summary}"
+        )
 
     def wait_for_file_dialog(self, timeout: float = 8.0) -> bool:
         """Wait for the Windows file dialog (2nd popup) to appear.
@@ -1466,6 +1719,17 @@ def run_attachments_loop(
     print(f"\n{'='*60}")
     print("  All patients processed.")
     print(f"{'='*60}")
+
+    # v7 audit: generate the final DOCTYPE source-to-destination Excel
+    # report ONCE, after the entire batch has finished (in-memory results
+    # only until now), then open it with the default Windows Excel
+    # behavior.
+    if operator.doctype_audit_results:
+        report_path = finalize_doctype_audit(
+            operator.doctype_audit_results, LOG_DIR / "doctype_audit"
+        )
+        if report_path is not None:
+            print(f"  DOCTYPE audit report: {report_path}")
 
     state.mark_completed()
     state.save()

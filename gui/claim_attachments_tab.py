@@ -31,6 +31,7 @@ from core.claim_attachments_uploader import (
 )
 from core.attachments_state import AttachmentsState
 from core.add_claims_verifier import FolderDates
+from core.claim_attachments_doctype_audit import finalize_doctype_audit
 
 
 DEFAULT_READY_DIR = Path(r"C:\claims_bot\claims_checker_results\READY")
@@ -490,6 +491,19 @@ class ClaimAttachmentsFrame(ttk.Frame):
             # Completed
             self.state.mark_completed()
             self.state.save()
+
+            # v7 audit: final DOCTYPE source-to-destination Excel —
+            # generated ONCE after the whole batch finished, then
+            # auto-opened.
+            if operator.doctype_audit_results:
+                report_path = finalize_doctype_audit(
+                    operator.doctype_audit_results,
+                    Path(self.ready_dir_var.get()).parent / "doctype_audit",
+                )
+                if report_path is not None:
+                    self.after(
+                        0, lambda p=report_path: self.log(f"DOCTYPE audit report: {p}")
+                    )
 
         except Exception as exc:
             self.after(0, lambda e=exc: self.log(f"ERROR: {e}"))
