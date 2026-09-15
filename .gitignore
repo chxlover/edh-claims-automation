@@ -57,6 +57,9 @@ claims_gui_config.json
 doctors_config.json
 signature_check_config.json
 update_config.json
+workflow_config.json
+# Contains the DB password — local only, never committed
+db_connection_config.json
 
 # ---------- Machine-specific notes (local paths) ----------
 date_fill_hbsys/Path.txt

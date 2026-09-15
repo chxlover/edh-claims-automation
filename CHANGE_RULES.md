@@ -39,6 +39,404 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-09-15 - Main Dashboard: 3-column layout (Actions | Output + Ready | Incomplete + Logs)
+
+Reason:
+
+- Owner directive (2026-09-15): "gawin mo ngang 3 columns ang GUI main:
+  sa left actions, sa gitna output folders, sa baba nya is ready folders,
+  at sa right column incomplete folders at sa baba nya logs. Ngayon dapat
+  makita ang mga folder name, huwag mo ng lagyan ng open button."
+
+Files (EDIT):
+
+- `edh_claims_gui_XML_COPY_BUTTON.py`
+  - `build_dashboard_tab()`: the dashboard body is now 3 columns
+    (side-by-side pack): LEFT = existing Production Actions + Work Tip
+    column (430 -> 400 px so the three columns fit, content unchanged);
+    MIDDLE = new "Output Folders" panel on top and "Ready Folders"
+    panel below (equal row weights); RIGHT = new "Incomplete Folders"
+    panel on top and the existing "Live Processing Logs" card below
+    (row weights 1:2, so logs stay the bigger panel). The log card is
+    now gridded into the right column and the Clear Logs / Save Logs
+    buttons moved inside the log card. HBSys warning wraplength
+    380 -> 360 to match the narrower actions column.
+  - New read-only helper methods: `list_subfolder_names()`
+    (os.scandir, case-insensitive sort, capped at 500 rows with a
+    "+N more folders" row so a huge folder cannot stall the UI),
+    `_build_folder_list_panel()` (LabelFrame + Listbox + vertical and
+    horizontal scrollbars + mousewheel bindings; display-only, NO open
+    button and NO double-click action by design), `populate_folder_list()`
+    (fills names and shows the folder count in the panel title),
+    `refresh_folder_lists()`.
+  - `refresh_dashboard_counts()` now calls `refresh_folder_lists()` so
+    the three lists refresh on startup, on the 15 s dashboard auto
+    refresh, on the Refresh button, and after every existing caller
+    (processor run, copy xml, recheck, archive).
+  - `apply_theme()` re-colors the three listboxes on theme change.
+
+Data sources (owner choice: READY only):
+
+- Output Folders = subfolders of `settings["output_folder"]`.
+- Ready Folders = subfolders of `claims_checker_results\READY`.
+- Incomplete Folders = subfolders of `claims_checker_results\INCOMPLETE`.
+- READY_WITH_REVIEW is intentionally NOT listed.
+
+Behavior before / after:
+
+- Before: 2 columns (Production Actions | Live Processing Logs); folder
+  names were not listed on the dashboard, only counts on the clickable
+  stat cards.
+- After: 3 columns with visible full folder names (horizontal scroll
+  keeps long patient folder names readable). No open buttons were added.
+
+Safety / compatibility:
+
+- Only one production file touched; OCR, XML generator, claims checker,
+  signing, settings, database and subprocess logic are unchanged.
+- Folder listing is read-only directory enumeration (3 os.scandir calls
+  per refresh); current data set: output=0, READY=5, INCOMPLETE=2.
+- No new dependencies and no configuration change required.
+- Existing clickable stat cards (which open folders) are unchanged.
+- Pre-change backup: Temp\edh_gui_backup_dashboard_columns.py.
+
+Verification:
+
+- `python -m py_compile edh_claims_gui_XML_COPY_BUTTON.py` - PASSED
+- `python -m unittest discover tests` - PASSED (Ran 87 tests, OK)
+- `python tests/test_gui_hbsys_status.py` - PASSED (Ran 7 tests, OK)
+- Headless GUI smoke on the real EDHClaimsGUI (withdrawn) - PASSED:
+  titles "Output Folders (0) | Ready Folders (5) | Incomplete Folders
+  (2)"; Output+Ready share the middle column, Incomplete+Logs share the
+  right column (rows 0/1); ready list content equals the sorted READY
+  folder names on disk; NO button widget inside any of the three folder
+  panels; Clear Logs / Save Logs still present. Note: the pre-existing
+  "Exception in thread Thread-1 (worker)" noise from
+  `gui/not_transmitted_batches_tab.py` line 452 during the test suite is
+  unrelated to this change (background worker posting after() after app
+  destroy inside the tests).
+
+### 2026-09-11 — Workflow GUI v2: SIMPLIFIED list editor (canvas removed)
+
+Reason:
+
+- Owner directive (2026-09-11): "simplehan mo na… retain mo na lang ung
+  execution order, tanggalin mo na ung drag at mga arrows". Ang v1
+  canvas node editor (drag/connect/arrows) ay PALITAN ng simple
+  execution-order list. Mas madaling gamitin para sa operator at wala
+  nang canvas-related edge cases.
+
+Files (EDIT):
+
+- `gui/workflow_tab.py` — REWRITTEN as v2 list editor:
+  - Execution Order Listbox (01..N rows, [disabled] marker, status
+    row-colors habang tumatakbo: RUNNING blue / DONE green / FAILED
+    red / STOPPED-SKIPPED yellow-gray).
+  - Controls: Add Node (palette), Move Up/Down (renumber + selection
+    keep), Delete Node (instance LANG — registry/module hindi nasisira),
+    Enable/Disable checkbox, Save, Restore Default, Run Workflow / Stop,
+    Live mode checkbox (DRY default).
+  - REMOVED: canvas, drag, connection arrows, connect/disconnect,
+    geometry hit-testing. Connections ay NANANATILI sa data model
+    (compatible pa rin ang mga naka-save na config; engine validates
+    them as before) — hindi na lang sila sinasabi sa UI.
+  - NEW thread-safety pattern: worker threads ay naglalagay ng UI
+    updates sa isang queue, at ang Tk main loop ang nagda-drain
+    (`_poll_ui_queue` + `_post`) — wala nang Tk calls mula sa worker
+    threads (naitalize race sa v1 tests, mas safe sa real GUI).
+- Engine/registry/adapters/persistence: WALANG binago.
+
+Verification:
+
+- `python -m gui.workflow_tab` — PASSED (drives the REAL list editor:
+  default 8-row order, select, Move Up/Down with selection keep,
+  enable/disable, add/delete, save/restore, status paint, at
+  END-TO-END RUN: 2 echo nodes → COMPLETED, DONE colors both rows,
+  Finished status)
+- `python -m core.workflow_engine` — PASSED
+- `python -m unittest discover tests` — 87/87 OK
+- LIVE app smoke (real EDHClaimsGUI, real Tk events): select/move/
+  toggle/add/delete/restore/save lahat gumagana sa aktwal na tab
+- `py_compile` — OK
+
+### 2026-09-11 — Workflow GUI FIX: drag, Up/Down, arrow-click, status paint
+
+Reason:
+
+- Owner report (2026-09-11): "hindi gumagana yung drag at up and down
+  at mga ibang button sa workflow". Root causes (lahat na-reproduce
+  bago ito ayusin):
+  1. UP/DOWN dead: `move_node()` ay nagbasa lang ng
+     `order_list.curselection()`, pero ang canvas-selection redraw
+     (`_redraw_all`) ay nagre-rebuild ng Listbox at bumubura ng
+     selection — kaya pagkatapos mag-click ng node sa canvas, patay ang
+     Up/Down. FIX: `move_node` ngayon ay tumatanggap ng KAHIT ANONG
+     pinagmulan ng selection (canvas node o list row), at
+     `_refresh_order_list` ay nagre-restore ng selection BY NODE ID
+     (hindi row index) pagkatapos ng redraw.
+  2. DRAG broken: `moveto` sa shared tag ay gumagalang lang ng unang
+     item (naiiwan ang mga text); walang drag threshold kaya kahit
+     jitter ng click ay gumagalaw ng node; at ang pag-drag sa ibabaw ng
+     ibang node ay nagpapatakbo ng handler NG IBANG node (posisyon
+     corruption). FIX: canvas-level press/motion/release lang (walang
+     per-item tag bindings na nagpapatunggal), +4px drag threshold,
+     delta-based na paggalaw ng LAHAT ng items (`canvas.move` sa
+     `nid:` tag), at ang click-vs-drag ay nadedetermine sa release.
+  3. ARROW-CLICK dead (Disconnect): walang binding sa connection lines
+     — `Disconnect Selected` ay hindi kailanman nagka-laman. FIX:
+     deterministic point-to-segment geometry hit-test (±8px) sa
+     naka-track na line items; ang click sa arrow ay nagse-select ng
+     koneksyon (pula) at pwede na i-Disconnect. Node-hit ay deterministic
+     box test (hindi `find_closest` na unreliable).
+  4. STATUS PAINT crash: `itemconfig(outline=...)` sa node-id tag ay
+     bumabagsak sa TEXT items (TclError "unknown option -outline") —
+     hindi kailanman nag-paint ang status colors. FIX: paints lang sa
+     RECTANGLE item (tracked via `_node_rect_items`), at ang kulay ay
+     naka-record sa `_node_status_colors` para hindi mawala sa redraw;
+     nagli-linis ito kapag may bagong Run.
+
+Files (EDIT):
+
+- `gui/workflow_tab.py` — reworked canvas event layer (press/motion/
+  release + hit-testing), fixed `move_node`, `_refresh_order_list`
+  (id-based selection restore), `_paint_node_status`, status-color
+  lifecycle (clear on Run/Restore/Delete). WALANG binagong engine/
+  registry/adapter behavior — GUI layer lang.
+
+Verification:
+
+- `python -m gui.workflow_tab` — PASSED (drives REAL canvas handlers:
+  click-select, connect pair, drag +60px, jitter-click no-drag,
+  arrow-click + disconnect, Up/Down from canvas AND list selection
+  across redraws, enable/disable, status paint, add/delete/restore/
+  save)
+- `python -m core.workflow_engine` — PASSED (engine layer untouched)
+- `python -m unittest discover tests` — 87/87 OK
+- LIVE app smoke (real EDHClaimsGUI + real `<Button-1>`/`<B1-Motion>`/
+  `<ButtonRelease-1>` event stream sa aktwal na Workflow tab):
+  click-select ✓, drag 30px ✓, arrow-click select ✓, Disconnect ✓,
+  reconnect via A→B clicks ✓, Up/Down ✓, status paint crash-free ✓
+
+### 2026-09-11 — DB Config FIX: charset utf8 (hindi utf8mb4) sa Test Connection
+
+Reason:
+
+- Owner report (2026-09-11): "unknown character set utf8mb4" sa Test
+  Connection. Ang pymysql 1.4.6 ay DEFAULT utf8mb4 kapag walang charset
+  na tinukoy; ang `core/hbsys_connection.py` factory ay laging
+  `charset="utf8"`. Ang v1 `test_connection` ay nakaligtaan ang charset
+  — mismong behavior sa loob mismo ng config screen (ang factory sa
+  labas ay tama na).
+
+Files (EDIT):
+
+- `core/db_connection_config.py` — test_connection ay may
+  `charset="utf8"` na katulad ng factory; +1 self-test check na
+  naka-capture sa real pymysql.connect kwargs (14/14 PASSED —
+  pinipigilan ang muling pagbalik ng bug). Docstring note din.
+
+### 2026-09-11 — Server & Database Credentials Configuration (HBSys MySQL)
+
+Reason:
+
+- Owner directive (2026-09-11): GUI settings screen para sa server/database
+  credentials — Server/Host, Port, Database, Username, Password na may
+  Show/Hide, Test Connection (walang auto-save, laging sinasara ang
+  connection), Save Configuration, at Load ng existing values. HINDI
+  hinahardcode ang mga credentials at HINDI pinapalitan ang working
+  connection logic.
+
+Files (NEW):
+
+- `core/db_connection_config.py` — Configuration Manager: load/save/
+  validate ng `db_connection_config.json` (DB_HOST/DB_PORT/DB_NAME/
+  DB_USER/DB_PASSWORD — git-ignored, local lang); apply_to_env() na
+  nag-e-export sa HBSYS_DB_* env vars NG EXISTING factory; test_connection()
+  gamit ang EKSAKTONG parehong pymysql parameters ng factory (connect_timeout
+  5s, laging naka-close sa finally); _scrub_secret() — password HINDI
+  kailanman lumalabas sa error messages/logs/exceptions; validation na may
+  user-friendly messages (host/port 1-65535/database/username). Missing o
+  corrupt file → existing factory defaults (zero behavior change).
+  13/13 __main__ self-test.
+- `gui/db_connection_dialog.py` — DBConnectionDialog (modal Toplevel,
+  ttk): Connection Settings fields na may hints, password masked ("•")
+  default na may Show/Hide toggle, Test Connection (walang save, status
+  label ✓/✗, malinaw na success/failure messages — kasama ang checklist sa
+  failure), Save Configuration (validate → save → apply_to_env), Close.
+  Ina-notify ang GUI log nang WALANG credentials ([DB] lines lang).
+  __main__ self-test (headless-safe).
+
+Files (EDIT):
+
+- `edh_claims_gui_XML_COPY_BUTTON.py` — 3 surgical additions: (1) sa
+  __init__ pagkatapos ng settings load: apply_to_env(
+  load_connection_config()) para sa HBSYS_DB_* env bago pa magamit ang
+  factory (no saved config = walang nabago); (2) "Server & Database"
+  section sa Preferences tab na may "Configure Server & Database…"
+  button; (3) open_db_connection_dialog() handler. WALANG ibang
+  pagbabago; ang save_settings flow at lahat ng iba pang settings ay
+  hindi ginalaw.
+- `.gitignore` — db_connection_config.json (may password — local lang,
+  never committed; same policy ng claims_gui_config.json).
+
+Behavior:
+
+- OPEN dialog: niloload ang saved values (o factory defaults kung wala);
+  password masked. WALANG overwrite hangga't hindi nag-Save ang user.
+- TEST: entererd values lang (never saved); same factory parameters;
+  connection laging naka-close; success → "✓ Connection successful +
+  Server/Database", failure → "✗ + reason (scrubbed) + checklist";
+  walang password sa kahit anong message/log.
+- SAVE: validation → JSON write → HBSYS_DB_* env. Ang EXISTING na
+  factory at lahat ng GUI-launched scripts (env = os.environ.copy())
+  ay kusang gumagamit ng bagong values. Hindi kailangang palitan ang
+  kahit anong query/repository/pooling code — env-var contract lang.
+- STARTUP: no saved config → factory defaults (192.168.1.2:3306/
+  hbsys_edh) — eksakto ang dati.
+
+Safety / compatibility:
+
+- `core/hbsys_connection.py` HINDI binago (zero modifications) — ang
+  bagong layer ay dumadaan lang sa mga env var na binabasa na nito.
+- Walang binagong business logic, queries, repositories, o ibang GUI
+  tabs; walang bagong dependencies (pymysql na ang existing).
+- Password: local JSON lang (git-ignored), masked sa UI, scrubbed sa
+  exceptions, hindi log.
+
+Verification:
+
+- `python -m core.db_connection_config` — 13/13 PASSED
+- `python -m gui.db_connection_dialog` — PASSED (real display:
+  construction/load/masking toggle/validation warnings/test failure
+  path/no-leak logs)
+- `python -m unittest discover tests` — 87/87 OK (no regressions)
+- `py_compile` all 3 changed files — OK
+- GUI smoke (real EDHClaimsGUI): startup naghahatid ng saved config sa
+  HBSYS_DB_* env; factory source intact (env vars pa rin); Preferences
+  button wired; dialog opens.
+- Live Test Connection sa totoong HBSys DB: PENDING (operator-run).
+
+### 2026-09-10 — Configurable Workflow System v1 (registry + adapters + engine + GUI tab)
+
+Reason:
+
+- Owner directive (2026-09-10): gawing configurable ang existing pipeline
+  ("Existing Functions → Thin Integration Layer → Workflow/Connection
+  Registry → Workflow Engine → Configurable GUI") HINDI rebuild. Ang
+  buong analysis plan ay nasa
+  `C:\Users\EDH-Admin\.local\share\kilo\plans\1788937928018-configurable-workflow-system.md`
+  at na-approve para sa implementasyon. KEY FACT na nagtulak sa design:
+  WALANG code-level chaining sa buong project — ang pipeline ay
+  folder-contract lang (scans\ → output\ → READY\ → eClaimsDoc), kaya
+  ang workflow layer ay PURELY ADDITIVE (walang binagang business
+  logic, walang inrewire).
+
+Files (NEW):
+
+- `core/workflow_registry.py` — NodeSpec catalog ng 12 existing entry
+  points (claims_processor, date_fill_regular/abtc, xml_clicker,
+  copy_xml, fees_checker, claims_checker + recheck, add_claims_upload,
+  claim_attachments, merge_pdf, convert_pdfa). Pure data +
+  validate_registry; hbsys_touching flags; supports_dry flags; direct
+  entry-point invocation (HINDI ang Tk-prompting launchers para
+  hindi mag-block ang unattended runs at abot ng terminate() ang real
+  tool process). 20/20 __main__ self-test.
+- `core/workflow_adapters.py` — ScriptNodeAdapter: thin subprocess
+  wrapper na kopya lang ng existing GUI `_run_script_thread` behavior
+  (cwd=PROJECT_ROOT, stdout streaming via callback, CLAIMS_* env
+  bridge mula sa settings + node extra_env, terminate() stop,
+  CREATE_NO_WINDOW). build_command/build_env pure functions. Statuses:
+  DONE/FAILED/STOPPED. 11/11 __main__ self-test (totoong subprocess
+  lifecycle kasama ang terminate).
+- `core/workflow_engine.py` — NodeInstance/Connection/WorkflowConfig
+  dataclasses; default_workflow() factory (8 nodes = current manual
+  pipeline order, deep-copied bawat tawag); save/load/validate ng
+  `workflow_config.json` (WorkflowConfigError sa missing/corrupt/
+  unknown-node/duplicate-id/dangling-connection — HINDI kailanman
+  nag-huhula; GUI ang mag-ooffer ng Restore Default);
+  WorkflowEngine: STRICTLY SEQUENTIAL by order (isang HBSys window
+  lang — walang parallelism), per-node status callbacks,
+  continue_on_fail param (default stop), Stop = terminate current +
+  SKIPPED_STOPPED sa natitira, HBSys pre-check (find_hbsys_window)
+  bago ang hbsys_touching nodes (same gate as Date Fill/XML Clicker
+  buttons), single-run guard, unknown-node REFUSED. 21/21 __main__
+  self-test.
+- `gui/workflow_tab.py` — WorkflowFrame (ttk.Frame) sa tk.Canvas:
+  Drag (canvas tag move, positions persisted), Connect (click A then
+  B → arrow; no duplicates/self-loops), Disconnect (Disconnect
+  Selected button), Delete Node (instance + connections LANG — hindi
+  kinakabit ang underlying module), Add Node (palette by category),
+  Enable/Disable (checkbox, walang position/order loss), Change Order
+  (side list Up/Down + renumber), Save, Restore Default, Run/Stop
+  (daemon thread, engine callbacks marshalled via self.after(0)),
+  Live mode checkbox (DRY default), per-node status colors, workflow
+  log. Constructor-injected settings_getter/log_callback — same
+  pattern as existing tabs. __main__ self-test (real display):
+  construction + buong edit vocabulary.
+
+Files (EDIT):
+
+- `edh_claims_gui_XML_COPY_BUTTON.py` — 4 surgical additions: (1)
+  import WorkflowFrame; (2) notebook tab "Workflow" (sa pagitan ng
+  Claim Attachments at Preferences); (3) build_workflow_tab() +
+  workflow_running() helper; (4) auto-watcher guards: _auto_process_tick
+  at auto_copy_xml_tick ay nag-Paused (workflow running) habang
+  nag-e-execute ang workflow — pinipigilan ang auto claims_processor /
+  xml-copy na magsimula MID-CHAIN. WALANG ibang pagbabago sa shell.
+- `.gitignore` — workflow_config.json sa local settings section (same
+  policy ng claims_gui_config.json; user-generated state).
+
+Behavior:
+
+- DEFAULT: walang workflow_config.json → tab naglo-load ng DEFAULT
+  workflow (current manual pipeline order); HINDI nag-a-auto-run ang
+  workflow kahit kailan — Run button LANG. Existing buttons/tabs/
+  watchers: kapag walang tumatakbo na workflow, eksakto ang dati.
+- Run: engine → adapters → totoong subprocess ng mga existing tools;
+  exit code ang resulta; Stop = terminate (same sa GUI Stop Process);
+  bawat tool ang may-ari pa rin ng sariling resume (batch state
+  JSONs/recheck/prechecks).
+- HBSys gate: date_fill/xml_clicker/add_claims/claim_attachments nodes
+  ay SKIPPED with reason kapag sarado ang HBSys (hindi crash).
+- Dry-run default sa tab (Live mode checkbox); supports_dry tools ang
+  may tunay na dry behavior; claims_processor/fees_checker/checkers/
+  copy_xml ay walang dry mode (live_args=() — tulad ng GUI behavior).
+- v1 SCOPE (deliberate): connections = visual/ordered metadata lang;
+  graph traversal + branching/conditions DEFERRED (walang branching sa
+  current pipeline). Archive node DEFERRED (manual GUI action pa rin).
+  Telegram/webscanner/PDF-per-file tools NOT RECOMMENDED (documented).
+
+Safety / compatibility:
+
+- ZERO modification sa: production engine
+  (bot_unknown_trainer_..._ADM_DIS.py), core/claim_attachments_*
+  (v6.1/v7), core/add_claims_*, date_fill_hbsys/* (invoked LANG),
+  business/DB modules, lahat ng existing GUI tabs, hbsys_bot,
+  webscanner.
+- Walang DB schema change; walang dependencies na idinagdag; pure
+  stdlib + existing openpyxl/tkinter stack.
+- Adapters invoke entry points DIRECTLY (never the prompting
+  launchers) — terminate() abot ng real tool process (naka-test).
+
+Verification:
+
+- `python -m core.workflow_registry` — 20/20 PASSED
+- `python -m core.workflow_adapters` — 11/11 PASSED
+- `python -m core.workflow_engine` — 21/21 PASSED
+- `python -m gui.workflow_tab` — PASSED (real display)
+- `python -m unittest discover tests` — 87/87 OK (no regressions)
+- `python -m core.claim_attachments_doc_type` — PASSED (59)
+- `python -m core.claim_attachments_doctype_audit` — PASSED (29)
+- `py_compile` all 5 changed files — OK
+- GUI smoke (real EDHClaimsGUI launch): 12 tabs render kabilang ang
+  Workflow; workflow_running() False → True (fake engine) → False;
+  auto-watcher guards verified
+- E2E engine run (real subprocesses): 3-node config (1 disabled) →
+  COMPLETED 2/2, disabled node never executed, order preserved,
+  stdout streamed
+- Live full-pipeline workflow run: PENDING (operator-run; kailangan ng
+  scans na may tunay na pasyente + HBSys open)
+
 ### 2026-09-09 — Claim Attachments v7: DOCTYPE SOURCE-to-DESTINATION AUDIT (OCR readback removed)
 
 Reason:

@@ -27,6 +27,7 @@ from gui.pdf_compressor_tab import PDFCompressorFrame
 from gui.pdf_splitter_gui import PdfSplitterFrame
 from gui.add_claims_upload_tab import AddClaimsUploadFrame
 from gui.claim_attachments_tab import ClaimAttachmentsFrame
+from gui.workflow_tab import WorkflowFrame
 from date_fill_hbsys.hbsys_window import find_hbsys_window
 
 BASE_DIR = r"C:\claims_bot"
@@ -1243,6 +1244,20 @@ class EDHClaimsGUI(tk.Tk):
         self.settings = load_json(CONFIG_FILE, DEFAULT_SETTINGS.copy())
         self.doctors = load_json(DOCTORS_FILE, DEFAULT_DOCTORS.copy())
 
+        # Apply saved HBSys MySQL credentials (if any) to the HBSYS_DB_*
+        # environment so the EXISTING connection factory and every
+        # launched script use them. With no saved config this changes
+        # nothing (factory defaults keep working).
+        try:
+            from core.db_connection_config import (
+                apply_to_env,
+                load_connection_config,
+            )
+
+            apply_to_env(load_connection_config())
+        except Exception as exc:
+            print(f"[DB] Could not apply saved connection config: {exc}")
+
         self.running_process = None
         self.start_time = None
         self.selected_doctor_index = None
@@ -1336,6 +1351,9 @@ class EDHClaimsGUI(tk.Tk):
                 fg=self.colors["log_fg"],
                 insertbackground="#FFFFFF",
             )
+        if hasattr(self, "folder_list_boxes"):
+            for listbox in self.folder_list_boxes:
+                listbox.configure(bg=self.colors["panel"], fg=self.colors["ink"])
         if self.hbsys_status_label is not None:
             self.hbsys_status_label.configure(bg=self.colors["bg"])
         if self.hbsys_warning_label is not None:
@@ -1395,6 +1413,8 @@ class EDHClaimsGUI(tk.Tk):
         self.notebook.add(self.add_claims_upload_tab, text="Add Claims Upload")
         self.claim_attachments_tab = ttk.Frame(self.notebook, padding=4)
         self.notebook.add(self.claim_attachments_tab, text="Claim Attachments")
+        self.workflow_tab_frame = ttk.Frame(self.notebook, padding=4)
+        self.notebook.add(self.workflow_tab_frame, text="Workflow")
         self.notebook.add(self.settings_tab, text="Preferences")
         self.notebook.add(self.about_tab, text="About")
 
@@ -1407,6 +1427,7 @@ class EDHClaimsGUI(tk.Tk):
         self.build_pdf_splitter_tab()
         self.build_add_claims_upload_tab()
         self.build_claim_attachments_tab()
+        self.build_workflow_tab()
         self.build_settings_tab()
         self.build_about_tab()
 
@@ -1456,8 +1477,8 @@ class EDHClaimsGUI(tk.Tk):
         body = ttk.Frame(self.dashboard_tab)
         body.pack(fill="both", expand=True, pady=(12, 0))
 
-        left = ttk.Frame(body, width=430)
-        left.pack(side="left", fill="y", padx=(0, 12))
+        left = ttk.Frame(body, width=400)
+        left.pack(side="left", fill="y", padx=(0, 10))
         left.pack_propagate(False)
         left_canvas = tk.Canvas(
             left,
@@ -1483,8 +1504,32 @@ class EDHClaimsGUI(tk.Tk):
             lambda event: left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units"),
         )
 
+        middle = ttk.Frame(body)
+        middle.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        middle.columnconfigure(0, weight=1)
+        middle.rowconfigure(0, weight=1)
+        middle.rowconfigure(1, weight=1)
+
         right = ttk.Frame(body)
         right.pack(side="right", fill="both", expand=True)
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=1)
+        right.rowconfigure(1, weight=2)
+
+        self.output_folders_card, self.output_folders_list = self._build_folder_list_panel(
+            middle, "Output Folders"
+        )
+        self.output_folders_card.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+
+        self.ready_folders_card, self.ready_folders_list = self._build_folder_list_panel(
+            middle, "Ready Folders"
+        )
+        self.ready_folders_card.grid(row=1, column=0, sticky="nsew")
+
+        self.incomplete_folders_card, self.incomplete_folders_list = self._build_folder_list_panel(
+            right, "Incomplete Folders"
+        )
+        self.incomplete_folders_card.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
 
         actions = ttk.LabelFrame(left_content, text="Production Actions", padding=10)
         actions.pack(fill="x", padx=(0, 4))
@@ -1610,7 +1655,7 @@ class EDHClaimsGUI(tk.Tk):
             font=("Segoe UI", 9, "bold"),
             anchor="w",
             justify="left",
-            wraplength=380,
+            wraplength=360,
         )
         self.hbsys_warning_label.pack(fill="x", pady=(6, 0))
 
@@ -1635,7 +1680,7 @@ class EDHClaimsGUI(tk.Tk):
         ).pack(anchor="w")
 
         log_card = ttk.LabelFrame(right, text="Live Processing Logs", padding=12)
-        log_card.pack(fill="both", expand=True)
+        log_card.grid(row=1, column=0, sticky="nsew")
 
         self.progress = ttk.Progressbar(log_card, mode="indeterminate")
         self.progress.pack(fill="x", pady=(0, 8))
@@ -1662,7 +1707,7 @@ class EDHClaimsGUI(tk.Tk):
         scroll.pack(side="right", fill="y")
         self.log_text.config(yscrollcommand=scroll.set)
 
-        log_buttons = ttk.Frame(right)
+        log_buttons = ttk.Frame(log_card)
         log_buttons.pack(fill="x", pady=(8, 0))
         ttk.Button(log_buttons, text="Clear Logs", command=self.clear_logs).pack(side="left")
         ttk.Button(log_buttons, text="Save Logs", command=self.save_logs).pack(side="left", padx=(8, 0))
@@ -1758,6 +1803,22 @@ class EDHClaimsGUI(tk.Tk):
             log_callback=self.log,
         )
         frame.pack(fill="both", expand=True)
+
+
+    def build_workflow_tab(self):
+        frame = WorkflowFrame(
+            self.workflow_tab_frame,
+            settings_getter=lambda: self.settings,
+            log_callback=self.log,
+        )
+        self.workflow_frame = frame
+        frame.pack(fill="both", expand=True)
+
+
+    def workflow_running(self):
+        """True while the configurable workflow engine is executing."""
+        frame = getattr(self, "workflow_frame", None)
+        return bool(frame is not None and frame.engine is not None and frame.engine.running)
 
 
     def build_doctor_tab(self):
@@ -1974,6 +2035,24 @@ class EDHClaimsGUI(tk.Tk):
             variable=self.var_auto_copy_xml,
         ).pack(anchor="w")
         ttk.Button(self.settings_tab, text="Save Preferences", command=self.save_settings).pack(anchor="e", pady=(12, 0))
+
+        # Server & Database credentials (HBSys MySQL) — stored in the
+        # local db_connection_config.json, applied to the HBSYS_DB_* env
+        # used by the existing connection factory.
+        db_frame = ttk.LabelFrame(
+            self.settings_tab, text="Server & Database", padding=12
+        )
+        db_frame.pack(fill="x", pady=(12, 0))
+        ttk.Label(
+            db_frame,
+            text="HBSys MySQL server used by Fees Check, Batches, Review Queue and Date Fill verification.",
+            foreground="#64748B",
+        ).pack(anchor="w")
+        ttk.Button(
+            db_frame,
+            text="Configure Server & Database…",
+            command=self.open_db_connection_dialog,
+        ).pack(anchor="w", pady=(8, 0))
 
     def build_about_tab(self):
         container = ttk.Frame(self.about_tab)
@@ -2452,6 +2531,17 @@ class EDHClaimsGUI(tk.Tk):
     def save_doctors(self):
         save_json(DOCTORS_FILE, self.doctors)
         self.log("[GUI] Doctors configuration saved.")
+
+    def open_db_connection_dialog(self):
+        """Open the Server & Database credentials configuration dialog."""
+        from gui.db_connection_dialog import open_db_connection_dialog as _open
+
+        try:
+            _open(self, log_callback=self.log)
+        except Exception as exc:
+            messagebox.showerror(
+                "Server & Database", f"Could not open the dialog:\n{exc}"
+            )
 
     def save_all(self):
         self.save_settings()
@@ -3038,6 +3128,11 @@ class EDHClaimsGUI(tk.Tk):
             self.auto_process_status_var.set("Auto Process: Off")
             return
 
+        if self.workflow_running():
+            # a configurable workflow run owns the pipeline right now
+            self.auto_process_status_var.set("Auto Process: Paused (workflow running)")
+            return
+
         signature = self.get_scan_pdf_signature()
         pdf_count = len(signature)
         queue_counts = self.count_patient_review_queue()
@@ -3122,6 +3217,10 @@ class EDHClaimsGUI(tk.Tk):
         try:
             if not bool(self.auto_copy_xml_var.get()):
                 self.auto_copy_xml_status_var.set("Auto Copy XML: Off")
+                return
+            if self.workflow_running():
+                # a configurable workflow run owns the pipeline right now
+                self.auto_copy_xml_status_var.set("Auto Copy XML: Paused (workflow running)")
                 return
             self._start_xml_copy_cycle(manual=False)
         except Exception as exc:
@@ -3370,6 +3469,91 @@ class EDHClaimsGUI(tk.Tk):
                     style="Big.TButton",
                 )
                 self.review_alert_var.set("✅ No active patient review items.")
+
+        self.refresh_folder_lists()
+
+    def list_subfolder_names(self, root, limit=500):
+        """Return (display_names, total) for direct sub-folders of root."""
+        try:
+            names = [entry.name for entry in os.scandir(root) if entry.is_dir()]
+        except OSError:
+            return [], 0
+        names.sort(key=str.lower)
+        total = len(names)
+        display = names[:limit]
+        if total > limit:
+            display.append(f"... +{total - limit} more folders")
+        return display, total
+
+    def _build_folder_list_panel(self, parent, title):
+        """Build a read-only folder name panel (no open buttons by design)."""
+        if not hasattr(self, "folder_list_boxes"):
+            self.folder_list_boxes = []
+        card = ttk.LabelFrame(parent, text=title, padding=8)
+        card.columnconfigure(0, weight=1)
+        card.rowconfigure(0, weight=1)
+        listbox = tk.Listbox(
+            card,
+            activestyle="none",
+            selectmode="browse",
+            exportselection=False,
+            font=("Segoe UI", 9),
+            bg=self.colors["panel"],
+            fg=self.colors["ink"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        vsb = ttk.Scrollbar(card, orient="vertical", command=listbox.yview)
+        hsb = ttk.Scrollbar(card, orient="horizontal", command=listbox.xview)
+        listbox.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        listbox.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, columnspan=2, sticky="ew")
+        listbox.bind(
+            "<MouseWheel>",
+            lambda event: listbox.yview_scroll(int(-1 * (event.delta / 120)), "units"),
+        )
+        listbox.bind(
+            "<Shift-MouseWheel>",
+            lambda event: listbox.xview_scroll(int(-1 * (event.delta / 120)), "units"),
+        )
+        listbox.insert("end", "(no folders)")
+        self.folder_list_boxes.append(listbox)
+        return card, listbox
+
+    def populate_folder_list(self, card, listbox, base_title, root):
+        """Refresh one folder name panel; the title shows the folder count."""
+        names, total = self.list_subfolder_names(root)
+        listbox.delete(0, "end")
+        if names:
+            for name in names:
+                listbox.insert("end", name)
+        else:
+            listbox.insert("end", "(no folders)")
+        card.configure(text=f"{base_title} ({total})")
+
+    def refresh_folder_lists(self):
+        """Refresh the Output / Ready / Incomplete folder name lists."""
+        if not hasattr(self, "output_folders_list"):
+            return
+        self.populate_folder_list(
+            self.output_folders_card,
+            self.output_folders_list,
+            "Output Folders",
+            self.settings.get("output_folder", ""),
+        )
+        self.populate_folder_list(
+            self.ready_folders_card,
+            self.ready_folders_list,
+            "Ready Folders",
+            os.path.join(BASE_DIR, "claims_checker_results", "READY"),
+        )
+        self.populate_folder_list(
+            self.incomplete_folders_card,
+            self.incomplete_folders_list,
+            "Incomplete Folders",
+            os.path.join(BASE_DIR, "claims_checker_results", "INCOMPLETE"),
+        )
 
     def schedule_dashboard_auto_refresh(self):
         if self.dashboard_auto_refresh_job is not None:
