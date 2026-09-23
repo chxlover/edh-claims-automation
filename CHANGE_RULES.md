@@ -91,12 +91,22 @@ Safety / compatibility notes:
   produced are already hardcoded, so runtime behavior is unaffected.
 - Files are recoverable from git history (`git checkout 9851a5c --
   screenshots/`) until a history rewrite is performed.
-- STILL OPEN (owner decision): git HISTORY of commits up to 9851a5c still
-  contains the images, and the repository is public. Full removal needs either
-  a history rewrite (`git filter-repo --path screenshots --invert-paths` +
-  force push, which breaks existing clones) or making the repository private /
-  deleting it. The `logs/` debug screenshots are gitignored but remain on the
-  PC (not part of this change).
+- HISTORY PURGED (owner decision, same day): `python -m git_filter_repo
+  --invert-paths --path screenshots --force` rewrote every local ref, the
+  `origin` remote was re-added, and `git push --force origin main` updated
+  GitHub. `main` HEAD is now 326ac26 (replacing 9851a5c / b0f0f13 - the latter
+  no longer exists as an object), the HEAD tree is byte-identical
+  (86c5f6b692aac748b75871883ce9757450896213), `main` still has the same 13
+  commits (no commit lost), the `v0.3` tag is untouched (its commit never
+  contained the screenshots), and `git log --all -- screenshots` is empty.
+  The repository stays PUBLIC by owner choice.
+- Backup taken BEFORE the rewrite: `C:\claims_bot_git_backup_20260923.git`
+  (mirror clone of the pre-rewrite history, INCLUDING the screenshots) - keep
+  it secure or delete it once it is no longer needed.
+- Remaining caveats: GitHub can keep unreachable objects / cached views for a
+  while (direct-by-SHA URLs), other clones or forks keep their own copy (e.g.
+  the Cline worktree clone under `%USERPROFILE%\.cline\worktrees`), and the
+  `logs/` debug screenshots (977 files, 73 MB, gitignored) still sit on the PC.
 
 Verification performed:
 
@@ -108,6 +118,10 @@ Verification performed:
 - `git check-ignore -v screenshots/test.png` -> matched by the new rule.
 - `python -u core/claim_attachments_doc_type.py` -> "SKIP v4 integration",
   "RESULT: PASSED" (no FAIL).
+- After the purge: fresh `git clone` of the public repository -> HEAD 326ac26,
+  `git log --all -- screenshots` empty, `git cat-file -t b0f0f13` -> "Not a
+  valid object name", `git rev-list --count HEAD` -> 13 (same as before), and
+  `git ls-remote origin refs/heads/main` equals the local HEAD.
 
 ### 2026-09-23 - Feature: Claim Attachment Checklist wired into the uploader + Preferences dialog
 
