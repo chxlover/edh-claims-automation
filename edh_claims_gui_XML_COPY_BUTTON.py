@@ -76,6 +76,7 @@ DEFAULT_SETTINGS = {
     "show_debug_logs": True,
     "enable_auto_process": False,
     "enable_auto_copy_xml": True,
+    "document_detection_rules_configurable": False,
     "theme": "Light Blue",
 }
 
@@ -2034,6 +2035,54 @@ class EDHClaimsGUI(tk.Tk):
             text="Enable Auto Copy XML",
             variable=self.var_auto_copy_xml,
         ).pack(anchor="w")
+
+        # Document Detection Rules Configurable (global detector-mode switch;
+        # OFF = existing hardcoded detection, ON = configurable rules).
+        doc_detect = ttk.LabelFrame(
+            self.settings_tab, text="Document Detection", padding=12
+        )
+        doc_detect.pack(fill="x", pady=(12, 0))
+        self.var_doc_detection_configurable = tk.BooleanVar(
+            value=bool(self.settings.get("document_detection_rules_configurable", False))
+        )
+        ttk.Checkbutton(
+            doc_detect,
+            text="Document Detection Rules Configurable",
+            variable=self.var_doc_detection_configurable,
+        ).pack(anchor="w")
+        self.doc_detection_status_var = tk.StringVar(value="")
+        self._update_doc_detection_status()
+        ttk.Label(
+            doc_detect,
+            textvariable=self.doc_detection_status_var,
+            foreground="#64748B",
+        ).pack(anchor="w", pady=(4, 0))
+        ttk.Button(
+            doc_detect,
+            text="Edit Document Detection Rules…",
+            command=self.open_document_detection_rules_dialog,
+        ).pack(anchor="w", pady=(8, 0))
+
+        # Claim Attachment Checklist: which documents are required AND
+        # uploaded, and whose files therefore stay in / leave the folder.
+        attach_profile = ttk.LabelFrame(
+            self.settings_tab, text="Claim Attachments", padding=12
+        )
+        attach_profile.pack(fill="x", pady=(12, 0))
+        self.claim_attachment_status_var = tk.StringVar(value="")
+        self._update_claim_attachment_status()
+        ttk.Label(
+            attach_profile,
+            textvariable=self.claim_attachment_status_var,
+            foreground="#64748B",
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Button(
+            attach_profile,
+            text="Edit Claim Attachment Checklist…",
+            command=self.open_claim_attachment_checklist_dialog,
+        ).pack(anchor="w", pady=(8, 0))
         ttk.Button(self.settings_tab, text="Save Preferences", command=self.save_settings).pack(anchor="e", pady=(12, 0))
 
         # Server & Database credentials (HBSys MySQL) — stored in the
@@ -2503,8 +2552,13 @@ class EDHClaimsGUI(tk.Tk):
             "show_debug_logs": bool(self.var_debug_logs.get()),
             "enable_auto_process": auto_process_enabled,
             "enable_auto_copy_xml": auto_copy_xml_enabled,
+            "document_detection_rules_configurable": bool(
+                self.var_doc_detection_configurable.get()
+            ),
             "theme": self.var_theme.get().strip() or "Light Blue",
         }
+        self._update_doc_detection_status()
+        self._update_claim_attachment_status()
         self.auto_process_var.set(bool(self.settings.get("enable_auto_process", False)))
         if hasattr(self, "var_auto_process"):
             self.var_auto_process.set(bool(self.settings.get("enable_auto_process", False)))
@@ -2541,6 +2595,79 @@ class EDHClaimsGUI(tk.Tk):
         except Exception as exc:
             messagebox.showerror(
                 "Server & Database", f"Could not open the dialog:\n{exc}"
+            )
+
+    def _update_doc_detection_status(self):
+        """Status line under the Document Detection Rules Configurable switch."""
+        if not hasattr(self, "doc_detection_status_var"):
+            return
+        if self.var_doc_detection_configurable.get():
+            self.doc_detection_status_var.set(
+                "Status: Using configurable document detection rules."
+            )
+        else:
+            self.doc_detection_status_var.set(
+                "Status: Using built-in hardcoded document detection."
+            )
+
+    def open_document_detection_rules_dialog(self):
+        """Open the configurable document detection rules editor."""
+        try:
+            from gui.document_detection_rules_dialog import (
+                DocumentDetectionRulesDialog,
+            )
+
+            dialog = DocumentDetectionRulesDialog(self, log_callback=self.log)
+            if dialog.saved:
+                self._update_doc_detection_status()
+        except Exception as exc:
+            messagebox.showerror(
+                "Document Detection Rules", f"Could not open the editor: {exc}"
+            )
+
+    def _update_claim_attachment_status(self):
+        """Status line under the Claim Attachments checklist button."""
+        if not hasattr(self, "claim_attachment_status_var"):
+            return
+        try:
+            from core.claim_attachment_profile import (
+                get_profile,
+                last_profile_error,
+            )
+
+            profile = get_profile()
+            checked = sum(
+                1 for entry in profile.values() if entry.get("enabled", True)
+            )
+            text = (
+                f"Status: {checked} of {len(profile)} documents checked "
+                "(required by the Claims Checker and uploaded to HBSys)."
+            )
+            problem = last_profile_error()
+            if problem:
+                text += f"  Profile problem: {problem}"
+            self.claim_attachment_status_var.set(text)
+        except Exception as exc:
+            try:
+                self.claim_attachment_status_var.set(
+                    f"Status: claim attachment profile unavailable ({exc})."
+                )
+            except Exception:
+                pass
+
+    def open_claim_attachment_checklist_dialog(self):
+        """Open the Claim Attachment Checklist editor."""
+        try:
+            from gui.claim_attachment_checklist_dialog import (
+                ClaimAttachmentChecklistDialog,
+            )
+
+            dialog = ClaimAttachmentChecklistDialog(self, log_callback=self.log)
+            if dialog.saved:
+                self._update_claim_attachment_status()
+        except Exception as exc:
+            messagebox.showerror(
+                "Claim Attachment Checklist", f"Could not open the editor: {exc}"
             )
 
     def save_all(self):
@@ -2988,6 +3115,9 @@ class EDHClaimsGUI(tk.Tk):
             env["CLAIMS_ENABLE_DATE_SIGNED"] = "1" if self.settings.get("enable_date_signed", True) else "0"
             env["CLAIMS_ENABLE_BACKUP"] = "1" if self.settings.get("enable_backup", True) else "0"
             env["CLAIMS_SHOW_DEBUG_LOGS"] = "1" if self.settings.get("show_debug_logs", True) else "0"
+            env["CLAIMS_DOC_DETECTION_RULES_CONFIGURABLE"] = (
+                "1" if self.settings.get("document_detection_rules_configurable", False) else "0"
+            )
             env["CLAIMS_SCAN_FOLDER"] = self.settings["scan_folder"]
             env["CLAIMS_OUTPUT_FOLDER"] = self.settings["output_folder"]
             env["CLAIMS_BACKUP_FOLDER"] = self.settings["backup_folder"]

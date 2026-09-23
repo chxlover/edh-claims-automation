@@ -1560,6 +1560,80 @@ def build_folder_path(ready_dir: Path, patient: FolderDates) -> str:
     return str(ready_dir / folder_name)
 
 
+# -- Claim Attachment Checklist (Preferences -> Claim Attachment Checklist) --
+
+def apply_attachment_exclusions(
+    patient_folder: str | Path,
+    ready_dir: Path,
+    live: bool = True,
+) -> tuple[bool, list[str], str]:
+    """Move the files of UNCHECKED documents out of the patient folder.
+
+    The Claim Attachment Checklist (core/claim_attachment_profile.py) owns
+    which documents are required.  An unchecked document must be neither
+    required by the Claims Checker nor uploaded to HBSys, so its files are
+    MOVED (never deleted) to
+    ``claims_checker_results\\_upload_backup\\<patient>\\`` - a "_"-prefixed
+    sibling of READY that the checker, the uploader and the archive job all
+    ignore - and recorded in a per-patient ``_excluded_manifest.json``
+    BEFORE anything is attached.
+
+    Returns ``(ok, moved_files, error)``:
+
+        (True,  [], "")          nothing to do (no unchecked document)
+        (True,  [names...], "")  those files were moved out of the folder
+        (False, [], "why")       the move could not be done: the checklist
+                                 state is unknown, so the caller must SKIP
+                                 this patient and attach nothing
+                                 (never guess)
+
+    With ``live=False`` (dry-run) nothing is moved or created; the names that
+    WOULD be moved are returned instead.
+    """
+    folder = Path(patient_folder)
+    try:
+        from core.claim_attachment_profile import (
+            backup_root_for,
+            doc_matches_file,
+            exclude_files,
+            get_excluded_docs,
+            last_profile_error,
+        )
+    except Exception:
+        return True, [], ""  # profile module unavailable -> legacy behavior
+
+    problem = last_profile_error()
+    if problem:
+        # A profile file exists but cannot be trusted: we do not know which
+        # documents are unchecked, so attaching anything would be guessing.
+        return False, [], f"claim attachment profile problem: {problem}"
+
+    try:
+        excluded = get_excluded_docs()
+    except Exception as exc:
+        return False, [], f"claim attachment profile unreadable: {exc}"
+    if not excluded:
+        return True, [], ""
+
+    if not live:
+        try:
+            return True, [
+                file.name
+                for file in sorted(folder.iterdir())
+                if file.is_file()
+                and any(
+                    doc_matches_file(entry, file) for entry in excluded.values()
+                )
+            ], ""
+        except OSError as exc:
+            return False, [], f"cannot list {folder}: {exc}"
+
+    try:
+        return True, exclude_files(folder, backup_root_for(ready_dir)), ""
+    except Exception as exc:
+        return False, [], f"could not move not-required files: {exc}"
+
+
 def run_attachments_loop(
     operator: AttachmentsOperator,
     state: AttachmentsState,
@@ -1610,6 +1684,30 @@ def run_attachments_loop(
             input("Press Enter to process this patient, or Ctrl+C to stop...")
 
         folder_path = build_folder_path(ready_dir, patient)
+
+        # Step 0: Claim Attachment Checklist (Preferences) - the files of
+        # UNCHECKED documents are moved out of the patient folder BEFORE
+        # anything is attached, so they are never uploaded to HBSys.
+        excluded_ok, excluded_files, excluded_error = apply_attachment_exclusions(
+            folder_path, ready_dir, live=operator.live
+        )
+        if not excluded_ok:
+            consecutive_failures += 1
+            state.mark_failed(
+                patient.patient_name, "attachment checklist exclusion failed"
+            )
+            state.save()
+            print(f"  [FAIL] attachment checklist exclusion failed: {excluded_error}")
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                state.mark_failed_batch()
+                state.save()
+                return 1
+            continue
+        if excluded_files:
+            verb = "Not required (dry-run, would move)" if not operator.live else (
+                "Not required - moved to backup"
+            )
+            print(f"  [INFO] {verb}: {', '.join(excluded_files)}")
 
         # Step 1: Type patient name and search
         operator.search_patient(patient.patient_name)
@@ -1738,9 +1836,85 @@ def run_attachments_loop(
 
 # -- CLI entry point -----------------------------------------------------
 
+def self_test() -> int:
+    """Offline self-test for the checklist exclusion step (no HBSys needed)."""
+    import tempfile
+
+    from core import claim_attachment_profile as profile
+
+    failures = 0
+
+    def check(label: str, ok: bool) -> None:
+        nonlocal failures
+        failures += 0 if ok else 1
+        print(f"[{'PASS' if ok else 'FAIL'}] {label}")
+
+    real_profile_file = profile.PROFILE_FILE
+    tmp = Path(tempfile.mkdtemp())
+    profile.PROFILE_FILE = tmp / "claim_attachment_profile.json"
+    profile._invalidate_cache()
+
+    ready = tmp / "claims_checker_results" / "READY"
+    patient = ready / "DELA CRUZ, JUAN - 000000000000001 - ADM20260801_DIS20260805"
+    patient.mkdir(parents=True)
+    for name in (
+        "CSF.pdf",
+        "COE.pdf",
+        "SOA1.pdf",
+        "DELACRUZ-1_CF4.xml",
+        "DELACRUZ-1_eSOA.xml",
+    ):
+        (patient / name).write_text("x", encoding="utf-8")
+
+    # 1. Default checklist -> nothing is excluded, nothing is touched.
+    ok, moved, error = apply_attachment_exclusions(patient, ready)
+    check("default checklist: nothing excluded", ok and not moved and not error)
+
+    # 2. Unchecked SOA1 -> dry-run only reports, live moves it to backup.
+    profile.save_overrides({"docs": {"SOA1": {"enabled": False}}, "custom_docs": {}})
+    ok, moved, error = apply_attachment_exclusions(patient, ready, live=False)
+    check(
+        "dry-run reports the file without moving it",
+        ok and moved == ["SOA1.pdf"] and (patient / "SOA1.pdf").is_file(),
+    )
+
+    ok, moved, error = apply_attachment_exclusions(patient, ready)
+    check("live moves the not-required file", ok and moved == ["SOA1.pdf"])
+    check(
+        "moved file is inside the backup folder",
+        (profile.backup_root_for(ready) / patient.name / "SOA1.pdf").is_file(),
+    )
+    check("manifest written next to the moved file",
+          (profile.backup_root_for(ready) / patient.name / "_excluded_manifest.json").is_file())
+    check(
+        "required files stay in the patient folder",
+        (patient / "CSF.pdf").is_file() and (patient / "COE.pdf").is_file(),
+    )
+    check(
+        "still-enabled eSOA is untouched",
+        (patient / "DELACRUZ-1_eSOA.xml").is_file(),
+    )
+
+    # 3. A profile that cannot be trusted must stop the patient, not guess.
+    profile.PROFILE_FILE.write_text("{ not json", encoding="utf-8")
+    profile._invalidate_cache()
+    ok, moved, error = apply_attachment_exclusions(patient, ready)
+    check("corrupt profile -> patient skipped", not ok and bool(error))
+
+    profile.PROFILE_FILE = real_profile_file
+    profile._invalidate_cache()
+    print("RESULT:", "PASSED" if failures == 0 else f"{failures} FAILURE(S)")
+    return 0 if failures == 0 else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Claim Attachments Upload — automate document attachments for READY patients."
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run the offline checklist/exclusion self-test and exit (no HBSys)",
     )
     parser.add_argument(
         "--ready-dir",
@@ -1780,6 +1954,9 @@ def main() -> int:
         help="Auto-restart when code files change (no need to re-run manually)",
     )
     args = parser.parse_args()
+
+    if args.self_test:
+        return self_test()
 
     ready_dir = args.ready_dir or DEFAULT_READY_DIR
     patients = load_patients(ready_dir)

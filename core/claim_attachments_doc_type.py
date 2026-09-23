@@ -74,6 +74,48 @@ _STEMS_BY_EXT: dict[str, set[str]] = {"P": _PDF_STEM_SET, "X": _XML_STEM_SET}
 _KNOWN_STEM_SET: set[str] = _PDF_STEM_SET | _XML_STEM_SET
 
 
+# ---------------------------------------------------------------
+# Claim Attachment Profile integration (2026-09-23): the suffix ->
+# doc type vocabulary comes from core/claim_attachment_profile.py
+# (Preferences -> Claim Attachment Checklist...).  The hardcoded
+# PDF_SUFFIXES / XML_SUFFIXES above stay as the fallback and are the
+# exact default profile content; whenever the profile file changes,
+# the derived lookup tables are rebuilt.  Disabled documents are
+# absent from the profile maps, so a file that should have been
+# excluded keeps hitting the never-guess ABORT path instead of being
+# typed into HBSys.
+# ---------------------------------------------------------------
+_TABLE_REVISION: dict[str, object] = {"key": None}
+
+
+def _ensure_tables() -> None:
+    """Rebuild the lookup tables when the attachment profile changed."""
+    try:
+        from core.claim_attachment_profile import (
+            get_doctype_maps,
+            profile_revision,
+        )
+        revision = profile_revision()
+        if revision == _TABLE_REVISION["key"]:
+            return
+        pdf_map, xml_map = get_doctype_maps()
+    except Exception:
+        return  # profile unavailable -> current tables stay active
+    global _PDF_LOOKUP, _XML_LOOKUP, _ALL_STEMS_NORM
+    global _PDF_STEM_SET, _XML_STEM_SET, _STEMS_BY_EXT, _KNOWN_STEM_SET
+    _PDF_LOOKUP = {_norm(stem): doc for stem, doc in pdf_map.items()}
+    _XML_LOOKUP = {_norm(stem): doc for stem, doc in xml_map.items()}
+    _ALL_STEMS_NORM = sorted(
+        {_norm(stem): doc for stem, doc in {**pdf_map, **xml_map}.items()}.items(),
+        key=lambda kv: -len(kv[0]),
+    )
+    _PDF_STEM_SET = {_norm(stem) for stem in pdf_map}
+    _XML_STEM_SET = {_norm(stem) for stem in xml_map}
+    _STEMS_BY_EXT = {"P": _PDF_STEM_SET, "X": _XML_STEM_SET}
+    _KNOWN_STEM_SET = _PDF_STEM_SET | _XML_STEM_SET
+    _TABLE_REVISION["key"] = revision
+
+
 def detect_doc_type(word: str) -> Optional[str]:
     """Return the HBSys doc type for a grid filename word, or None.
 
@@ -83,6 +125,7 @@ def detect_doc_type(word: str) -> Optional[str]:
         "GUZMAN-260901105854_CF4.xml"          -> CF4
         "GUZMAN-260901105854_e50A.xmi"         -> ESA   (eSOA with OCR noise)
     """
+    _ensure_tables()
     match = _PDF_RE.search(word)
     if match:
         return _PDF_LOOKUP.get(_norm(match.group(1)))
@@ -102,6 +145,7 @@ def detect_doc_type_from_words(words: list[str]) -> Optional[str]:
            normalised) and search for a known stem — handles OCR-split
            tokens such as "SOA1" separated from ".pdf", or "D" + "TR.pdf".
     """
+    _ensure_tables()
     for word in words:
         doc = detect_doc_type(word)
         if doc is not None:
@@ -200,6 +244,7 @@ def match_row_to_file(
         None  -> no file matched this row (caller decides: empty row or error)
         "?"   -> multiple files matched (ambiguous — caller must abort)
     """
+    _ensure_tables()
     joined = _norm("".join(row_words))
     tail = joined[-24:] if len(joined) > 24 else joined
     matches: list[str] = []
@@ -293,6 +338,7 @@ def _has_near_stem(line: "GridLine") -> bool:
     demanded an EXACT known stem; the near-stem form keeps such
     readings alive.
     """
+    _ensure_tables()
     text = line.norm_text
     if any(stem in text for stem in _KNOWN_STEM_SET):
         return True
@@ -729,6 +775,7 @@ def match_files_to_lines(
         not_found — files with no free candidate line left
         ambiguous — (file, free candidate count) for contested files
     """
+    _ensure_tables()
 
     def _mutated_stem_candidates(
         stem_norm: str, ext: str, lines_list: list[GridLine]
@@ -1484,6 +1531,46 @@ if __name__ == "__main__":
     if not ok:
         failures += 1
     print(f"{'OK  ' if ok else 'FAIL'} v6 path match: unknown basename -> None")
+
+    # Claim Attachment Profile integration (2026-09-23): with no profile
+    # file the rebuilt tables must equal the hardcoded defaults; disabling
+    # a document removes its stem from the vocabulary (never-guess ABORT).
+    import tempfile
+    from pathlib import Path
+
+    from core import claim_attachment_profile as _profile
+
+    _real_profile_file = _profile.PROFILE_FILE
+    _profile.PROFILE_FILE = Path(tempfile.mkdtemp()) / "missing_profile.json"
+    _profile._invalidate_cache()
+    _TABLE_REVISION["key"] = None
+    _ensure_tables()
+    ok = (
+        detect_doc_type("\\CSF.pdf") == "CSF"
+        and detect_doc_type("_CF4.xml") == "CF4"
+        and len(_PDF_LOOKUP) == len(PDF_SUFFIXES)
+        and len(_XML_LOOKUP) == len(XML_SUFFIXES)
+    )
+    if not ok:
+        failures += 1
+    print(f"{'OK  ' if ok else 'FAIL'} profile: default tables == hardcoded maps")
+
+    _profile.save_overrides({"docs": {"CSF": {"enabled": False}}, "custom_docs": {}})
+    _TABLE_REVISION["key"] = None
+    ok = detect_doc_type("\\CSF.pdf") is None and detect_doc_type("\\COE.pdf") == "COE"
+    if not ok:
+        failures += 1
+    print(f"{'OK  ' if ok else 'FAIL'} profile: disabled CSF stem removed from vocabulary")
+
+    _profile.restore_defaults()
+    _profile.PROFILE_FILE = _real_profile_file
+    _profile._invalidate_cache()
+    _TABLE_REVISION["key"] = None
+    _ensure_tables()
+    ok = detect_doc_type("\\CSF.pdf") == "CSF"
+    if not ok:
+        failures += 1
+    print(f"{'OK  ' if ok else 'FAIL'} profile: restore defaults brings CSF back")
 
     print("RESULT:", "PASSED" if failures == 0 else f"{failures} FAILURE(S)")
     raise SystemExit(0 if failures == 0 else 1)

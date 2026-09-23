@@ -58,6 +58,9 @@ doctors_config.json
 signature_check_config.json
 update_config.json
 workflow_config.json
+# Local editable rules/checklist (owner's local choices) - local only
+claim_attachment_profile.json
+document_detection_rules.json
 # Contains the DB password — local only, never committed
 db_connection_config.json
 

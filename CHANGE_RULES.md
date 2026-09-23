@@ -39,6 +39,480 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-09-23 - Feature: Claim Attachment Checklist wired into the uploader + Preferences dialog
+
+Reason:
+
+- Completes the two items left open by the "Claim Attachment Profile" record
+  below: the exclusion helpers were only exercised by the module self-test, and
+  the Preferences dialog did not exist yet.
+- Owner rule for an UNCHECKED document: "not required and not uploaded". Its
+  files must leave the patient folder BEFORE the uploader attaches anything,
+  and the operator must be able to edit the checklist from the GUI instead of
+  hand-editing JSON.
+
+Files (ADD):
+
+- `gui/claim_attachment_checklist_dialog.py` (new module, 670 lines)
+  - One switch per document in a table (Required / Document / Type / Filename
+    suffix / HBSys doc type / Origin): `[x]` = required by the Claims Checker
+    AND uploaded to HBSys, `[ ]` = not required and its files are moved to the
+    backup folder. Space / Enter / double-click toggles the selection, plus
+    Check All / Uncheck All / Toggle Required.
+  - "Edit HBSys Doc Type..." renames the value typed into the HBSys grid
+    (validated by `validate_doctype`); "Add Custom Document..." / "Remove
+    Custom" manage documents PhilHealth adds later (validated code, unique
+    suffix, no built-in collision); "Restore Defaults" deletes the profile
+    file; "Restore Excluded Files..." calls `restore_all_excluded()` on READY
+    then READY_ARCHIVED and reports every patient folder.
+  - Save writes DELTAS only (built-ins: changed `enabled` / `hbsys_doctype`;
+    custom documents: full entries) through `validate_overrides()` first, so an
+    invalid value is refused BEFORE the file is touched. `self.saved` mirrors
+    the document-detection dialog so the main GUI can refresh its status line.
+  - `if __name__ == "__main__":` standalone test with 28 assertions on a temp
+    profile file (never the real one).
+
+Files (EDIT):
+
+- `core/claim_attachments_uploader.py`
+  - New `apply_attachment_exclusions(patient_folder, ready_dir, live=True)`
+    -> `(ok, moved_files, error)`. It moves the files of unchecked documents
+    to `claims_checker_results\_upload_backup\<patient>\` (never deletes, writes
+    the per-patient `_excluded_manifest.json`). Dry-run (`live=False`) only
+    reports the names. A profile file that exists but cannot be trusted
+    (`last_profile_error()` non-empty) returns `ok=False`, so the patient is
+    SKIPPED instead of attaching a document PhilHealth may no longer require.
+  - `run_attachments_loop()` gained "Step 0" right after `folder_path` is
+    computed and BEFORE Step 1 (search patient): a failed exclusion increments
+    `consecutive_failures` and skips the patient through the existing
+    escalation path; moved files are printed per patient.
+  - New offline `self_test()` + `--self-test` CLI flag (no HBSys needed; no
+    other CLI behavior changed).
+- `gui/claim_attachments_tab.py` - imports `apply_attachment_exclusions` and
+  runs the same Step 0 in `_upload_worker()` (thread-safe logging via
+  `self.after`), so the GUI upload path cannot upload an unchecked document.
+- `edh_claims_gui_XML_COPY_BUTTON.py` - new Preferences panel "Claim
+  Attachments" with a status line ("N of M documents checked...") and an
+  "Edit Claim Attachment Checklist..." button
+  (`_update_claim_attachment_status()` / `open_claim_attachment_checklist_dialog()`,
+  refreshed from `save_settings()`), mirroring the Document Detection panel.
+
+Behavior before:
+
+- The checklist could only be edited by hand-editing
+  `claim_attachment_profile.json`, and the uploader ignored it: an unchecked
+  document was still attached to HBSys (the doc-type step then ABORTed on it,
+  or typed a doc type for a document PhilHealth no longer wants).
+
+Behavior after:
+
+- Preferences -> Claim Attachments -> "Edit Claim Attachment Checklist..."
+  edits the checklist; an unchecked document is (a) no longer required by the
+  Claims Checker, (b) no longer typed into the HBSys grid, and (c) its files
+  are moved out of the patient folder before the first "Attach..." click, in
+  both the CLI loop and the GUI tab. "Restore Excluded Files..." (or deleting
+  `_upload_backup`) puts the files back.
+
+Safety / compatibility notes:
+
+- Files are MOVED, never deleted; the backup folder is a "_"-prefixed sibling
+  of READY that the checker, the uploader and the archive/transmit job ignore.
+- No change to OCR, signing, XML generation, the HBSys coordinates or the
+  doc-type matching logic. The profile import inside the uploader is wrapped:
+  if the module is unavailable the old behavior runs unchanged.
+- Dry-run stays side-effect free: nothing is moved (only reported) and no HBSys
+  action is performed.
+- Never-guess preserved: an unreadable/corrupt profile ABORTS the patient
+  (marked FAILED) instead of uploading everything.
+
+Verification performed:
+
+- `python -m py_compile core/claim_attachments_uploader.py gui/claim_attachments_tab.py gui/claim_attachment_checklist_dialog.py edh_claims_gui_XML_COPY_BUTTON.py` -> exit 0.
+- `python -u gui/claim_attachment_checklist_dialog.py` -> 28/28 PASS,
+  "RESULT: PASSED" (defaults, uncheck + Save deltas, reopen, custom document
+  validation + save, doc-type rename, restore defaults, restore excluded files
+  in a temp READY tree).
+- `python -m core.claim_attachments_uploader --self-test` -> 8/8 PASS,
+  "RESULT: PASSED" (default checklist untouched, dry-run reports without
+  moving, live move + backup folder + manifest, required files untouched,
+  corrupt profile -> patient skipped).
+- `python -m core.claim_attachments_uploader --help` shows `--self-test`;
+  `import gui.claim_attachments_tab` and `import core.claim_attachments_uploader`
+  -> OK.
+- Headless GUI smoke test: `import edh_claims_gui_XML_COPY_BUTTON` -> OK, and
+  `EDHClaimsGUI.__new__` + `_update_claim_attachment_status()` ->
+  "Status: 15 of 15 documents checked (required by the Claims Checker and
+  uploaded to HBSys)."
+- Regression re-run: `core/claim_attachment_profile.py` 26/26 PASS,
+  `core/claims_requirement_rules.py` 9/9 PASS,
+  `core/claim_attachments_doc_type.py` 65/65 OK (no FAIL lines).
+- Live HBSys test PENDING (owner): recommended
+  `--live --confirm-each --limit 2` with one document unchecked, then verify
+  the file lands in `claims_checker_results\_upload_backup\<patient>\` and that
+  the other documents are still attached.
+
+### 2026-09-23 - Feature: Claim Attachment Profile (configurable requirement + doc-type source of truth)
+
+Reason:
+
+- Owner request: the per-document claim-attachment checklist must be configurable
+  from the GUI so a PhilHealth requirement change (drop a document, rename an
+  HBSys doc type, add a new document) needs ZERO code edits.
+- An UNCHECKED document must be BOTH "not required" by the Claims Checker AND
+  "not uploaded" to HBSys by the Claim Attachments uploader.
+- Until the checklist exists, the hardcoded behavior must stay identical, so
+  the module must fall back to the legacy maps on any error.
+
+Files (ADD):
+
+- `core/claim_attachment_profile.py` (new module, 673 lines)
+  - `DEFAULT_DOCS` is the single declarative source of truth for every document:
+    `kind` (pdf/xml), filename `suffix`, `hbsys_doctype`, `conditional`, and the
+    scan order used by `claims_checker.get_found_items`.
+  - Readers: `get_profile()`, `profile_revision()`, `is_enabled()`,
+    `get_required_base_docs()`, `get_enabled_requirement_names()`,
+    `get_doctype_maps()`, `get_excluded_docs()`, `last_profile_error()`.
+  - Writers: `validate_overrides()` / `save_overrides()` / `restore_defaults()`
+    with strict validation (uppercase alphanumeric HBSys doc types only,
+    duplicate doc types intentionally allowed because SOA1/SOA2 both type "SOA",
+    built-in code and suffix collisions rejected, unsupported schema_version
+    refused, the file is left untouched when validation fails).
+  - Storage: `claim_attachment_profile.json` (project root), deltas only, same
+    policy as `document_detection_rules.json`. A missing/unreadable/corrupt file
+    NEVER crashes processing - every reader falls back to built-in defaults.
+  - Exclusion helpers (owner decision: "not required and not uploaded"):
+    `doc_matches_file()`, `backup_root_for()` (sibling `_upload_backup` of
+    READY), `exclude_files()` (MOVES, never deletes, writes a per-patient
+    `_excluded_manifest.json`), `restore_all_excluded()` (searches READY and
+    READY_ARCHIVED, collision-safe `_unique_destination`).
+  - `if __name__ == "__main__":` standalone test with 26 assertions.
+
+Files (EDIT):
+
+- `core/claims_requirement_rules.py`
+  - Header docstring documents the profile as the source of the REQUIRED set.
+  - Optional import guarded by `try/except` (legacy path runs when unavailable).
+  - `evaluate_requirements()` now filters `found_documents` through
+    `get_enabled_requirement_names()`, takes `required` from
+    `get_required_base_docs()`, and gates every conditional requirement
+    (OPR/CF3 for ANR and NSD01, MRF + "PBC or MMC" for COE eligibility NO)
+    through `is_enabled()`. `mrf_required` and `pbc_mmc_possible` were added so
+    an unchecked MRF cannot add "PBC or MMC" as missing.
+- `core/claim_attachments_doc_type.py`
+  - Added `_ensure_tables()` + `_TABLE_REVISION`: the derived tables
+    (`_PDF_LOOKUP`, `_XML_LOOKUP`, `_ALL_STEMS_NORM`, `_PDF_STEM_SET`,
+    `_XML_STEM_SET`, `_STEMS_BY_EXT`, `_KNOWN_STEM_SET`) are rebuilt from
+    `get_doctype_maps()` only when `profile_revision()` changes, and the
+    hardcoded `PDF_SUFFIXES` / `XML_SUFFIXES` remain the fallback.
+  - `_ensure_tables()` is called at the top of `detect_doc_type()`,
+    `detect_doc_type_from_words()`, `match_row_to_file()`, `_has_near_stem()`
+    and `match_files_to_lines()`.
+  - Self-test extended with 3 profile regression cases (default == hardcoded,
+    disabled CSF stem removed, restore brings CSF back).
+
+Behavior before:
+
+- The required document set, the conditional requirements and the suffix -> doc
+  type vocabulary were hardcoded; changing a requirement meant editing Python.
+
+Behavior after:
+
+- With NO `claim_attachment_profile.json` the behavior is exactly the legacy
+  hardcoded behavior (verified assertion-by-assertion against
+  `LEGACY_BASE_REQUIREMENTS` / `LEGACY_PDF_SUFFIXES` / `LEGACY_XML_SUFFIXES`).
+- With a profile file, an unchecked document is invisible to the rules (never
+  required, never reported missing, never triggers a conditional requirement)
+  and its stem leaves the doc-type vocabulary, so a file that should have been
+  excluded still hits the existing never-guess ABORT path instead of being typed
+  into HBSys.
+
+Safety / compatibility notes:
+
+- No change to OCR, PDF merge, signing, XML generator or the hardcoded detection
+  chain. `claims_checker.py` needed no edit: it calls `evaluate_requirements()`,
+  which now filters disabled documents internally.
+- Every profile read is wrapped so a corrupt config file cannot break a batch;
+  `restore_defaults()` deletes the JSON, it never writes over the legacy maps.
+- Exclusion MOVES files into `claims_checker_results\_upload_backup\<patient>\`
+  (a "_"-prefixed sibling of READY that the checker, the uploader and the
+  archive/transmit job all ignore) and records every move in a manifest, so
+  nothing is ever deleted.
+- COMPLETED later the same day - see the "Claim Attachment Checklist wired into
+  the uploader + Preferences dialog" record above: `exclude_files()` /
+  `restore_all_excluded()` are now called by the uploader
+  (move-before-attach, CLI loop and GUI tab) and the
+  Preferences -> "Claim Attachment Checklist..." dialog exists.
+
+Verification performed:
+
+- `python -m py_compile core/claim_attachment_profile.py core/claims_requirement_rules.py core/claim_attachments_doc_type.py core/document_detection_rules.py gui/document_detection_rules_dialog.py claims_checker.py core/claim_attachments_uploader.py` -> exit 0.
+- `python core/claim_attachment_profile.py` -> 26/26 PASS, "RESULT: PASSED"
+  (defaults == legacy maps, save/load, invalid input rejection, collision
+  rejection, corrupt-file fallback, exclude + manifest + restore round-trip in
+  READY_ARCHIVED, restore_defaults).
+- `python core/claims_requirement_rules.py` -> 9/9 PASS, "RESULT: PASSED"
+  (default profile unchanged, SOA1 unchecked not required/not missing, MRF
+  unchecked removes "PBC or MMC", OPR unchecked while CF3 stays required).
+- `python -u core/claim_attachments_doc_type.py` -> 65/65 OK, "RESULT: PASSED",
+  including the 3 new profile cases and all pre-existing v4/v5/v6 live
+  regressions (PASCUA, SAFLOR, SASPA, MATTERIG, GUIUO, PALAMING, SORIANO).
+- `python core/document_detection_rules.py` -> "RESULT: PASSED" (unchanged).
+- `Test-Path claim_attachment_profile.json` -> False before and after every test
+  run, i.e. no test leaves configuration behind (each test points `PROFILE_FILE`
+  at a temp dir and restores the real path).
+
+### 2026-09-23 - Fix: Document Detection Rules editor dialog (SyntaxError + incomplete per-type editor)
+
+Reason:
+
+- Owner report (2026-09-23): clicking "Edit Document Detection Rules..." in
+  Preferences > Document Detection shows an error and the editor never opens.
+- Root cause 1: `gui/document_detection_rules_dialog.py` line 236 contained a
+  stray `n` character inside the `messagebox.showwarning(...)` call, making the
+  whole module unimportable (SyntaxError). The GUI catches the import failure
+  and shows "Could not open the editor".
+- Root cause 2: the same file was truncated at line 295 in the middle of
+  `_open_editor()` - the per-type editor had no page-rules UI and no OK/Cancel
+  buttons, so Add/Edit could never write changes back.
+
+Files (EDIT):
+
+- `gui/document_detection_rules_dialog.py`
+  - Removed the stray `n` (line 236) so the module imports cleanly.
+  - Completed `_open_editor()`: scrollable Page Rules section (page key
+    1/2/.../"single", enabled, min_hits, comma-separated keywords, add/remove
+    row), OK/Cancel footer with validation (document code format, duplicate
+    code, numeric priority/min_hits, valid page keys), and write-back to
+    `self.working` preserving untouched advanced fields (`strong`, `fuzzy`,
+    `suppress_if`, level `min_hits`) per the file's docstring contract.
+  - Added the required `if __name__ == "__main__":` standalone test block.
+  - `from typing import ...` now also imports `List`.
+
+Behavior before:
+
+- Clicking "Edit Document Detection Rules..." always showed
+  "Could not open the editor: invalid syntax" and no editor opened.
+
+Behavior after:
+
+- The rules editor opens, lists all document types (default rules when no
+  `document_detection_rules.json` exists yet), and Add / Edit / Delete /
+  Restore Defaults / Save all work. Save writes `document_detection_rules.json`
+  through the existing validated `save_rules()` path. Detection behavior itself
+  is unchanged: the toggle stays OFF by default and the hardcoded detector in
+  the production engine is untouched.
+
+Safety / compatibility notes:
+
+- No change to the production engine, OCR, signing, XML generator, or the
+  hardcoded detection chain. `core/document_detection_rules.py` and its
+  DEFAULT_RULES are unchanged. No new dependencies.
+- Reminder: the whole "Document Detection Rules Configurable" feature
+  (2026-09-16: engine +36 lines, `core/document_detection_rules.py`, GUI
+  checkbox + this dialog) exists ONLY in the local `C:\claims_bot` copy and is
+  not yet committed to the GitHub repository.
+
+Verification performed:
+
+- `python -m py_compile gui/document_detection_rules_dialog.py` -> OK.
+- `python gui/document_detection_rules_dialog.py` (standalone) -> dialog opens
+  with 11 document types, type editor opens for CSF -> PASSED.
+- Headless smoke test: opened the SOA2 editor, invoked OK programmatically -
+  write-back preserved page-rule `strong`/`min_hits`/`fuzzy` fields; save/load
+  round-trip via `save_rules()`/`load_rules()` on a temp file produced no
+  validation errors; Add-new rule flow added the new type to working -> PASSED.
+
+### 2026-09-23 - Enhancement: Document Detection Rules editor (multi-page fields, advanced JSON, guards)
+
+Reason:
+
+- Follow-up to the 2026-09-23 dialog fix: the rebuilt per-type editor still
+  could not edit several rule fields that DEFAULT_RULES actively use, so
+  editing a rule risked losing or flattening configuration (owner-approved
+  6-step plan).
+
+Files (EDIT):
+
+- `gui/document_detection_rules_dialog.py`
+  - Rules table: new "Pages" column ("1, 2, single" for multi-page types,
+    "single-page" otherwise) so multi-page vs single-page types are visible
+    at a glance.
+  - `_open_editor()`: new type-level "Min hits" spinbox (critical for
+    single-page types, e.g. ANR = 2) and "Strong keywords" text box (main
+    matcher for MRF/CF2/SOA2/ANR).
+  - New "Advanced (JSON)" box at type level (suppress_if, fuzzy, custom
+    keys) and a per-page "Adv..." JSON mini editor (page-level fuzzy etc.) -
+    fulfills the original docstring contract that advanced fields stay
+    editable as JSON. JSON is validated on OK: must parse, must be an
+    object, and must not contain managed keys (enabled, priority, min_hits,
+    keywords, strong, aliases, page_rules).
+  - Page-rule rows now include a comma-separated "strong" field and the
+    "Adv..." button; per-page advanced keys (fuzzy, custom) round-trip
+    unchanged.
+  - New `_on_ok()` guard: defining a "single" page rule on any type other
+    than SOA2 shows a Yes/No warning, because only SOA2 has a downstream
+    handler for plain (complete-form) output.
+  - Footer and the "Add Page Rule" bar are now packed first (side=bottom)
+    so they can never be clipped by the expanding page-rules area; page
+    rules are displayed numeric-first with "single" last (was single-first).
+  - Module docstring updated to the new field contract; `__main__`
+    standalone test extended to 6 scenario groups.
+
+Behavior before:
+
+- min_hits (type level), strong keywords, suppress_if and fuzzy were not
+  editable in the dialog, only silently preserved. There was no protection
+  against adding a "single" rule to a type with no downstream handler.
+
+Behavior after:
+
+- Every field used by DEFAULT_RULES is editable in the dialog; advanced
+  fields are validated JSON; round-tripping a rule through the editor keeps
+  it semantically identical. Detection behavior itself is unchanged: the
+  toggle stays OFF by default and the hardcoded detector in the production
+  engine is untouched.
+
+Safety / compatibility notes:
+
+- No change to the production engine, OCR, signing, XML generator, the
+  hardcoded detection chain, `core/document_detection_rules.py`, or
+  DEFAULT_RULES. No new dependencies. `document_detection_rules.json` is
+  only written through the existing validated `save_rules()` path.
+- The feature still exists ONLY in the local `C:\claims_bot` copy and is
+  not yet committed to the GitHub repository.
+
+Verification performed:
+
+- `python -m py_compile gui/document_detection_rules_dialog.py` -> OK.
+- `python gui/document_detection_rules_dialog.py` (standalone, 6 groups):
+  Pages column, type min_hits edit (ANR 2->3), strong edit (CSF), advanced
+  JSON edit (DTR suppress_if + custom key), page strong edit with
+  min_hits/fuzzy preserved (SOA2) -> RESULT: PASSED.
+- Headless smoke test (10 scenarios): untouched OK round-trip keeps
+  SOA2/DTR semantically identical; invalid advanced JSON rejected (editor
+  stays open); managed-key collision rejected; per-page Adv JSON editor
+  preserves fuzzy and adds custom keys; "single" guard blocks on No and
+  allows on Yes -> SMOKE RESULT: ALL PASSED.
+- `python core/document_detection_rules.py` self-test -> 19/19 PASSED
+  (module unchanged, regression check only).
+
+### 2026-09-23 - Fix: configurable detection returned UNKNOWN for every page when no rules file existed
+
+Reason:
+
+- Owner report (2026-09-23): with "Document Detection Rules Configurable"
+  enabled, EVERY scanned document was classified as UNKNOWN.  Root cause:
+  `_get_rules()` cache in `core/document_detection_rules.py` starts as
+  `{"mtime": None, "types": None}` and a missing
+  `document_detection_rules.json` also yields `mtime=None`, so the
+  staleness check `cache_mtime != mtime` was False on the very first call
+  and the empty initial cache was returned - zero rules loaded, so no rule
+  could ever match.  (All module self-tests passed because they pass rules
+  explicitly and never exercised the missing-file `_get_rules()` path.)
+
+Files (EDIT):
+
+- `core/document_detection_rules.py`
+  - `_get_rules()`: staleness check is now
+    `mtime changed OR cached types is None`, so the first call with no
+    rules file on disk correctly falls back to the built-in DEFAULT_RULES.
+  - `__main__`: new regression test - point RULES_FILE at a missing path,
+    reset the cache, and verify detect_doc_configurable("CLAIM SIGNATURE
+    FORM") returns CSF via the defaults fallback.
+
+Behavior before:
+
+- Configurable mode ON + no document_detection_rules.json -> 0 rules
+  loaded -> all pages UNKNOWN (production engine reproduced:
+  classify_pdf_for_processing returned UNKNOWN for CSF/SOA1/MRF/COE/OPR
+  sample texts).
+
+Behavior after:
+
+- Same setup -> 11 default rules loaded -> samples classify correctly
+  (CSF, SOA1, MRF_page1, COE, OPR).  No behavior change when a rules file
+  exists or when the mode is OFF (hardcoded detector untouched).
+
+Safety / compatibility notes:
+
+- One-line logic change plus a test; no signature or schema changes, no
+  new dependencies.  The hardcoded detector, OCR, signing, XML generator
+  and Claims Checker are untouched.  OFF mode is completely unaffected.
+
+Verification performed:
+
+- `python -m py_compile core/document_detection_rules.py` -> OK.
+- `python core/document_detection_rules.py` self-test -> 20/20 PASSED
+  (includes the new missing-file regression case).
+- Engine-level repro script (imports the production engine module, sets
+  CLAIMS_DOC_DETECTION_RULES_CONFIGURABLE=1, calls
+  classify_pdf_for_processing): before fix all UNKNOWN / 0 rules loaded;
+  after fix CSF, SOA1, MRF_page1, COE, OPR detected / 11 rules loaded.
+- `python gui/document_detection_rules_dialog.py` standalone -> RESULT:
+  PASSED (no dialog regression).
+
+### 2026-09-23 - Fix: CSF misdetected as MRF_page1 in configurable detection mode
+
+Reason:
+
+- Owner report (2026-09-23): with "Document Detection Rules Configurable"
+  enabled, the CSF page was not detected as CSF.  Reproduction with the real
+  scan `New folder\csf001.pdf` through the production engine showed
+  configurable detection returned MRF_page1 (priority 100 beats CSF 75).
+  Root cause: the default MRF page-1 rule used the hardcoded
+  detect_mrf_type() page-1 CONTEXT markers ("philhealth identification
+  number", "purpose:", ...) with min_hits=1, but in the hardcoded detector
+  those markers only count together with a UHC marker (has_uhc AND context).
+  Every CSF page contains "philhealth identification number" (Part I), so
+  the MRF rule matched first.  A second false hit came from "purpose:": the
+  matcher's normalized-text fallback strips punctuation, degrading it to the
+  plain word "purpose", which also appears in CSF text.
+
+Files (EDIT):
+
+- `core/document_detection_rules.py`
+  - DEFAULT_RULES["MRF"]: page "1" keywords now start with "uhc" and use
+    min_hits=2 (mirrors the hardcoded has_uhc + context rule); the
+    "purpose:" marker was removed (normalized fallback made it match the
+    bare word "purpose" inside CSF text).
+  - DEFAULT_RULES["MRF"]: rule-level suppress_if ["claim form 2", "cf2"]
+    added - mirrors the hardcoded CF2 guard in detect_mrf_type().
+  - `__main__`: two new regression tests - realistic CSF page-1 OCR text
+    (with the "PHILHEALTH IDENTIFICATION NUMBER (PIN) OF MEMBER" and SEX
+    lines) must return CSF, and a UHC + context text must still return
+    MRF_page1.
+
+Behavior before:
+
+- Configurable mode ON: CSF page -> MRF_page1 (wrong group / wrong merge).
+
+Behavior after:
+
+- CSF page -> CSF.  Verified on 7 real scanned PDFs: 6/7 identical to the
+  hardcoded detector (CSF, COE x2, DTR x2, UNKNOWN); the 1 remaining
+  difference is hardcoded "SOA" vs configurable "SOA1" for the same page,
+  which converges downstream because resolve_soa_doc_type() converts the
+  broad hardcoded SOA into SOA1 via the same "please pay at the cashier"
+  marker.
+
+Safety / compatibility notes:
+
+- Default-rule data change only; no code/signature/schema changes, no new
+  dependencies.  Hardcoded detector, OCR, signing, XML generator and Claims
+  Checker untouched; OFF mode unaffected.  Existing
+  document_detection_rules.json files (if any) still load as before - the
+  dialog's Restore Defaults picks up the corrected MRF rule.
+
+Verification performed:
+
+- `python -m py_compile core/document_detection_rules.py` -> OK.
+- `python core/document_detection_rules.py` self-test -> 22/22 PASSED
+  (includes the new CSF-realistic and UHC-MRF regression cases).
+- Real-PDF engine repro (7 scans from `New folder`): CSF page now CSF;
+  6/7 identical to hardcoded, 1 benign SOA vs SOA1 difference (see above).
+- `python gui/document_detection_rules_dialog.py` standalone -> RESULT:
+  PASSED (no dialog regression).
+
 ### 2026-09-15 - Main Dashboard: 3-column layout (Actions | Output + Ready | Incomplete + Logs)
 
 Reason:

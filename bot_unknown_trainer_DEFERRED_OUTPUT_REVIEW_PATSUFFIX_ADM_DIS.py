@@ -108,6 +108,14 @@ if VisualDocumentLearner is not None:
     except Exception as visual_init_error:
         print("[VISUAL LEARNING] Unavailable:", visual_init_error)
 
+# Document Detection Rules Configurable (optional mode; default OFF).
+# The hardcoded detectors below stay untouched and remain the fallback.
+try:
+    from core.document_detection_rules import detect_doc_configurable
+except Exception as doc_rules_import_error:
+    detect_doc_configurable = None
+    print("[DOC DETECTION RULES] Unavailable:", doc_rules_import_error)
+
 # ============================================
 # PROCESS MODE
 # ============================================
@@ -570,6 +578,15 @@ def is_date_signed_enabled():
 
 def is_backup_enabled():
     return _bool_from_env_or_config("CLAIMS_ENABLE_BACKUP", "enable_backup", True)
+
+
+def is_document_detection_configurable_enabled():
+    """Document Detection Rules Configurable (default OFF = hardcoded detector)."""
+    return _bool_from_env_or_config(
+        "CLAIMS_DOC_DETECTION_RULES_CONFIGURABLE",
+        "document_detection_rules_configurable",
+        False,
+    )
 
 
 
@@ -4226,7 +4243,26 @@ def handle_deferred_unknown_review(output_pdf_path, doc_type, ocr_text):
     return selected
 
 
+def detect_doc_configurable_mode(path, text):
+    """Configurable detection mode (Document Detection Rules Configurable = ON).
+
+    ONLY the configurable rules run here.  The hardcoded detectors (detect_doc,
+    unknown-training, image-based, visual learner and the SOA correction) are
+    bypassed and their results are never merged - the configurable rules are
+    authoritative.  The returned document type feeds the SAME existing
+    downstream business logic (page trackers, merges, output, review)."""
+    if detect_doc_configurable is None:
+        print("[DOC DETECTION CONFIG ERROR] rules module unavailable - returning UNKNOWN (hardcoded detectors stay bypassed)")
+        return "UNKNOWN"
+    print("[DOC DETECTION MODE: CONFIGURABLE]")
+    return detect_doc_configurable(text)
+
+
 def classify_pdf_for_processing(path, text):
+    if is_document_detection_configurable_enabled():
+        return detect_doc_configurable_mode(path, text)
+
+    print("[DOC DETECTION MODE: HARD-CODED]")
     doc_type = detect_doc(text)
 
     if doc_type == "UNKNOWN":

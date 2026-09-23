@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.claim_attachments_uploader import (
     AttachmentsOperator,
+    apply_attachment_exclusions,
     build_folder_path,
     load_patients,
     run_attachments_loop,
@@ -379,6 +380,42 @@ class ClaimAttachmentsFrame(ttk.Frame):
                 self.after(0, lambda i=idx, p=patient: self._update_processing(i, p))
 
                 folder_path = build_folder_path(ready_dir, patient)
+
+                # Step 0: Claim Attachment Checklist (Preferences) - the files
+                # of UNCHECKED documents are moved out of the patient folder
+                # BEFORE anything is attached, so they are never uploaded.
+                (
+                    excluded_ok,
+                    excluded_files,
+                    excluded_error,
+                ) = apply_attachment_exclusions(
+                    folder_path, ready_dir, live=operator.live
+                )
+                if not excluded_ok:
+                    self.state.mark_failed(
+                        patient.patient_name, "attachment checklist exclusion failed"
+                    )
+                    self.state.save()
+                    self.after(
+                        0,
+                        lambda i=idx, e=excluded_error: (
+                            self.update_patient_status(i, "FAILED", "red"),
+                            self.log(f"  FAIL: attachment checklist failed: {e}"),
+                        ),
+                    )
+                    continue
+                if excluded_files:
+                    verb = (
+                        "Not required (dry-run, would move)"
+                        if not operator.live
+                        else "Not required - moved to backup"
+                    )
+                    self.after(
+                        0,
+                        lambda v=verb, f=list(excluded_files): self.log(
+                            f"  {v}: {', '.join(f)}"
+                        ),
+                    )
 
                 # Step 1: Search patient
                 self.after(0, lambda n=patient.patient_name: self.log(f"  Searching: {n}"))
