@@ -39,6 +39,76 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-09-23 - Security: removed patient-info screenshots from the repository
+
+Reason:
+
+- Owner report: the `screenshots/` folder contains patient information (live
+  HBSys screens with patient names and claim rows) and must be cleared.
+- All 15 images were TRACKED and had already been pushed to the PUBLIC
+  repository `github.com/chxlover/edh-claims-automation` (verified
+  `private: false` through the GitHub API), so deleting them only on the local
+  PC would have left them visible on GitHub.
+
+Files (DELETE):
+
+- `screenshots/` - 15 PNG files (1.66 MB total): 6 in
+  `add_claims_upload_claims/`, 2 in `attach_claims/`, and 7 in the folder root
+  (`attach_claims.png`, `attach_pop_up.png`,
+  `attach_pop_up_2_to_select_pdf_and_xml.png`, `checkboxhighlighted.png`,
+  `click_attach_of_highlighted_patient.png`, `doc_type.png`,
+  `pop_up_showed_up_click_attach.png`).
+- The now-empty subfolders `screenshots/attach_claims/` and
+  `screenshots/add_claims_upload_claims/` were removed. `screenshots/` itself
+  is kept (empty) because the doc-type self-test probes that path.
+
+Files (EDIT):
+
+- `.gitignore` - new rules: every PNG/JPG/JPEG/BMP/GIF inside `screenshots/`
+  is ignored, so a future live screenshot can never be committed by accident
+  (the previous ignore list protected patient folders but not this one).
+
+Behavior before:
+
+- 15 patient-containing screenshots were part of the public repository and were
+  downloadable from GitHub; the uploader's diagnostic screenshots in `logs/`
+  (977 files, 73 MB, gitignored) were the only locally-only images.
+
+Behavior after:
+
+- The folder is empty locally, the deletion is committed and pushed, so GitHub
+  HEAD no longer contains any of the 15 images and the paths are ignored.
+- The doc-type self-test "v4 integration" case (the only code reference to
+  `screenshots/attach_claims/SS_choose_doc_type.png`) now prints
+  `SKIP v4 integration (reference screenshot not found)`; every other
+  assertion in that suite still runs (synthetic grid, v4.1/v4.3 merge, v5
+  scroll, v5.3 mutated tiers, v6 path matching, live regression crops).
+
+Safety / compatibility notes:
+
+- Operating files only: no source module, coordinate, OCR rule or pipeline
+  behavior changed. The images were recon references - the coordinates they
+  produced are already hardcoded, so runtime behavior is unaffected.
+- Files are recoverable from git history (`git checkout 9851a5c --
+  screenshots/`) until a history rewrite is performed.
+- STILL OPEN (owner decision): git HISTORY of commits up to 9851a5c still
+  contains the images, and the repository is public. Full removal needs either
+  a history rewrite (`git filter-repo --path screenshots --invert-paths` +
+  force push, which breaks existing clones) or making the repository private /
+  deleting it. The `logs/` debug screenshots are gitignored but remain on the
+  PC (not part of this change).
+
+Verification performed:
+
+- `git status` -> 15 `deleted:` entries under `screenshots/`, no other change.
+- `Get-ChildItem screenshots -Recurse -File -Include *.png,*.jpg,*.jpeg,*.bmp,*.gif`
+  -> 0 files remaining.
+- `git ls-files -- screenshots` -> 15 entries before staging, 0 after the
+  commit (verified with `git ls-files` on the new HEAD).
+- `git check-ignore -v screenshots/test.png` -> matched by the new rule.
+- `python -u core/claim_attachments_doc_type.py` -> "SKIP v4 integration",
+  "RESULT: PASSED" (no FAIL).
+
 ### 2026-09-23 - Feature: Claim Attachment Checklist wired into the uploader + Preferences dialog
 
 Reason:

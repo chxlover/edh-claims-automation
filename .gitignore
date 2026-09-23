@@ -61,6 +61,12 @@ workflow_config.json
 # Local editable rules/checklist (owner's local choices) - local only
 claim_attachment_profile.json
 document_detection_rules.json
+# Screenshots may contain patient info (live HBSys screens) - never committed
+screenshots/**/*.png
+screenshots/**/*.jpg
+screenshots/**/*.jpeg
+screenshots/**/*.bmp
+screenshots/**/*.gif
 # Contains the DB password — local only, never committed
 db_connection_config.json
 
