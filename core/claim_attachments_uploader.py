@@ -257,6 +257,16 @@ def sleep_short(seconds: float = 0.35) -> None:
 
 # -- blue band detection ------------------------------------------------
 
+# A normal single-line result row is ~17-20px tall.  A taller blue band
+# means the patient name wrapped to multiple lines (long names); the
+# "attach..." text stays on the FIRST line, top-aligned in the cell.
+MULTILINE_ROW_MIN_HEIGHT = 24
+
+# Vertical offset from the band top to the centre of the first text line
+# (where the "attach..." hyperlink is drawn on wrapped/tall rows).
+FIRST_LINE_TEXT_OFFSET = 9
+
+
 def _is_blue_band(pixel: tuple[int, ...]) -> bool:
     """Check if a pixel is part of the HBSys blue highlight band."""
     if len(pixel) < 3:
@@ -265,16 +275,16 @@ def _is_blue_band(pixel: tuple[int, ...]) -> bool:
     return blue >= 140 and 60 <= green <= 200 and red <= 100 and (blue - red) >= 40
 
 
-def detect_highlighted_row_y(
+def detect_highlighted_row_band(
     image: Image.Image,
     scan_start_y: int = 150,
     scan_end_y: int = 400,
     scan_start_x: int = 50,
     scan_end_x: int = 1300,
-) -> float | None:
-    """Detect the vertical centre of the blue highlight band in a screenshot.
+) -> tuple[int, int] | None:
+    """Detect the blue highlight band in a screenshot.
 
-    Returns the screen Y coordinate of the row centre, or None.
+    Returns (top_y, bottom_y) of the widest blue band, or None.
     """
     width, height = image.size
 
@@ -303,7 +313,27 @@ def detect_highlighted_row_y(
 
     # The highlighted result row is the widest blue band
     best_band = max(bands, key=len)
-    return (min(best_band) + max(best_band)) / 2.0
+    return (min(best_band), max(best_band))
+
+
+def detect_highlighted_row_y(
+    image: Image.Image,
+    scan_start_y: int = 150,
+    scan_end_y: int = 400,
+    scan_start_x: int = 50,
+    scan_end_x: int = 1300,
+) -> float | None:
+    """Detect the vertical centre of the blue highlight band in a screenshot.
+
+    Returns the screen Y coordinate of the row centre, or None.
+    """
+    band = detect_highlighted_row_band(
+        image, scan_start_y, scan_end_y, scan_start_x, scan_end_x
+    )
+    if band is None:
+        return None
+    top, bottom = band
+    return (top + bottom) / 2.0
 
 
 # -- operator class -----------------------------------------------------
@@ -475,8 +505,8 @@ class AttachmentsOperator:
         width, height = screenshot.size
         self.log_action(f"screenshot: {width}x{height}")
 
-        # Detect blue band Y position
-        row_y = detect_highlighted_row_y(
+        # Detect blue band position
+        band = detect_highlighted_row_band(
             screenshot,
             scan_start_y=150,
             scan_end_y=400,
@@ -484,15 +514,32 @@ class AttachmentsOperator:
             scan_end_x=1300,
         )
 
-        if row_y is None:
+        if band is None:
             self.log_action("no blue highlighted row detected after search")
             return False
 
-        self.log_action(f"highlighted row center y={row_y:.0f}")
+        band_top, band_bottom = band
+        band_height = band_bottom - band_top + 1
+        row_y = (band_top + band_bottom) / 2.0
+        self.log_action(
+            f"highlighted row center y={row_y:.0f} "
+            f"(band {band_top}-{band_bottom}, height {band_height}px)"
+        )
 
-        # Click "attach..." at (ATTACH_COLUMN_X, row_y)
+        # Click "attach..." at (ATTACH_COLUMN_X, click_y).
+        # Long patient names wrap to a second line, making the row taller;
+        # the "attach..." text stays on the FIRST (top) line of the cell,
+        # so the band centre would land BELOW the clickable text.  For
+        # tall bands, click the first text line near the band top instead.
         click_x = P.ATTACH_COLUMN_X
-        click_y = int(round(row_y))
+        if band_height > MULTILINE_ROW_MIN_HEIGHT:
+            click_y = band_top + FIRST_LINE_TEXT_OFFSET
+            self.log_action(
+                f"tall row (wrapped long name, {band_height}px): "
+                f"clicking first text line at y={click_y} instead of center"
+            )
+        else:
+            click_y = int(round(row_y))
 
         self.log_action(f"clicking 'attach...' at screen ({click_x}, {click_y})")
 

@@ -39,6 +39,147 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-09-24 - Fix: Claim Attachments "attach..." click on long patient names (wrapped row)
+
+Reason:
+
+- The "attach..." row click worked for short patient names but failed for
+  long names (e.g. AGUSTIN, EDRIELLE JAMES SABBALUCA).  Reference screenshot
+  `screenshots/claim_attachments_mahaba_ang_pangalan.png` shows why: a long
+  name WRAPS to a second line, doubling the row height (blue band y 176-208,
+  33px), while the "attach..." hyperlink text stays TOP-ALIGNED on the first
+  line (y~185).  `click_attach_on_highlighted_row()` clicked the blue band
+  CENTRE (y~192), landing below the clickable text, so nothing happened.
+  Short names produce single-line rows (~17px) where centre == text line, so
+  they always worked.
+
+Files:
+
+- Modified `core/claim_attachments_uploader.py` (attach-click path only):
+  - NEW `detect_highlighted_row_band()` — returns (top, bottom) of the
+    widest blue band.  `detect_highlighted_row_y()` is now a thin wrapper
+    around it with an unchanged signature/return value (the `search_patient`
+    logging caller is unaffected; the separate copy in `add_claims_ocr.py`
+    was NOT touched).
+  - NEW constants `MULTILINE_ROW_MIN_HEIGHT = 24` and
+    `FIRST_LINE_TEXT_OFFSET = 9`.
+  - `click_attach_on_highlighted_row()`: when the band is taller than a
+    single-line row, clicks (ATTACH_COLUMN_X, band_top + 9) — the first text
+    line where "attach..." is drawn.  Single-line rows still click the band
+    centre exactly as before.
+- Added `_verify_attach_longname_fix.py` (offline verification script).
+
+Behavior:
+
+- Before: long-name (wrapped) rows were clicked at the doubled band centre,
+  missing the top-aligned "attach..." text -> attach popup never opened.
+- After: tall bands are clicked on the first text line; short-name rows keep
+  the proven centre-click behaviour bit-for-bit.
+
+Safety:
+
+- No changes to OCR, doc-type assignment, XML generation, verifier, or any
+  other module.  The change only affects the attach-click Y coordinate for
+  rows taller than 24px.
+
+Verification:
+
+- `python -m py_compile core/claim_attachments_uploader.py` — OK.
+- `python _verify_attach_longname_fix.py` — PASSED:
+  [REAL] user screenshot: band (176,208) 33px -> click_y=185 (on the
+  "attach..." text; old code clicked 192, below it);
+  [SHORT] synthetic 17px row -> click stays at band centre (unchanged);
+  [LONG] synthetic 32px row -> click at top+9;
+  [NONE] blank image -> None.
+- Live test on a long-named patient: PENDING (run when HBSys is free).
+
+### 2026-09-24 - Fix: Add Claims Include checkbox — precise targeting + real verification
+
+Reason:
+
+- The morning batch (20260924_081153) reported 3/3 success yet the checkbox
+  states were never actually verified — the code clicked and ASSUMED success.
+- Deep pixel forensics on `logs/debug_checkbox_before/after_20260924_*.png`
+  revealed the full truth:
+  1. The old click (header-text centre, x~500) landed in the Include CELL,
+     not on the box — but HBSys toggles the checkbox on cell clicks, so the
+     clicks DID work.  The "failure" was a misreading: a checked box inside
+     the BLUE highlighted row is rendered BORDERLESS with a BLUE tick on
+     white — nearly invisible next to the dark ticks of normal rows.
+  2. There was zero post-click verification, so any real miss would have
+     been silent.
+  3. A first attempt at a dark-tick-only verifier was blind to the blue-tick
+     style and caused 2 extra toggle clicks (ON->OFF->ON) on the live run
+     (batch 20260924_084915, patient AGUSTIN) before this was understood.
+
+Files:
+
+- Modified `core/add_claims_uploader.py`:
+  - REMOVED `_find_include_column_x()` (header-text scan; imprecise target).
+  - NEW `_find_checkbox_x_in_row()`: locates the checkbox inside the
+    highlighted row band via its two dark vertical edges (6-24 px apart,
+    just right of the grid's left border).  Only the Include column area
+    (popup-local x 5..60) is scanned so patient-name text can never be
+    mistaken for checkbox edges.  Fallback: calibrated `GRID_CHECKBOX_X`.
+  - NEW `_checkbox_image_looks_checked()` / `_checkbox_looks_checked()`:
+    15x15 capture around the box; inner 9x9 counts dark-tick, blue-tick and
+    white pixels.  checked = (dark >= 6 OR blue >= 5) AND white >= 15.
+    The white-interior guard stops the blue highlight band itself from
+    counting as a blue tick when a click misses the box (bare band =
+    all blue, no white).
+  - NEW `_popup_left()` and `_is_dark()` helpers.
+  - `click_checkbox_of_highlighted_row()` rewritten: detect the box X in the
+    row band, skip if already checked (a click would UNCHECK it), click once
+    then VERIFY the tick appeared, retry up to 3 attempts, and return False
+    (loud failure -> patient marked FAILED) if still unchecked.
+  - `CalibratedPointsData.grid_checkbox_x` default 10 -> 37 (10 was the
+    grid's left border, not the checkbox).
+- Modified `core/add_claims_calibration.py`: same default 10 -> 37.
+- Modified `logs/add_claims_calibration.json`: `grid_checkbox_x` 10 -> 37.
+- Updated `CHANGE_RULES.md`.
+
+Behavior:
+
+- Before: clicked the Include cell near the box, never verified anything;
+  checked boxes in highlighted rows looked unchecked to the naked eye.
+- After: clicks the detected checkbox centre; verifies the tick after every
+  click (both dark-tick and blue-tick styles); never clicks an
+  already-checked box; fails loudly after 3 unconfirmed attempts.
+- `claim_attachments_uploader.py` was re-checked against today's
+  `debug_attachments_attach_row_*.png`: the attach click lands on the
+  "attach..." link and the popup opens; it also fails loudly via the
+  `find_attachment_popup` timeout.  No change needed there.
+
+Safety / compatibility:
+
+- No changes to OCR, signing, XML generation, or the main processor.
+- Detection runs on the already-captured screenshot; the only new screen
+  interaction is one extra 15x15 screenshot per verification.
+- Never clicks an already-checked box, so re-runs cannot uncheck patients.
+- Calibration JSON schema unchanged (single value corrected).
+
+Verification:
+
+- `python -m py_compile core/add_claims_uploader.py core/add_claims_calibration.py` — passed.
+- Offline validation `_verify_fix.py`: 12/12 cases PASS against the saved
+  debug screenshots (empty boxes, blue ticks, dark ticks, and off-target
+  bare-band points all classified correctly — even with the debug
+  crosshair/line annotations occluding part of the boxes; live captures
+  have stronger margins).
+- Detection of `_find_checkbox_x_in_row()` on the saved
+  `debug_checkbox_before_20260924_081227.png` returns x=488 (checkbox
+  centre), versus the old code's x=500 cell click.
+- Live run 20260924_084915 (AGUSTIN): click landed dead-centre at
+  (488, 664); the after screenshot confirms the box toggled to the
+  borderless blue-tick checked state.  The verifier at that time was the
+  dark-only interim version, so the patient was incorrectly marked failed
+  in `logs/add_claims_upload_state.json` — the claim itself was checked and
+  the finalize steps (Add/OK/Close) executed.  Check the main grid before
+  re-running AGUSTIN to avoid a duplicate add.
+- Live end-to-end re-run with the final dual-style verifier: PENDING (user
+  is actively using HBSys for other work at the time of the fix).
+
+
 ### 2026-09-23 - Security: removed patient-info screenshots from the repository
 
 Reason:
