@@ -4848,3 +4848,52 @@ Verification:
 
 - `python -m py_compile core/claim_attachments_uploader.py` — passed.
 - Live test PENDING: re-run with --confirm-each --limit 1.
+
+
+---
+
+## 2026-09-24 -- PDF Preview Tab (CSF + COE Contact Sheets)
+
+### Change Title
+Add in-GUI PDF Preview tab with Previous / Next navigation for CSF and COE contact sheets.
+
+### Reason
+User requested a button in the main GUI that generates 3-column contact sheets for
+CSF and COE PDFs and previews them inside the application -- no external PDF viewer
+needed. The existing _make_csf_contact_sheet.py script was generalized into a
+reusable service module.
+
+### Files Added
+- core/pdf_preview_service.py -- service that builds 3-column contact sheets
+  (1920x1080) for CSF.pdf and COE.pdf from the output folder into logs/.
+- gui/pdf_preview_panel.py -- Tkinter panel with document-type radio buttons
+  (CSF/COE), Regenerate button, Previous / Next navigation, and an embedded
+  canvas viewer.
+
+### Files Modified
+- edh_claims_gui_XML_COPY_BUTTON.py -- added import, new notebook tab
+  "PDF Preview", and build_pdf_preview_tab() method.
+
+### Behavior Before
+- Only standalone script _make_csf_contact_sheet.py existed; no in-GUI preview.
+
+### Behavior After
+- Main GUI has a "PDF Preview" tab. Selecting CSF or COE auto-generates contact
+  sheets (3 columns, 1920x1080) and displays them in a canvas with Prev/Next
+  buttons. No external viewer is opened.
+
+### Safety / Compatibility
+- New modules only. No changes to existing OCR, signing, XML, or claims-checker
+  code.
+- Service module supports `if __name__ == "__main__":` standalone testing.
+- GUI panel runs sheet generation in a background thread to keep UI responsive.
+
+### Verification
+- `python core/pdf_preview_service.py` -> SUCCESS: CSF 5 PDFs -> 2 sheets,
+  COE 5 PDFs -> 2 sheets.
+- Syntax OK for all three new/modified files.
+- Import test: `from edh_claims_gui_XML_COPY_BUTTON import EDHClaimsGUI` OK;
+  build_pdf_preview_tab present.
+- Generated sheets:
+  logs/csf_contact_sheet_1.png, logs/csf_contact_sheet_2.png,
+  logs/coe_contact_sheet_1.png, logs/coe_contact_sheet_2.png.

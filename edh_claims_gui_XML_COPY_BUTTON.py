@@ -28,6 +28,7 @@ from gui.pdf_splitter_gui import PdfSplitterFrame
 from gui.add_claims_upload_tab import AddClaimsUploadFrame
 from gui.claim_attachments_tab import ClaimAttachmentsFrame
 from gui.workflow_tab import WorkflowFrame
+from gui.pdf_preview_panel import PdfPreviewPanel
 from date_fill_hbsys.hbsys_window import find_hbsys_window
 
 BASE_DIR = r"C:\claims_bot"
@@ -1416,6 +1417,8 @@ class EDHClaimsGUI(tk.Tk):
         self.notebook.add(self.claim_attachments_tab, text="Claim Attachments")
         self.workflow_tab_frame = ttk.Frame(self.notebook, padding=4)
         self.notebook.add(self.workflow_tab_frame, text="Workflow")
+        self.pdf_preview_tab = ttk.Frame(self.notebook, padding=4)
+        self.notebook.add(self.pdf_preview_tab, text="PDF Preview")
         self.notebook.add(self.settings_tab, text="Preferences")
         self.notebook.add(self.about_tab, text="About")
 
@@ -1429,6 +1432,7 @@ class EDHClaimsGUI(tk.Tk):
         self.build_add_claims_upload_tab()
         self.build_claim_attachments_tab()
         self.build_workflow_tab()
+        self.build_pdf_preview_tab()
         self.build_settings_tab()
         self.build_about_tab()
 
@@ -1805,6 +1809,10 @@ class EDHClaimsGUI(tk.Tk):
         )
         frame.pack(fill="both", expand=True)
 
+
+    def build_pdf_preview_tab(self):
+        """Build the PDF Preview tab -- contact sheets for CSF and COE."""
+        PdfPreviewPanel(self.pdf_preview_tab)
 
     def build_workflow_tab(self):
         frame = WorkflowFrame(
