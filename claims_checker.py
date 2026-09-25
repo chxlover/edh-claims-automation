@@ -135,6 +135,137 @@ def has_xml(patient_folder, xml_type):
     return False
 
 
+CLAIM_SERIES_RE = re.compile(r"-(\d+)_(cf4|cf5|esoa)\.xml$", re.IGNORECASE)
+
+CLAIM_KINDS = ("cf4", "cf5", "esoa")
+
+
+def extract_claim_series(patient_folder):
+    """Collect HBSys claim series numbers from XML filenames.
+
+    The generated XML files are encrypted eClaims envelopes, so the series
+    number embedded in the filename (e.g. NAME-260924150960_CF4.xml) is the
+    only deterministic source for the claim number.
+
+    Returns {"cf4": set(...), "cf5": set(...), "esoa": set(...)}. Sets are
+    used so duplicate files of the same kind with different numbers are
+    detected instead of silently overwriting each other.
+    """
+    series = {kind: set() for kind in CLAIM_KINDS}
+    for file in patient_folder.iterdir():
+        if not file.is_file():
+            continue
+        match = CLAIM_SERIES_RE.search(file.name)
+        if match:
+            series[match.group(2).lower()].add(match.group(1))
+    return series
+
+
+def _format_series(series, kind):
+    values = sorted(series.get(kind, ()))
+    return ",".join(values) if values else "(none)"
+
+
+def build_claim_number_rows(folders):
+    """Build claim-number match rows appended below the requirement rows.
+
+    Report-only: these rows must never be merged into the main rows list
+    because organize_claim_folders() maps the Status column to folder moves.
+    """
+    rows = []
+    for folder in folders:
+        series = extract_claim_series(folder)
+        present = [kind for kind in CLAIM_KINDS if series[kind]]
+        found = "; ".join(
+            f"{kind.upper()}={_format_series(series, kind)}" for kind in CLAIM_KINDS
+        )
+
+        if not present:
+            status = "NO XML"
+            notes = "no XML files found in the patient folder"
+        elif len(present) < len(CLAIM_KINDS):
+            status = "CLAIM NO. INCOMPLETE"
+            missing_kinds = [k.upper() for k in CLAIM_KINDS if not series[k]]
+            notes = "missing XML: " + ", ".join(missing_kinds)
+        else:
+            all_numbers = set().union(*(series[kind] for kind in CLAIM_KINDS))
+            if len(all_numbers) == 1:
+                status = "CLAIM NO. MATCH"
+                notes = "all three claim numbers match"
+            else:
+                status = "CLAIM NO. MISMATCH"
+                notes = "claim numbers differ across XML files"
+
+        rows.append(
+            {
+                "Patient Folder": folder.name,
+                "Status": status,
+                "Found": found,
+                "Missing": "",
+                "Warnings": "",
+                "Signature Warnings": "",
+                "Signature Debug": "",
+                "Eligibility": "",
+                "Reason": "",
+                "Notes": notes,
+            }
+        )
+    return rows
+
+
+def folder_has_any_xml(folder):
+    """True when the patient folder contains at least one XML file."""
+    try:
+        for child in Path(folder).iterdir():
+            if child.is_file() and child.suffix.lower() == ".xml":
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def list_folders_without_xml(root):
+    """Return (sorted folder names with no XML, total) under root.
+
+    Same shape as the GUI's list_subfolder_names() so it can feed the
+    folder list panels directly. Scan errors return an empty list.
+    """
+    if not str(root or "").strip():
+        return [], 0
+    try:
+        entries = [p for p in Path(root).iterdir() if p.is_dir()]
+    except OSError:
+        return [], 0
+    names = [p.name for p in entries if not folder_has_any_xml(p)]
+    names.sort(key=str.lower)
+    return names, len(names)
+
+
+def output_dir_has_xml(output_dir):
+    """True when the output folder contains at least one XML anywhere.
+
+    Checks XML files directly in the output folder first, then one level of
+    patient folders, early-exiting on the first hit. Scan errors return
+    False; GUI callers fail open so a scan problem never blocks buttons.
+    """
+    if not str(output_dir or "").strip():
+        return False
+    root = Path(output_dir)
+    try:
+        if not root.is_dir():
+            return False
+        for child in root.iterdir():
+            if child.is_file() and child.suffix.lower() == ".xml":
+                return True
+        for child in root.iterdir():
+            if child.is_dir() and folder_has_any_xml(child):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+
 def read_pdf_text(pdf_path):
     text = ""
 
@@ -614,7 +745,7 @@ def check_patient_folder(patient_folder):
     }
 
 
-def write_reports(rows):
+def write_reports(rows, claim_rows=None):
     REPORT_CSV.parent.mkdir(parents=True, exist_ok=True)
 
     csv_path = REPORT_CSV
@@ -645,9 +776,31 @@ def write_reports(rows):
         writer.writeheader()
         writer.writerows(rows)
 
+        if claim_rows:
+            writer.writerow({})
+            writer.writerow(
+                {
+                    "Patient Folder": "=== CLAIM NUMBER MATCH CHECK ===",
+                    "Status": "",
+                    "Found": "",
+                    "Missing": "",
+                    "Warnings": "",
+                    "Signature Warnings": "",
+                    "Signature Debug": "",
+                    "Eligibility": "",
+                    "Reason": "",
+                    "Notes": "",
+                }
+            )
+            writer.writerows(claim_rows)
+
     counts = {}
     for row in rows:
         counts[row["Status"]] = counts.get(row["Status"], 0) + 1
+
+    claim_counts = {}
+    for row in claim_rows or []:
+        claim_counts[row["Status"]] = claim_counts.get(row["Status"], 0) + 1
 
     missing_counts = {}
     for row in rows:
@@ -662,6 +815,27 @@ def write_reports(rows):
         f.write(f"Ready: {counts.get('READY',0)}\n")
         f.write(f"Needs Review: {counts.get('READY WITH REVIEW',0)}\n")
         f.write(f"Incomplete: {counts.get('INCOMPLETE',0)}\n\n")
+
+        if claim_rows:
+            f.write("Claim Number Match:\n")
+            for status in (
+                "CLAIM NO. MATCH",
+                "CLAIM NO. MISMATCH",
+                "CLAIM NO. INCOMPLETE",
+                "NO XML",
+            ):
+                f.write(f"{status} = {claim_counts.get(status, 0)}\n")
+            f.write("\n")
+            no_xml = [
+                r["Patient Folder"]
+                for r in claim_rows
+                if r.get("Status") == "NO XML"
+            ]
+            if no_xml:
+                f.write("Patients Without XML:\n")
+                for name in no_xml:
+                    f.write(f"  - {name}\n")
+                f.write("\n")
 
         f.write("Missing Documents:\n")
         for k,v in sorted(missing_counts.items()):
@@ -724,15 +898,30 @@ def main():
 
     source_dir = INCOMPLETE_DIR if recheck_mode else OUTPUT_DIR
 
-    rows = [check_patient_folder(folder) for folder in iter_patient_folders(source_dir)]
+    folders = list(iter_patient_folders(source_dir))
+    rows = [check_patient_folder(folder) for folder in folders]
     rows.sort(key=lambda row: row["Patient Folder"].lower())
+
+    # Build claim-number rows BEFORE organize_claim_folders() moves the
+    # folders into the results directories.
+    claim_rows = build_claim_number_rows(folders)
+    claim_rows.sort(key=lambda row: row["Patient Folder"].lower())
+
     organize_claim_folders(rows, source_dir)
-    csv_path, log_path = write_reports(rows)
+    csv_path, log_path = write_reports(rows, claim_rows)
 
     print("Claims checker complete")
     print("CSV:", csv_path)
     print("Log:", log_path)
     print("Patient folders checked:", len(rows))
+
+    no_xml = [r["Patient Folder"] for r in claim_rows if r.get("Status") == "NO XML"]
+    if no_xml:
+        print(f"Patients Without XML ({len(no_xml)}):")
+        for name in no_xml:
+            print(f"  - {name}")
+    else:
+        print("Patients Without XML: none")
 
     try:
         os.startfile(str(csv_path))

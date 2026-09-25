@@ -39,6 +39,168 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-09-24 - Feature: Patients Without XML panel + Check Missing auto-disable + 2s auto-refresh + Live mode default
+
+Reason:
+The user wants (1) a dashboard panel listing output patient folders that have
+no XML files, placed below the Live Processing Logs, (2) the
+"Check Missing Req./Claim #" button automatically disabled while the output
+folder contains no XML (nothing to check), (3) every-2-seconds refresh for the
+dashboard and for the Add Claims Upload and Claim Attachments patient lists,
+and (4) "Live (clicks HBSys)" as the default mode in both upload tabs.
+
+Files modified:
+
+- claims_checker.py (new folder_has_any_xml, list_folders_without_xml,
+  output_dir_has_xml; write_reports lists NO-XML patient names under the
+  Claim Number Match summary; main prints the no-XML patient list)
+- edh_claims_gui_XML_COPY_BUTTON.py (imports the two list helpers; new
+  "Patients Without XML" panel in the right column below Live Processing
+  Logs; check_missing_button stored and auto-disabled via
+  refresh_check_missing_button_state, fail-open on unexpected scan errors;
+  dashboard auto-refresh interval 15000 ms -> 2000 ms; refresh_folder_lists
+  also drives the new panel and button state)
+- gui/add_claims_upload_tab.py, gui/claim_attachments_tab.py (mode default
+  "dry-run" -> "live"; new AUTO_REFRESH_MS=2000 auto-refresh of the patient
+  list with quiet logging, selection preservation, skip-while-uploading, and
+  cancel-on-destroy)
+
+Files added:
+
+- tests/test_gui_no_xml_panel.py
+
+Files extended:
+
+- tests/test_claim_number_match.py (helper unit tests)
+
+Behavior before:
+No visibility of which output patients lack XML files. The Check Missing
+button was always enabled. Dashboard lists refreshed every 15 s; the upload
+tab patient lists refreshed only via the manual Refresh button. Both upload
+tabs defaulted to Dry-Run mode.
+
+Behavior after:
+A "Patients Without XML (N)" panel under the logs lists output folders with
+no XML files, refreshed together with the other folder lists every 2 s. The
+Check Missing Req./Claim # button disables itself while the output folder
+has no XML and logs one line when it does. Add Claims Upload and Claim
+Attachments patient lists auto-refresh every 2 s (silent, selection kept,
+paused while an upload is running) and both tabs now default to Live mode
+(the live-run confirmation dialog still appears on Start).
+
+Safety or compatibility notes:
+
+- Read-only scans only; helpers swallow OSError and return empty results.
+- Button logic fails open on unexpected exceptions so a scan hiccup never
+  blocks the user; a missing/empty output folder legitimately disables the
+  button (there is no XML to check).
+- Auto-refresh never runs while an upload thread is alive, so in-flight
+  patient rows, statuses, and progress are never disturbed.
+- Live-mode default change does not bypass the existing "Confirm Live Mode"
+  dialog; Dry-Run remains selectable.
+
+Verification performed:
+python -m unittest (full suite: 10 modules) -> 119 tests, all OK. New tests
+cover the three helpers, the panel contents/title, button enable/disable,
+fail-open behavior, the 2000 ms dashboard interval, Live defaults in both
+tabs, quiet auto-refresh, and skip-while-running. Smoke-tested the helpers
+against the real output folder (2 no-XML patients detected, has_xml=False
+consistent).
+
+### 2026-09-24 - Feature: Claim Number Match Check appended to Check Missing report + GUI button text
+
+Reason:
+The user needs to verify that the CF4, CF5, and eSOA XML files of each patient
+share the same HBSys claim series number. The XML payloads are encrypted
+eClaims envelopes, so the series number embedded in the XML filename
+(e.g. NAME-260924150960_CF4.xml) is the only deterministic source. The check
+was integrated into the existing Check Missing (claims_checker) report as
+separate rows below the requirement rows, per user decision.
+
+Files modified:
+
+- claims_checker.py (new extract_claim_series, _format_series,
+  build_claim_number_rows; write_reports accepts optional claim_rows and logs
+  claim-number summary counts; main builds claim rows before folder moves)
+- edh_claims_gui_XML_COPY_BUTTON.py (button text "Check Missing" ->
+  "Check Missing Req./Claim #")
+
+Files added:
+
+- tests/test_claim_number_match.py
+
+Behavior before:
+Check Missing reported document requirements only; there was no verification
+that the three generated XML files belong to the same claim. The GUI button
+read "Check Missing".
+
+Behavior after:
+The Check Missing CSV report appends a "=== CLAIM NUMBER MATCH CHECK ==="
+section below the requirement rows, with one row per patient showing the CF4,
+CF5, and eSOA claim series numbers and a status: CLAIM NO. MATCH,
+CLAIM NO. MISMATCH (numbers differ, including duplicate same-kind files with
+different numbers), CLAIM NO. INCOMPLETE (an XML kind is missing), or NO XML.
+The log report includes claim-number summary counts. The GUI button now reads
+"Check Missing Req./Claim #".
+
+Safety or compatibility notes:
+
+- Claim-number rows are report-only and are built as a separate list; they are
+  never merged into the main rows, so organize_claim_folders() status mapping
+  and READY/READY_WITH_REVIEW/INCOMPLETE folder moves are unchanged.
+- Claim rows are built before organize_claim_folders() moves the folders into
+  the results directories.
+- write_reports() remains backward compatible when called without claim rows.
+- CSV has no cell coloring, so mismatches are flagged via the explicit
+  "CLAIM NO. MISMATCH" status text instead of a red highlight.
+- Read-only: the check reads filenames only; no XML content is decrypted or
+  modified.
+
+Verification performed:
+python -m unittest tests.test_claim_number_match -> 10 tests, all OK
+(match, one-differs, missing-kind, duplicate-kind-different-numbers, no-XML,
+filename extraction edge cases, CSV section ordering, backward compatibility).
+Smoke-tested build_claim_number_rows against real
+claims_checker_results/READY patient folders and confirmed correct
+CLAIM NO. MATCH rows with the expected series numbers.
+
+### 2026-09-24 - Docs: Revise Claims Agent Plan Phase 1 (HBSys State Controller) to multi-step navigation state machine
+### 2026-09-24 - Docs: Revise Claims Agent Plan Phase 1 (HBSys State Controller) to multi-step navigation state machine
+
+Reason:
+Real HBSys navigation is not single-click: Date Fill passes several buttons before
+the hospital number can be typed, and the XML generators pass intermediate screens
+before CF4/CF5/eSOA processing. The original plan Section 5 described the State
+Controller as simple target-state navigation; it needed to be upgraded to a state
+machine with multi-step verified paths before implementation begins.
+
+Files modified:
+
+- CLAIMS_AGENT_PLAN.md (Section 5 expanded into 5.1-5.6)
+
+Behavior before:
+Section 5 listed only four target states (HOSPITAL_NUMBER_ENTRY, CF4_XML, CF5_XML,
+ESOA_XML), deferred intermediate screens as "later states", and described
+go_to(state) without modeling intermediate steps, blocker screens, or detours.
+
+Behavior after:
+Section 5 now defines a fine-grained state model (destination, intermediate, and
+blocker/detour states such as ADMISSION_HISTORY, PHIC_BENEFICIARIES_CF4TAB,
+SELECT_ENCOUNTER, MODAL_DIALOG, PHIC_DETAILS), a navigation graph with per-step
+ACTION -> VERIFY discipline, deterministic detour rules adapted from the proven
+logic in hbsys_fill_dates.py and xml_generator_clicker.py, a safe-reset capability
+back to MAIN_WINDOW, and explicit Phase 1 scope boundaries.
+
+Safety or compatibility notes:
+
+- Documentation-only change; no code, configuration, or runtime behavior modified.
+- No changes to the production engine or existing tools.
+
+Verification performed:
+Re-read CLAIMS_AGENT_PLAN.md Section 5 after editing and confirmed the revised
+subsections render correctly and remain consistent with Sections 6-7.
+
+### 2026-09-24 - Fix: Claim Attachments "attach..." click on long patient names (wrapped row)
 ### 2026-09-24 - Fix: Claim Attachments "attach..." click on long patient names (wrapped row)
 
 Reason:

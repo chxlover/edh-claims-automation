@@ -34,6 +34,9 @@ from core.add_claims_verifier import FolderDates
 
 DEFAULT_READY_DIR = Path(r"C:\claims_bot\claims_checker_results\READY")
 
+# Auto-refresh cadence for the patient list (skipped while an upload runs).
+AUTO_REFRESH_MS = 2000
+
 
 class AddClaimsUploadFrame(ttk.Frame):
     """GUI frame for the Add Claims Upload automation."""
@@ -51,9 +54,12 @@ class AddClaimsUploadFrame(ttk.Frame):
         self.state = UploadState()
         self.upload_thread: Optional[threading.Thread] = None
         self.stop_requested = False
+        self._auto_refresh_job = None
 
         self.build_ui()
         self.refresh_patient_list()
+        self.bind("<Destroy>", self._on_destroy)
+        self._schedule_auto_refresh()
 
     # -- UI construction --------------------------------------------------
 
@@ -95,7 +101,7 @@ class AddClaimsUploadFrame(ttk.Frame):
         row2 = ttk.Frame(controls)
         row2.pack(fill="x", pady=(0, 6))
 
-        self.mode_var = tk.StringVar(value="dry-run")
+        self.mode_var = tk.StringVar(value="live")
         ttk.Radiobutton(
             row2, text="Dry-Run (safe)", variable=self.mode_var, value="dry-run"
         ).pack(side="left")
@@ -226,10 +232,21 @@ class AddClaimsUploadFrame(ttk.Frame):
             self.ready_dir_var.set(path)
             self.refresh_patient_list()
 
-    def refresh_patient_list(self) -> None:
-        """Reload patient folders from the READY directory."""
+    def refresh_patient_list(self, verbose: bool = True) -> None:
+        """Reload patient folders from the READY directory.
+
+        verbose=False is used by the auto-refresh timer so the log is not
+        flooded every AUTO_REFRESH_MS; manual Refresh stays verbose.
+        """
         ready_dir = Path(self.ready_dir_var.get())
         self.patients = load_patients(ready_dir)
+
+        # Preserve the current selection (by patient name) across the reload.
+        selected_names = set()
+        for item in self.patient_tree.selection():
+            values = self.patient_tree.item(item, "values")
+            if len(values) > 1:
+                selected_names.add(str(values[1]))
 
         # Clear treeview
         for item in self.patient_tree.get_children():
@@ -237,7 +254,7 @@ class AddClaimsUploadFrame(ttk.Frame):
 
         # Populate
         for idx, patient in enumerate(self.patients, start=1):
-            self.patient_tree.insert(
+            item_id = self.patient_tree.insert(
                 "",
                 "end",
                 values=(
@@ -249,6 +266,8 @@ class AddClaimsUploadFrame(ttk.Frame):
                     "Pending",
                 ),
             )
+            if patient.patient_name in selected_names:
+                self.patient_tree.selection_add(item_id)
 
         self.patient_count_var.set(f"Patients: {len(self.patients)}")
         self.progress["maximum"] = max(len(self.patients), 1)
@@ -261,7 +280,41 @@ class AddClaimsUploadFrame(ttk.Frame):
         else:
             self.state_var.set("Idle")
 
-        self.log(f"Loaded {len(self.patients)} patients from {ready_dir}")
+        if verbose:
+            self.log(f"Loaded {len(self.patients)} patients from {ready_dir}")
+
+    # -- Auto refresh -------------------------------------------------------
+
+    def _schedule_auto_refresh(self) -> None:
+        """Keep the patient list fresh; the tick skips itself while running."""
+        if self._auto_refresh_job is not None:
+            try:
+                self.after_cancel(self._auto_refresh_job)
+            except Exception:
+                pass
+        try:
+            self._auto_refresh_job = self.after(
+                AUTO_REFRESH_MS, self._auto_refresh_tick
+            )
+        except Exception:
+            self._auto_refresh_job = None
+
+    def _auto_refresh_tick(self) -> None:
+        try:
+            running = (
+                self.upload_thread is not None and self.upload_thread.is_alive()
+            )
+            if not running and self.winfo_exists():
+                self.refresh_patient_list(verbose=False)
+        except Exception:
+            pass
+        finally:
+            self._schedule_auto_refresh()
+
+    def _on_destroy(self, event) -> None:
+        # <Destroy> fires for children too; only react to this frame.
+        if event.widget is self:
+            self._auto_refresh_job = None
 
     def update_patient_status(self, index: int, status: str, color: str = "") -> None:
         """Update the status column of a patient row."""

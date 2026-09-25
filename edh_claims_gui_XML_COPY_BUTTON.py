@@ -27,6 +27,7 @@ from gui.pdf_compressor_tab import PDFCompressorFrame
 from gui.pdf_splitter_gui import PdfSplitterFrame
 from gui.add_claims_upload_tab import AddClaimsUploadFrame
 from gui.claim_attachments_tab import ClaimAttachmentsFrame
+from claims_checker import list_folders_without_xml, output_dir_has_xml
 from gui.workflow_tab import WorkflowFrame
 from gui.pdf_preview_panel import PdfPreviewPanel
 from date_fill_hbsys.hbsys_window import find_hbsys_window
@@ -1520,6 +1521,7 @@ class EDHClaimsGUI(tk.Tk):
         right.columnconfigure(0, weight=1)
         right.rowconfigure(0, weight=1)
         right.rowconfigure(1, weight=2)
+        right.rowconfigure(2, weight=1)
 
         self.output_folders_card, self.output_folders_list = self._build_folder_list_panel(
             middle, "Output Folders"
@@ -1535,6 +1537,11 @@ class EDHClaimsGUI(tk.Tk):
             right, "Incomplete Folders"
         )
         self.incomplete_folders_card.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+
+        self.no_xml_card, self.no_xml_list = self._build_folder_list_panel(
+            right, "Patients Without XML"
+        )
+        self.no_xml_card.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
 
         actions = ttk.LabelFrame(left_content, text="Production Actions", padding=10)
         actions.pack(fill="x", padx=(0, 4))
@@ -1620,7 +1627,7 @@ class EDHClaimsGUI(tk.Tk):
             0,
         )
         add_grid_button(quick_actions, "Copy XML", self.copy_xml_button_clicked, 3, 1)
-        add_grid_button(quick_actions, "Check Missing", lambda: self.run_script("claims_checker"), 4, 0)
+        self.check_missing_button = add_grid_button(quick_actions, "Check Missing Req./Claim #", lambda: self.run_script("claims_checker"), 4, 0)
         add_grid_button(quick_actions, "Fees Check", lambda: self.run_script("fees_checker"), 4, 1)
         add_grid_button(quick_actions, "Recheck INC", self.recheck_incomplete_claims, 5, 0)
         add_grid_button(
@@ -3671,7 +3678,7 @@ class EDHClaimsGUI(tk.Tk):
         card.configure(text=f"{base_title} ({total})")
 
     def refresh_folder_lists(self):
-        """Refresh the Output / Ready / Incomplete folder name lists."""
+        """Refresh the Output / Ready / Incomplete / No-XML folder name lists."""
         if not hasattr(self, "output_folders_list"):
             return
         self.populate_folder_list(
@@ -3692,6 +3699,49 @@ class EDHClaimsGUI(tk.Tk):
             "Incomplete Folders",
             os.path.join(BASE_DIR, "claims_checker_results", "INCOMPLETE"),
         )
+        self.populate_no_xml_list()
+        self.refresh_check_missing_button_state()
+
+    def populate_no_xml_list(self):
+        """Refresh the 'Patients Without XML' panel from the output folder."""
+        if not hasattr(self, "no_xml_list"):
+            return
+        output_dir = self.settings.get("output_folder", "")
+        try:
+            names, total = list_folders_without_xml(output_dir)
+        except Exception:
+            names, total = [], 0
+        self.no_xml_list.delete(0, "end")
+        if names:
+            for name in names:
+                self.no_xml_list.insert("end", name)
+        else:
+            self.no_xml_list.insert("end", "(none)")
+        self.no_xml_card.configure(text=f"Patients Without XML ({total})")
+
+    def refresh_check_missing_button_state(self):
+        """Disable 'Check Missing Req./Claim #' when the output has no XML.
+
+        A missing/empty output folder means there is no XML to check, so the
+        button is disabled. Fail-open only for unexpected scan errors: those
+        leave the button enabled so a hiccup never blocks the user.
+        """
+        if not hasattr(self, "check_missing_button"):
+            return
+        output_dir = self.settings.get("output_folder", "")
+        try:
+            has_xml = output_dir_has_xml(output_dir)
+        except Exception:
+            has_xml = True
+        new_state = "normal" if has_xml else "disabled"
+        prev_state = str(self.check_missing_button.cget("state"))
+        if prev_state != new_state:
+            self.check_missing_button.configure(state=new_state)
+            if new_state == "disabled":
+                self.log(
+                    "Check Missing Req./Claim # disabled: no XML files found "
+                    "in the output folder."
+                )
 
     def schedule_dashboard_auto_refresh(self):
         if self.dashboard_auto_refresh_job is not None:
@@ -3699,7 +3749,7 @@ class EDHClaimsGUI(tk.Tk):
                 self.after_cancel(self.dashboard_auto_refresh_job)
             except Exception:
                 pass
-        self.dashboard_auto_refresh_job = self.after(15000, self.dashboard_auto_refresh_tick)
+        self.dashboard_auto_refresh_job = self.after(2000, self.dashboard_auto_refresh_tick)
 
     def dashboard_auto_refresh_tick(self):
         try:
