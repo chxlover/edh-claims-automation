@@ -99,7 +99,7 @@ class CalibratedPointsData:
     add_claims: tuple[int, int] = (83, 101)
     search_box: tuple[int, int] = (562, 271)
     search_button: tuple[int, int] = (1392, 269)
-    grid_checkbox_x: int = 10
+    grid_checkbox_x: int = 37
     add_button: tuple[int, int] = (972, 477)
     ok_button: tuple[int, int] = (554, 376)
     close_x: int = 1456
@@ -361,10 +361,12 @@ class AddClaimsOperator:
 
         Strategy:
         1. Capture full-screen screenshot via pyautogui
-        2. Find "Include" header text → X position of checkbox column
-        3. Find blue highlighted row → Y position of row (primary)
-        4. If no blue band → OCR grid to find patient row by name (fallback)
-        5. Click at (include_center_x, row_y)
+        2. Find blue highlighted row → Y position of row (primary)
+        3. If no blue band → OCR grid to find patient row by name (fallback)
+        4. Find the checkbox's dark edges inside that row band → X
+           (fallback: calibrated GRID_CHECKBOX_X offset from popup left)
+        5. Click at (checkbox_x, row_y), then VERIFY the tick appeared
+           (retry up to 3 attempts; fail loudly if still unchecked)
         """
         if not self.live:
             self.log_action("would click checkbox of highlighted row")
@@ -376,14 +378,7 @@ class AddClaimsOperator:
         width, height = screenshot.size
         self.log_action(f"screenshot: {width}x{height}")
 
-        # Step 2: Find "Include" header text → column X
-        include_x = self._find_include_column_x(screenshot)
-        if include_x is None:
-            self.log_action("could not find Include column header")
-            return False
-        self.log_action(f"checkbox column center x={include_x}")
-
-        # Step 3: Find blue highlighted row → row Y
+        # Step 2: Find blue highlighted row → row Y
         row_y = self._find_highlighted_row_y(screenshot)
 
         # Step 3b: Fallback — if no blue band, OCR grid to find patient row
@@ -396,24 +391,53 @@ class AddClaimsOperator:
             return False
         self.log_action(f"highlighted row center y={row_y:.0f}")
 
-        # Step 4: Click at (include_x, row_y)
-        click_x = include_x
+        # Step 4: Locate the checkbox inside the highlighted row band.
+        # (The old code scanned the "Include" HEADER text and clicked its
+        # centre — ~18px right of the actual checkbox, so every click missed
+        # silently.  The checkbox edges are detected in the row band itself.)
+        popup_left = self._popup_left()
+        checkbox_x = self._find_checkbox_x_in_row(screenshot, row_y, popup_left)
+        if checkbox_x is None:
+            checkbox_x = popup_left + P.GRID_CHECKBOX_X
+            self.log_action(
+                "checkbox not detected in row band; "
+                f"falling back to calibrated x={checkbox_x}"
+            )
+
+        click_x = checkbox_x
         click_y = int(round(row_y))
-        self.log_action(f"clicking checkbox at screen ({click_x}, {click_y})")
+        self.log_action(f"checkbox target at screen ({click_x}, {click_y})")
 
         # DEBUG: Save annotated screenshot BEFORE clicking
         self._save_debug_screenshot(screenshot, click_x, click_y, row_y, "before")
 
-        pyautogui.moveTo(click_x, click_y, duration=0.08)
-        pyautogui.click(click_x, click_y, clicks=1)
-        sleep_short(0.5)
+        # Never click an already-checked box — a click would UNCHECK it
+        if self._checkbox_looks_checked(click_x, click_y):
+            self.log_action("Include checkbox already checked; no click needed")
+            return True
 
-        # DEBUG: Save annotated screenshot AFTER clicking
+        # Click, then VERIFY the tick actually appeared — retry on miss
+        for attempt in range(1, 4):
+            self.log_action(f"clicking checkbox (attempt {attempt}/3)")
+            pyautogui.moveTo(click_x, click_y, duration=0.08)
+            pyautogui.click(click_x, click_y, clicks=1)
+            sleep_short(0.5)
+            if self._checkbox_looks_checked(click_x, click_y):
+                self.log_action(
+                    f"Include checkbox confirmed checked (attempt {attempt})"
+                )
+                after = pyautogui.screenshot()
+                self._save_debug_screenshot(after, click_x, click_y, row_y, "after")
+                return True
+            self.log_action(
+                f"WARNING: checkbox still unchecked after attempt {attempt}"
+            )
+
+        # DEBUG: Save annotated screenshot AFTER final attempt
         after = pyautogui.screenshot()
         self._save_debug_screenshot(after, click_x, click_y, row_y, "after")
-
-        self.log_action("checkbox clicked")
-        return True
+        self.log_action("ERROR: Include checkbox did not check after 3 attempts")
+        return False
 
     def _save_debug_screenshot(
         self, screenshot: Image.Image, click_x: int, click_y: int,
@@ -499,63 +523,123 @@ class AddClaimsOperator:
         row_group = max(groups, key=len)
         return (min(row_group) + max(row_group)) / 2.0
 
-    def _find_include_column_x(self, image: Image.Image) -> int | None:
-        """Find the X center of the 'Include' column header text in the POPUP.
+    @staticmethod
+    def _is_dark(pixel: tuple[int, ...]) -> bool:
+        """True for dark pixels (checkbox borders and tick marks)."""
+        red, green, blue = pixel[:3]
+        return red < 110 and green < 110 and blue < 110
 
-        Crops the screenshot to the popup window area, then scans the
-        header row for dark text pixels in the leftmost column.
-        Returns the SCREEN X coordinate of the Include column center.
-        """
-        # Get popup window rect to crop the screenshot
-        popup_left = 0
-        popup_top = 0
+    def _popup_left(self) -> int:
+        """Screen X of the popup window's left edge (0 if unknown)."""
         if self.popup_window is not None:
             try:
-                rect = self.popup_window.rectangle()
-                popup_left = rect.left
-                popup_top = rect.top
+                return self.popup_window.rectangle().left
             except Exception:
                 pass
+        return 0
 
-        # Crop screenshot to popup area
-        popup_crop = image.crop((
-            max(0, popup_left),
-            max(0, popup_top),
-            min(image.width, popup_left + 600),  # Include column is in first 600px
-            min(image.height, popup_top + 200),   # Header area is in first 200px
-        ))
-        self.log_action(
-            f"cropped to popup area: ({popup_left},{popup_top}) "
-            f"size={popup_crop.width}x{popup_crop.height}"
-        )
+    def _find_checkbox_x_in_row(
+        self, image: Image.Image, row_y: float, popup_left: int
+    ) -> int | None:
+        """Locate the Include checkbox inside the highlighted row band.
 
-        # Scan header area for checkbox border pixels (x=30-80)
-        # Checkbox is to the RIGHT of the 'Include' text, not under it
-        checkbox_dark_xs: list[int] = []
-        for y in range(0, min(popup_crop.height, 80)):
-            for x in range(30, min(popup_crop.width, 80)):
-                red, green, blue = popup_crop.getpixel((x, y))[:3]
-                # Dark pixels = checkbox border (gray/dark)
-                if red < 100 and green < 100 and blue < 100:
-                    checkbox_dark_xs.append(x)
+        Scans the row band for the checkbox's two dark vertical edges
+        (6-24 px apart, just right of the grid's left border) and returns
+        the SCREEN X of the checkbox centre, or None if not found.
 
-        if not checkbox_dark_xs:
-            self.log_action("no checkbox border pixels found in popup")
+        Only the Include column area (popup-local x 5..60) is scanned so
+        patient-name text can never be mistaken for checkbox edges.
+        """
+        band_top = max(0, int(row_y) - 9)
+        band_bottom = min(image.height - 1, int(row_y) + 9)
+        scan_start = popup_left + 5
+        scan_end = min(popup_left + 60, image.width)
+
+        edge_columns: list[int] = []
+        for x in range(scan_start, scan_end):
+            dark_count = sum(
+                1
+                for y in range(band_top, band_bottom + 1)
+                if self._is_dark(image.getpixel((x, y)))
+            )
+            if dark_count >= 8:
+                edge_columns.append(x)
+
+        if not edge_columns:
+            self.log_action("no checkbox edge pixels found in row band")
             return None
 
-        # Find the center of dark pixel cluster
-        min_x = min(checkbox_dark_xs)
-        max_x = max(checkbox_dark_xs)
-        crop_center_x = (min_x + max_x) // 2
-
-        # Convert back to screen coordinates
-        screen_x = popup_left + crop_center_x
-
+        # Group contiguous columns into clusters
+        clusters: list[list[int]] = []
+        for x in edge_columns:
+            if clusters and x - clusters[-1][-1] <= 2:
+                clusters[-1].append(x)
+            else:
+                clusters.append([x])
+        centers = [(c[0] + c[-1]) / 2.0 for c in clusters]
         self.log_action(
-            f"checkbox in popup: crop_x={min_x}-{max_x}, "
-            f"crop_center={crop_center_x}, screen_x={screen_x}"
+            f"row-band edge clusters at screen x: {[round(c) for c in centers]}"
         )
-        return screen_x
+
+        # First cluster is the grid's left border; the checkbox is the
+        # next pair of edges 6-24 px apart.
+        for i in range(1, len(centers) - 1):
+            gap = centers[i + 1] - centers[i]
+            if 6 <= gap <= 24:
+                checkbox_x = int(round((centers[i] + centers[i + 1]) / 2.0))
+                self.log_action(
+                    f"checkbox detected in row band: edges "
+                    f"x={centers[i]:.0f}/{centers[i + 1]:.0f}, "
+                    f"center x={checkbox_x}"
+                )
+                return checkbox_x
+
+        self.log_action("no checkbox edge pair found in row band")
+        return None
+
+    @staticmethod
+    def _checkbox_image_looks_checked(image: Image.Image) -> tuple[bool, int, int]:
+        """Recognize both HBSys checkbox styles: dark tick or blue tick.
+
+        Normal rows draw a dark tick; a checked box inside the blue
+        highlighted row is rendered BORDERLESS with a BLUE tick on white,
+        so a dark-only check is blind to it.  The white-interior guard
+        prevents the blue highlight band itself from counting as a blue
+        tick when the click missed the box entirely (bare band = all blue,
+        no white).
+        """
+        dark_inside = 0
+        blue_inside = 0
+        white_inside = 0
+        # Inner 9x9 of the 15x15 capture: the box interior only (borders
+        # stay outside), wide enough to catch the full tick stroke.
+        for x in range(3, 12):
+            for y in range(3, 12):
+                red, green, blue = image.getpixel((x, y))[:3]
+                if red < 80 and green < 80 and blue < 80:
+                    dark_inside += 1
+                elif (
+                    blue >= 140
+                    and 60 <= green <= 200
+                    and red <= 160
+                    and blue - red >= 40
+                ):
+                    blue_inside += 1
+                elif red > 220 and green > 220 and blue > 220:
+                    white_inside += 1
+        tick = dark_inside >= 6 or blue_inside >= 5
+        checked = tick and white_inside >= 15
+        return checked, dark_inside, blue_inside
+
+    def _checkbox_looks_checked(self, screen_x: int, screen_y: int) -> bool:
+        """True if the checkbox at the screen point shows a tick."""
+        image = pyautogui.screenshot(region=(screen_x - 7, screen_y - 7, 15, 15))
+        checked, dark_inside, blue_inside = self._checkbox_image_looks_checked(image)
+        self.log_action(
+            f"checkbox state at screen ({screen_x}, {screen_y}): "
+            f"dark_inside={dark_inside}, blue_inside={blue_inside}, checked={checked}"
+        )
+        return checked
 
     def _find_row_by_ocr(self, screenshot: Image.Image, patient_name: str) -> float | None:
         """Find Y position of a patient row by OCR when no blue highlight is detected.

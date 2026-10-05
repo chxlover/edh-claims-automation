@@ -21,6 +21,7 @@ Run from the project root:
 
 import os
 import sys
+import tempfile
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
@@ -99,6 +100,12 @@ def main():
 
     # 3. Instantiate the real GUI with the window withdrawn.
     print("\nInstantiating EDHClaimsGUI (window withdrawn)...")
+    # Keep core.diagnostics out of the real logs folder for this script run
+    # (EDHClaimsGUI.__init__ installs the crash/lifecycle logging).
+    os.environ.setdefault(
+        "CLAIMS_DIAG_LOG_DIR",
+        tempfile.mkdtemp(prefix="edh_gui_verify_diag_"),
+    )
     app = gui_module.EDHClaimsGUI()
     app.withdraw()
     app.update_idletasks()

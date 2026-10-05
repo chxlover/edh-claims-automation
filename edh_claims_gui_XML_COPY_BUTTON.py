@@ -17,6 +17,7 @@ import fitz
 from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 
+from core.diagnostics import install_crash_logging, install_tk_close_logging
 from core.xml_auto_copy import (
     XmlAutoCopyService,
     XmlCopySummary,
@@ -26,6 +27,7 @@ from gui.not_transmitted_batches_tab import NotTransmittedBatchesFrame
 from gui.pdf_compressor_tab import PDFCompressorFrame
 from gui.pdf_splitter_gui import PdfSplitterFrame
 from gui.add_claims_upload_tab import AddClaimsUploadFrame
+from gui.agent_plan_tab import AgentPlanFrame
 from gui.claim_attachments_tab import ClaimAttachmentsFrame
 from claims_checker import list_folders_without_xml, output_dir_has_xml
 from gui.workflow_tab import WorkflowFrame
@@ -1237,6 +1239,11 @@ class EDHClaimsGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("EDH Claims Automation System")
+        # Crash + lifecycle trail (2026-09-28): START / CLOSE / EXIT lines plus
+        # a faulthandler dump, so a window that disappears can be explained
+        # afterwards. Both calls are best-effort and change no behavior.
+        install_crash_logging()
+        install_tk_close_logging(self)
         self.geometry("1450x900")
         self.minsize(1280, 800)
         try:
@@ -1414,6 +1421,8 @@ class EDHClaimsGUI(tk.Tk):
         self.notebook.add(self.pdf_splitter_tab, text="PDF Split")
         self.add_claims_upload_tab = ttk.Frame(self.notebook, padding=4)
         self.notebook.add(self.add_claims_upload_tab, text="Add Claims Upload")
+        self.agent_plan_tab = ttk.Frame(self.notebook, padding=4)
+        self.notebook.add(self.agent_plan_tab, text="Agent Plan")
         self.claim_attachments_tab = ttk.Frame(self.notebook, padding=4)
         self.notebook.add(self.claim_attachments_tab, text="Claim Attachments")
         self.workflow_tab_frame = ttk.Frame(self.notebook, padding=4)
@@ -1431,6 +1440,7 @@ class EDHClaimsGUI(tk.Tk):
         self.build_pdf_compressor_tab()
         self.build_pdf_splitter_tab()
         self.build_add_claims_upload_tab()
+        self.build_agent_plan_tab()
         self.build_claim_attachments_tab()
         self.build_workflow_tab()
         self.build_pdf_preview_tab()
@@ -1807,6 +1817,14 @@ class EDHClaimsGUI(tk.Tk):
         )
         frame.pack(fill="both", expand=True)
 
+
+    def build_agent_plan_tab(self):
+        frame = AgentPlanFrame(
+            self.agent_plan_tab,
+            settings_getter=lambda: self.settings,
+            log_callback=self.log,
+        )
+        frame.pack(fill="both", expand=True)
 
     def build_claim_attachments_tab(self):
         frame = ClaimAttachmentsFrame(

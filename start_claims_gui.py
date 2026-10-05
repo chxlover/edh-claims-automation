@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from core.diagnostics import install_crash_logging
 from updater import ensure_requirements
 from install_requirements import ensure_folders
 
@@ -20,6 +21,9 @@ def _running_in_project_venv() -> bool:
 
 
 def main() -> int:
+    # Crash + lifecycle trail (2026-09-28): logs/gui_lifecycle.log and
+    # logs/gui_crash.log are armed before anything else can go wrong.
+    install_crash_logging()
     if VENV_PYTHON.is_file() and not _running_in_project_venv():
         return subprocess.call(
             [str(VENV_PYTHON), str(Path(__file__).resolve())],

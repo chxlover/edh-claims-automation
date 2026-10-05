@@ -39,6 +39,1309 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-10-02 - Fix: Final Bill post-OK prompt detection (Print Options stays open behind File save / Call Administrator)
+
+Reason:
+Live run 2026-10-02 15:03 (pasyente #21853 - pangalan/HRN ay hindi
+inilalagay sa repo, ayon sa .gitignore):
+pagka-click ng OK sa Print Options, HINDI nagsasara ang Print Options -
+nananatili itong bukas sa likod habang ang File save prompt ("Note"
+[#32770]) ang lumilitaw sa ibabaw. Ang `_match_popup` ay nagbabalik ng unang
+mag-match sa enumeration order, at ang Print Options ay naka-check BAGO ang
+"Note" - kaya ang screen ay nanatiling FINAL_BILL_OPTIONS kahit naroon na
+ang File save OK (971,593 / +(963,560), operator-mapped). Bukod dito, ang
+"Note" window ay hindi ina-admit ng `detect_screen` nang walang OCR text -
+at ang runner ay walang OCR sa live run - kaya hindi ito nakilala bilang
+FILE_SAVE. Resulta: click_ok -> blocked, ang mapped save_ok ay hindi
+kailanman na-click, BLOCKED ang row kahit handa na ang prompt.
+
+Files modified:
+
+- core/agent/hbsys_screens.py (untracked, new module this session):
+  _match_popup() naging dalawang pass (Pass 1 = post-OK prompts kahit
+  nasaan sa enumeration; Pass 2 = Print Options + generics); detect_screen()
+  may dalawang bagong optional injectable (dialog_body_fn, dialog_marker_fn)
+  - ang "Note" ay ina-admit LAMANG kapag may "File save" body confirmation
+  AT live window proof.
+- core/agent/final_bill_actions.py (untracked, new module this session):
+  +_live_note_evidence() (body text LAMANG mula sa live "Note" window);
+  _detect_screen() nagpapasa ng live evidence; plan_step(): kapag ok_clicked
+  at stale ang read pero ang plan ay nanghula ng FILE_SAVE/CONFIRM, ang
+  mapped button ay kini-click nang minsan (save OK 971,593 / +(963,560), o
+  No); walang hula at walang prompt pa rin ay BLOCK ("never clicked twice").
+- tests/test_agent_hbsys_screens.py: +listing_with_desktop() desktop double
+  (body text LAMANG para sa bukas na window); +test_prompt_beats_print_
+  options_even_when_both_are_open (eksaktong live reproduction);
+  +test_note_without_body_confirmation_is_never_file_save;
+  test_file_save_note_window_is_detected in-update sa dialog_body_fn.
+Behavior:
+
+- Before: open_final_bill -> check_final_box -> click_ok -> blocked ("Print
+  Options popup is still on screen after OK was clicked once"). Ang File save
+  prompt ay nasa screen na (windows: Note [#32770]) pero hindi nakilala, kaya
+  ang mapped save_ok (971,593) ay hindi na-click at BLOCKED ang row.
+- After: click_ok -> save_click_ok (File save OK, mula sa live dialog-body
+  confirmation + plan prediction) -> done. Sa MISMATCH branch: click_ok ->
+  answer_confirm_no (No, never Yes) -> done. Tig-iisa lang kada row, tulad ng
+  napagkasunduan (ang dalawang prompt ay mutually exclusive). Ang OK sa Print
+  Options ay hindi na kailanman pini-press nang dalawang beses.
+
+Safety / compatibility:
+
+- Ang "Note" admission ay nangangailangan ng PAREHONG live window
+  (find_dialog_exact, exact title match) AT body confirmation ("File save").
+  Ang ibang "Note" dialog (Epson Scan 2, ibang app) ay hindi pumapasa.
+- Ang expected_screen fallback ay sumusunod LAMANG sa plan kapag stale ang
+  read pagkatapos ng OK. Kapag ibang prompt ang tunay na lumabas, detection
+  pa rin ang masusunod (may mismatch note sa run report).
+- "Call Administrator" = No palagi (never Yes); File save = OK sa button row
+  (never TAB/ENTER). Walang galaw sa loader, confinement, Close Form, OCR,
+  signing, XML, checker.
+- Backward compatible: ang dalawang bagong detector parameter ay optional
+  (default None); lumang headless callers walang nababago.
+
+Verification:
+
+- python -m py_compile on all touched files: OK
+- Targeted: test_agent_hbsys_screens + test_agent_final_bill = 106/106 OK;
+  orchestrator + click_map + hbsys_nav = 129/129 OK
+- Full suite: 498 tests OK (dalawang magkahiwalay na run, 36-46 s)
+- Live evidence: agent_run_20261002_150312.json (BLOCKED case) ang
+  reproduction basis; ang susunod na live run ang magpapatunay na ang "NO
+  FINAL BILL" row ay nagiging save_click_ok imbes na blocked.
+
+
+- tests/test_agent_final_bill.py: +test_print_options_after_ok_blocks_
+  instead_of_double_clicking; +test_print_options_with_expected_save_
+  prompt_clicks_save (live BLOCKED scenario); +test_print_options_with_
+  expected_confirm_clicks_no; FakeHbsys.click_ok comment in-update.
+
+### 2026-10-02 - Behavior: tanggalin ang Close Form sa dulo ng Final Bill
+
+Reason:
+Instruksyon ng operator: "tanggalin mo na ang close form doon sa dulo ng final
+bill, dapat after maclick ang ok or no tanggalin na ang close form susunod doon
+itype na naman ang hospital no hanggang maubos ang mga selected patients."
+Ibig sabihin: pagkatapos ng OK/No sa post-OK prompt, HINDI na dapat i-click ang
+Close Form - diretsong susunod ang pag-type ng susunod na hospital number hanggang
+maubos ang mga selected patient. Kasama na dito ang huling pasyente, na dati'y
+nag-i-click pa ng Close Form bago matapos ang batch (dahil sa
+close_form_at_end=is_last_patient mula sa 2026-09-28 rule).
+
+Files modified:
+
+- core/agent/orchestrator.py - (1) tinanggal ang close_form_at_end=is_last_patient
+  sa tawag ng runner_fn sa _default_final_bill, kaya laging default False ang
+  runner at walang STEP_CLOSE_FORM na nai-plano kahit sa huling pasyente;
+  (2) tinanggal ang is_last_patient na parameter ng _default_final_bill (wala nang
+  gamit) at ang buong last-patient wiring: _final_bill_rows,
+  _last_final_bill_index, _accepts_is_last, _call_final_bill, at ang last-patient
+  branch sa dispatch (ngayon iisang executors[action](hospital_no, folder) na ang
+  lahat ng action); (3) na-update ang module docstring, ang _default_final_bill
+  docstring, at ang log line ("form stays open after OK/No"). HINDI hinawakan ang
+  loader (load_patient_by_hospital_no) - ang close nito ng stale form ay bahagi
+  pa rin ng pag-type ng susunod na hospital number.
+- core/agent/final_bill_actions.py - DOCSTRING/COMMENT lamang (walang galaw sa
+  logic): inayos ang module flow (yugto 8 = walang Close Form), ang multi-patient
+  step 3, ang plan_step close_form_at_end docstring, at ang dalawang comment sa
+  plan branch at FinalBillRunner.__init__ para sabihing opt-in / DEFAULT FALSE na
+  ito at hindi na ito sinaset ng batch runner.
+
+Behavior:
+
+- Before: ang huling pasyente ng batch ay natatapos sa STEP_CLOSE_FORM (nag-i-click
+  ng toolbar Close Form pagkatapos ng OK/No) bunga ng close_form_at_end=is_last_patient.
+  Bawat pasyente bago doon: OK/No -> DONE (bukas ang form), tapos ang LOADER ng
+  susunod na pasyente ang nagsasara ng lumang form habang nagta-type ng bagong
+  hospital number.
+- After: OK/No -> STEP_DONE kaagad para SA LAHAT ng pasyente, kasama na ang huli -
+  walang Close Form click sa dulo ng Final Bill. Ang loop: OK/No -> (loader:
+  isinasara ang stale form + nagta-type ng susunod na hospital no) -> ... hanggang
+  maubos ang mga selected patient. Sa huling pasyente, bukas ang form sa screen
+  (walang auto-close).
+
+Safety / compatibility:
+
+- Ang BINAGO ay ang orchestrator (ang tanging producer ng close_form_at_end) LAMANG.
+  Ang plan_step(..., close_form_at_end=False default) at FinalBillRunner ay
+  pinanatiling opt-in (default OFF, guarded, may test pa) - kaya walang test na
+  nasisira at may capability pa kung explicit na hihingin sa hinaharap.
+- HINDI hinawakan ang LOADER (load_patient_by_hospital_no) - ang pag-close ng stale
+  form doon ay KAILANGAN para ma-type ang susunod na hospital number (ang searchable
+  Hospital No. lookup ay nasa main screen; na-verify live 2026-09-26). Iyon ang
+  "itype na naman ang hospital no" na hinihingi ng operator, kaya hindi ito tinanggal.
+- Walang bagong SQL/DB, walang change sa click map, walang change sa signing, XML
+  generator, o claims checker.
+- Inalis ang _accepts_is_last / _call_final_bill - lahat ng executor ay tinatawag
+  na 2-arg (hospital_no, folder); ang injected na 3-arg na may default (hal.
+  is_last=False sa test) ay tumatakbo pa rin (yaong default ang magagamit).
+
+Verification:
+
+- python -m py_compile core/agent/orchestrator.py core/agent/final_bill_actions.py: OK.
+- Tests (mula C:\claims_bot): 6 suite / 242 tests - LAHAT OK. Ito ang lahat ng test
+  file na nag-i-import ng binagong module: test_agent_orchestrator 72,
+  test_agent_final_bill 71, test_gui_agent_plan 21, test_gui_final_bill_map_editor 21,
+  test_gui_final_bill_coordinate_getter 17, test_agent_final_bill_click_map 40.
+- Grep: 0 natitirang reference sa is_last_patient / close_form_at_end sa
+  orchestrator.py; ang close_form_at_end at STEP_CLOSE_FORM sa final_bill_actions.py
+  ay nananatili bilang opt-in (default False).
+
+
+### 2026-10-02 - Integration: totoong Final Bill click map (.json) - pagsusuri at absolute-path fix
+
+Reason:
+Ibinigay ng operator ang aktwal na `logs/final_bill_click_map.json` (4/4 na
+point, mapped 2026-10-02T09:57:54, screen 1920x1080) at hiniling ang pagsusuri
+at pag-integrate sa Final Bill. Resulta ng pagsusuri:
+- `final_checkbox` (339,336) at `print_options_ok` (377,368) - nakaangkla sa
+  'Print Options' rect [256,166,525,409]; dx/dy (83,170 / 121,202) - tama ang
+  matematika at nasa loob ng rect ang parehong point;
+- `admin_no` (1103,594) - nakaangkla sa 'Call Administrator' rect
+  [761,471,1165,620] (+342,+123), nasa loob ng rect;
+- `save_ok` (975,595) - ABSOLUTE (anchor_rect/dx/dy = null, isinave habang
+  sarado ang 'File save' prompt kaya walang live rect na mag-anchor);
+- lahat may label/anchor/note ("manual entry (coordinate editor)") at nababasa
+  ng `--show` nang buo.
+Natuklasang butas: ang `LOG_DIR = Path("logs")` ay CWD-relative - kapag ang
+claims GUI ay na-launch mula sa labas ng `C:\claims_bot`, tahimik na WALANG
+nababasa ang flow (empty map = balik sa lumang control lookup at hindi
+nagagamit ang mga coordinate ng operator). Iyon ang inayos dito.
+
+Files modified:
+
+- core/agent/final_bill_click_map.py - (1) `LOG_DIR` ngayon ABSOLUTE:
+  `Path(__file__).resolve().parents[2] / "logs"` - parehong file pa rin kapag
+  mula sa project root, pero natatagpuan na kahit saang cwd nag-launch;
+  (2) inalis ang dobleng comment bago ang `KEYS` (dobleng kopya ng parehong
+  linya). Walang touch sa capture/anchor/CLI logic.
+
+Behavior:
+
+- Before: mabubuhos ang operator na "wala pang map" kapag iba ang cwd ng GUI
+  kahit kumpleto ang .json.
+- After: palaging nababasa ng flow ang `logs/final_bill_click_map.json` (path
+  nakasemento sa lokasyon ng repo). Integrated na ang 4 na point: anchored
+  point -> LIVE rect ng prompt (sumusunod ang click sa paglipat ng dialog);
+  walang rect -> naka-record na absolute; `save_ok` absolute + safety net
+  (`_click_prompt_answer`: mapped click muna, kapag hindi nagsara ang prompt =
+  control-lookup retry, kaya hindi kayang masira ng stale na point ang row).
+
+Safety / compatibility:
+
+- HINDI binago ang integration wiring (`_mapped_click_point`,
+  `click_print_options_ok`, `_click_prompt_answer`, `toggle_final_checkbox`) -
+  ang path lang ang inayos.
+- Lahat ng test na nagpa-patch ng `CLICK_MAP_PATH` ay value-agnostic (temp
+  path ang ipinapalit); ang editor/getter `PROJECT_ROOT / CLICK_MAP_PATH` ay
+  pareho pa ding absolute destination (pathlib: absolute RHS mananalo).
+- Walang bagong JSON format, walang SQL/DB, walang production flow change.
+
+Verification:
+
+- `python -m py_compile core/agent/final_bill_click_map.py`: OK.
+- Headless simulation gamit ang totoong .json - mula `C:\claims_bot` at mula
+  `C:\Windows` (dalawang beses): parehong 4/4 points; hal. lumipat ang
+  Print Options sa (300,200,620,480) -> `print_options_ok` = (421,402)
+  (sumusunod), walang rect -> (377,368) (recorded); `save_ok` = (975,595)
+  laging absolute; bago ang fix, walang nababasa mula sa ibang cwd.
+- Tests (mula C:\claims_bot): 5 suite / 170 tests - LAHAT OK
+  (test_agent_final_bill_click_map 40, test_agent_final_bill 71,
+  test_gui_final_bill_map_editor 21, test_gui_final_bill_coordinate_getter 17,
+  test_gui_agent_plan 21).
+- `--show`: 4/4 na naka-map ang mga target.
+
+
+### 2026-10-02 - Feature: Final Bill coordinate getter GUI (live X,Y + F8/countdown capture, save sa .json)
+
+Reason:
+Operator request: "gawa ka din ng coordinate getter" - kailangan ng
+point-and-click na paraan: nakatingin sa totoong button sa HBSys at gusto ang
+eksaktong X,Y nito nang hindi iniiwan ang button at hindi nagta-type ng numero.
+Ginawa ang `gui/final_bill_coordinate_getter.py`: laging naka-on-top na mini
+window na may live na cursor X,Y, target selector, at dalawang paraan ng
+capture (F8 habang naka-arm, o countdown), na sumasave sa parehong
+`logs/final_bill_click_map.json` na binabasa ng Final Bill flow.
+
+Files added / modified:
+
+- gui/final_bill_coordinate_getter.py (BAGO) - getter window + pure helpers:
+  `format_xy()`, `status_for()`, `mapped_count()`. Live readout (100 ms poll
+  ng `pyautogui.position`), "I-arm / Tigil ang F8" (50 ms poll ng
+  `GetAsyncKeyState` - F8 = kumuha at manatiling armed para sa susunod na
+  F8, ESC = disarm; pareho ng KEYS ng F8 mapper), countdown na "Kumuha sa 3s"
+  (1 s tick), Kopyahin (clipboard), target Combobox + status/count mula sa
+  .json, at I-SAVE na diretsong tumatawag sa `save_coordinates()` ng editor
+  (validate-all-then-write + parehong anchor rule). Kapag negatibo ang cursor
+  = Filipino error sa status bar, HINDI mapupunta sa field. Injected para sa
+  tests: `position_fn`, `key_fn`, `anchor_rect_fn`, `countdown`.
+  Standalone: `python -m gui.final_bill_coordinate_getter`.
+- gui/agent_plan_tab.py - bagong button "Get Final Bill Coordinates" (katabi
+  ng editor button) at `get_final_bill_coordinates()`: kapareho ng editor
+  launcher - console-less, output sa `logs/final_bill_coordinate_getter.log`,
+  error = log line + messagebox, hindi nag-crash ang claims GUI.
+- tests/test_gui_final_bill_coordinate_getter.py (BAGO) - 17 tests:
+  format/status/count, capture fill, negatibo = rejected, F8-arm + ESC disarm
+  (ScriptedKeys), countdown tick -> capture, countdown blocked habang armed,
+  save na anchored (live rect) at absolute (walang dialog), invalid field =
+  walang isinulat, blank = walang isinulat, refresh status/count. Lahat may
+  injected position/key/anchor - NEVER humahawak ng HBSys o tunay na
+  keyboard/mouse.
+- tests/test_gui_agent_plan.py - +2 launcher tests (tamang module/cwd, log
+  line; failure = showerror + log).
+
+Behavior:
+
+- Before: dalawang paraan lang - F8 mapper session o ang editor na pagta-type
+  ng numero (kailangang malaman muna ang X,Y).
+- After: makikita ang live na X,Y habang inii-hover ang button, at makukuha
+  ito nang isang F8 o countdown; isang klik sa I-SAVE at nasa .json na.
+
+Safety / compatibility:
+
+- BASA lang ng `pyautogui.position` at `GetAsyncKeyState` - walang ipinapadalang
+  click o keystroke sa HBSys; ang F8 ay may-bisa lang kapag naka-arm ang
+  getter (default: OFF). Walang bagong JSON format at walang touch sa
+  production Final Bill flow / F8 mapper logic - `ClickMap.load()/save()` at
+  `save_coordinates()` lang ang gamit.
+- Anchor rule pareho ng editor (live dialog rect > huling kilalang rect >
+  absolute); ang default na `anchor_rect_fn` lang ang tumatawag sa HBSys
+  finder (sa panahon ng save), kaya ini-inject ng tests.
+- Walang SQL/DB; hindi nagpe-freeze ang claims GUI (hiwalay na proseso ang
+  getter, console-less tulad ng editor).
+
+Verification:
+
+- `python -m py_compile` sa 4 file: OK.
+- `python -m unittest discover` bawat file mula `C:\claims_bot`:
+  test_gui_final_bill_coordinate_getter 17 OK; test_gui_agent_plan 21 OK
+  (2 bago); kabuuan 23 test files / 472 tests - LAHAT OK
+  (test_gui_verify_panel_removal: 0 tests, standalone script, inaasahan
+  gaya ng dati).
+- Live launch: `python -m gui.final_bill_coordinate_getter` - binuksan ang
+  buong window ng 3 segundo (RUNNING_OK, walang laman ang stderr) at
+  na-kill nang normal; walang isinulat sa .json sa pagbukas.
+
+### 2026-10-02 - Feature: Final Bill coordinate editor GUI (manu-manong X,Y kada button, save sa .json)
+
+Reason:
+Operator request: kapag ayaw nang mag-F8, gusto nang mag-type na lang ng
+coordinates — pero dapat Nakalabel kung aling coordinates ang alin at
+masisave sa .json. Ginawa ang `gui/final_bill_map_editor.py`: Tkinter GUI na
+may LabelFrame bawat target (`final_checkbox`, `print_options_ok`,
+`save_ok`, `admin_no` — pangalan + label + dialog anchor), X at Y entry na
+naka-pre-fill mula sa kasalukuyang click map, at I-SAVE na sumusulat sa
+parehong `logs/final_bill_click_map.json` na binabasa ng Final Bill flow.
+
+Files added / modified:
+
+- gui/final_bill_map_editor.py (BAGO) — editor window + pure helpers:
+  `parse_xy()` ("1010,630" o "1010 630"; blank = None; negatibo / hindi
+  numero = ValueError na Filipino), `row_text()` (parehong blank = skip ang
+  row; isa lang ang napuno = "X," na sadyang ire-reject), `save_coordinates()`
+  (ni-validate LAHAT ng field MUNA — walang partial save — bago isulat ang
+  file nang isang beses; anchor rule: bukas na live dialog rect > huling
+  kilalang anchor rect ng point > absolute, kaya sinusundan pa rin ng
+  in-edit na point ang popup), `delete_points()`. May Burahin bawat row
+  (may kumpirmasyon), Burahin lahat, I-refresh, at status bar
+  (`point.summary()` o "WALA PA - control lookup ang gagamitin"). Default na
+  path ay ABSOLUTE (`C:\claims_bot\logs\...`) kaya tama kahit saang cwd
+  nabuksan. Standalone: `python -m gui.final_bill_map_editor`.
+- gui/agent_plan_tab.py — bagong button "Edit Final Bill Coordinates"
+  (katabi ng "Map Final Bill Clicks (F8)") at `edit_final_bill_coordinates()`:
+  naglalaunch ng `python -m gui.final_bill_map_editor` mula sa project root,
+  console-less (`CREATE_NO_WINDOW`), output naka-append sa
+  `logs/final_bill_map_editor.log` — kapareho ng F8-mapper button contract:
+  kapag bumigo ang launch = log line + messagebox lang, hindi nag-crash ang
+  claims GUI.
+- core/agent/final_bill_click_map.py — DOCSTRING lang: binanggit ang
+  `python -m gui.final_bill_map_editor` sa listahan ng `--set`/`--show`
+  na opsyon. Walang touch sa session/mapping logic.
+- tests/test_gui_final_bill_map_editor.py (BAGO) — 21 tests: parse/validate,
+  blank-keeps-stored, walang partial save, anchor fallback (old rect > live
+  rect > absolute), delete, at withdrawn-Tk window smoke (prefill, save,
+  error dialog, burahin). Lahat may injected `anchor_rect_fn` — NEVER
+  humahawak ng HBSys.
+- tests/test_gui_agent_plan.py — +2 launcher tests (tamang command/cwd,
+  log line; failure = showerror + log).
+
+Behavior:
+
+- Before: ang tanging paraan ng paglagay ng point ay F8/ESC session o ang
+  console-only `--set name=x,y` (walang label, kailangang tandaan ang
+  bawat pangalan, nakasulat lang sa terminal).
+- After: GUI na may nakalabeleng field bawat button (X at Y hiwalay),
+  pre-filled mula sa .json, error per field bago ang anumang pagsulat, at
+  kumpirmasyon bawat burahan. Blangkong field = hindi babaguhin ang
+  naka-save na point.
+
+Safety / compatibility:
+
+- Walang binago sa production Final Bill flow, sa F8 mapper logic, o sa
+  JSON format — diretsong ginagamit ang `ClickMap`/`ClickPoint`
+  `load()`/`save()`; optional pa rin ang map (control lookup fallback kapag
+  walang point, gaya ng dati).
+- Hindi hahawak ng mouse/keyboard at hindi nagpe-preset ng HBSys. Ang tanging
+  posibleng kontak ay opsyonal na pagbasa ng bukas na dialog rectangle para
+  sa anchoring (default `anchor_rect_fn`) — ito ang ini-inject ng tests.
+- `save_coordinates()` laging nagva-validate bago magsulat — walang
+  maiiwang kalahating .json. Walang SQL/DB sa feature na ito.
+
+Verification:
+
+- `python -m py_compile` sa 5 file: OK.
+- `python -m unittest discover` bawat file mula `C:\claims_bot`:
+  test_gui_final_bill_map_editor 21 OK; test_gui_agent_plan 19 OK (2 bago);
+  test_agent_final_bill_click_map 40 OK; kabuuan 22 test files / 453 tests —
+  LAHAT OK (test_gui_verify_panel_removal: 0 tests, standalone script,
+  inaasahan gaya ng dati).
+- Live launch: `python -m gui.final_bill_map_editor` — binuksan ang buong
+  window ng 3 segundo (RUNNING_OK) at na-kill nang normal.
+
+### 2026-10-02 - Fix: --branch F8 walang effect habang hinihintay ang pangalawang prompt
+
+Reason:
+Operator report: sa `--branch` session, pagkatapos ng pangalawang OK - kapag
+lumabas na ang isa sa dalawang prompt (File save / Call Administrator) -
+walang nangyayari kapag pinindot ang F8; parang ayaw ng tool ang dalawang
+kakambal na popup. Root cause: step [3] (`wait_for_post_ok_branch()`)
+detection-only ang loop - ang prompt title at ESC lang ang pino-poll, ang F8
+ay HINDI kailanman. At ang detection ay eksaktong "File save" / "Call
+Administrator" lang, samantalang ang mismong flow (`_front_save_prompt`)
+ay tumatanggap din ng "Save" / "Save As" (may build na ganoon ang title).
+Kaya isang title na hindi mabasa = tahimik na walang nangyayari habang
+panay ang pindot ng F8.
+
+Files modified:
+
+- core/agent/final_bill_click_map.py
+  - wait_for_post_ok_branch(): pino-poll na rin ang F8 (pagkalipas ng
+    `f8_grace`, default 1s, para hindi masalo ang F8 na ginamit sa [2/2]);
+    detection pumapasok sa BRANCH_MARKERS na title aliases (mas specific na
+    "Call Administrator" muna bago ang save, para hindi manalo ang ibang
+    window na may "save" sa title); kapag pindot ang F8 pero walang title na
+    tumugma, itatanong ng `choose_fn` (default `console_choose_branch()`:
+    [1] File save / [2] Call Administrator) kung alin ang lumabas bago
+    mag-record - kaya HINDI KAILANMAN namamatay ang F8 sa step na ito
+  - bagong helper: `console_choose_branch()` (operator input, tulad ng
+    console_capture_key - safe kahit sarado ang stdin) at
+    `_detect_branch_prompt()` (admin-first marker scan)
+  - branch_session(): bagong `f8_grace` at `choose_fn` na parameter
+    (injectable para sa headless test), waiting-hint na linya sa [3], at
+    kapag ang F8 ang nanalo sa branch (walang nabasang title = rect None)
+    ay IRE-RECORD kaagad - walang pangalawang F8 na hinihintay, kasing-
+    bilis ng normal na detection path
+  - module docstring: inilarawan ang F8-while-waiting na pag-uugali ng --branch
+- tests/test_agent_final_bill_click_map.py - 3 bagong test (37 -> 40):
+  ang "Save"-lang na title ay natutukoy pa rin; F8 sa loob ng wait kahit
+  walang tumugmang title ay nagtatanong at nagre-record; at buong branch
+  session na nagre-record sa mismong F8 na nagtanong (absolute point +
+  "NAITALA (F8)" sa output)
+
+Behavior before:
+Step [3] ay nakatingin lang sa dalawang eksaktong title at ESC. Kung hindi
+mabasa ang title (o ibang title variant ang build), walang nangyayari kahit
+pindutin ang F8 - walang mensahe, walang record, walang katapusan hanggang
+ESC o i-restart ang session.
+
+Behavior after:
+F8 ang aktibong pindot sa buong branch wait: detection ang mas mabilis na
+daan (rect kaya anchored pa rin ang record), at kapag hindi mabasa ang
+title ay tinatanong ng tool kung alin ang lumabas bago i-record kaagad -
+kahit dalawang sunod na popup, isang pindot lang ng F8 ang kailangan.
+
+Safety or compatibility notes:
+
+- Detection pa rin ang mas gustong daan: ang tanong lang ay lumalabas kapag
+  F8 na talaga ang pinindot at walang nabasang title (default ENTER = File
+  save, kaya pindot-pindot lang din); ang ESC sa loob ng wait ay data pa rin
+  na "walang prompt" - walang click na naisasagawa ng tool habang naghihintay.
+- Walang default behavior na nagbago sa walang kaugnay na F8 press:
+  `f8_grace` (1s) ang pumipigil masalo ang F8 na ginamit sa [2/2], at ang
+  detection path (rect != None) ay eksaktong gaya ng dati.
+- Walang binago sa final_bill_actions.py / production flow - puro ang
+  mapping session ang apektado; optional pa rin ang map.
+- Ininjectable pa rin lahat (`key_fn`, `anchor_rect_fn`, `choose_fn`,
+  `print_fn`, `f8_grace`) - headless ang tests, walang HBSys na kailangan.
+
+Verification performed:
+python -m py_compile core/agent/final_bill_click_map.py -> OK.
+Batched unittest discover (kasi lumalampas sa 30s ang buong discover sa
+machineng ito): lahat ng 21 test module, 430 tests, OK - kabilang ang
+tests.test_agent_final_bill_click_map 40/40 (3/3 na bagong test),
+test_agent_final_bill 71, test_agent_orchestrator 72, test_gui_agent_plan 17.
+
+
+### 2026-09-30 - Feature: Final Bill click map (i-record ang unang OK, File save OK, Call Administrator No)
+
+Reason:
+The Final Bill flow answers three HBSys prompts with the MOUSE, and until now it
+found each button by PowerBuilder control id / caption / geometry. When a build
+shifts an id, a caption or the popup layout, the click can miss and the row
+fails - and the 2026-09-29 12:43 run showed how expensive that is (12 wasted
+steps, no trace of which prompt was involved). The operator asked to map the
+real clicks instead: unang OK (Print Options), tapos ang OK ng "File save",
+tapos ang No ng "Call Administrator" (at ang 'Final' checkbox), with the admin
+path recordable in ONE session ("isang option": unang OK + No).
+
+Files added:
+
+- core/agent/final_bill_click_map.py - the map + the capture session + a CLI
+  - ClickPoint stores the absolute point AND its offset inside its dialog
+    (dx/dy + anchor title), so a popup that opens elsewhere still gets the
+    click on the same button; ClickMap saves/loads logs/final_bill_click_map.json
+    (a missing or corrupt file is an EMPTY map: never fatal)
+  - TARGETS = final_checkbox, print_options_ok, save_ok, admin_no - in LIVE
+    order: checkbox -> unang OK -> isa lang sa save/admin branch (Tagalog +
+    English instructions); GROUPS = all, dialog_oks, checkbox_first_ok,
+    admin_pair
+  - capture_session(): F8 records the point under the mouse, ESC skips; with
+    --in SECONDS each target records itself after N seconds (works even when
+    the console is not focused); position/key/anchor/print are injectable
+  - --branch (+ wait_for_post_ok_branch / branch_session, 2026-09-30):
+    checkbox, unang OK, tapos isa lang sa File save/Call Administrator ang
+    hinihintay - detect tapos i-record ang prompt na TALAGANG lumabas; ang
+    hindi lumalabas ay hindi na hinihintay
+  - CLI: --map [names|groups] (no names = all targets), --branch
+    [--branch-timeout S] [--in N], --show, --check
+    (mapped? dialog open now?), --set name=x,y, --clear, --path
+- tests/test_agent_final_bill_click_map.py - 32 tests: anchoring math, file
+  round trip / corrupt file / junk points, group expansion, F8-ESC-timeout,
+  a headless admin_pair session, ESC keeps the old point, post-OK branch wait
+  (save-only, admin-only, timeout/ESC maps nothing), branch session headless
+  (checkbox + OK + the winning branch only), plus the wiring tests (mapped
+  point wins, applied relative to the dialog, stale mapping falls back,
+  corrupt map never breaks the flow)
+
+Files modified:
+
+- core/agent/final_bill_actions.py
+  - _mapped_click_point(name, window): the operator's point resolved against
+    the LIVE window rectangle, or None (map missing/unreadable/unmapped)
+  - click_print_options_ok(): mapped `print_options_ok` first, else the
+    verified id 1002 lookup exactly as before
+  - _click_prompt_answer(dialog, map_name, control_click_fn, timeout): clicks
+    the mapped point, verifies the dialog closed, and only then - if it is
+    still open - runs the old control lookup and re-verifies, so a stale
+    mapping degrades to the old behaviour instead of failing the row
+  - answer_save_prompt_with_ok() -> `save_ok`, answer_confirm_prompt_with_no()
+    -> `admin_no` (both through _click_prompt_answer; error messages unchanged)
+  - _final_checkbox_offset(): mapped `final_checkbox` converted back to a
+    button-relative offset, else FINAL_CHECKBOX_OFFSET (the repaint settle and
+    the idempotent double-click stay as they were)
+- gui/agent_plan_tab.py - new "Map Final Bill Clicks" button in the Controls
+  row; map_final_bill_clicks() opens `python -m core.agent.final_bill_click_map
+  --map` in its own console window (claimed GUI mode env, cwd = project root);
+  a launch failure is a log line + message box, never a crashed panel
+- tests/test_agent_final_bill.py - test hygiene: the module points
+  click_map.CLICK_MAP_PATH at a temp file, so a real map on the operator's
+  machine can never change what the control-id tests exercise (restored in
+  tearDownModule)
+- tests/test_gui_agent_plan.py - 2 tests: the button launches the mapper in its
+  own console from the project root, and a launch failure is reported
+
+Behavior before:
+The three Final Bill clicks were found only by control id / caption / geometry.
+There was no way for the operator to say "this is the button I really press" -
+and no place to record the answer to either prompt.
+
+Behavior after:
+The operator can record the real points once (GUI button or CLI). Every mapped
+point is applied RELATIVE to its dialog, so it follows the popup around the
+screen. Unmapped targets, a deleted map and a stale map all keep the previous
+verified behaviour; a mapped point is only ever used on a prompt the caller
+already identified, and the answer is still verified by the dialog closing.
+A mapped click is logged by the same step lines as before, and the map file
+itself says which points are anchored and when they were recorded.
+
+Safety or compatibility notes:
+
+- Mapping is optional and additive: with no logs/final_bill_click_map.json the
+  flow is bit-for-bit the previous behaviour (all 388 pre-existing tests still
+  pass unchanged).
+- A wrong or stale mapped point CANNOT answer a prompt with a cancel/Yes:
+  "Call Administrator" is still only ever answered by clicking its "No", and
+  the control-lookup retry runs before a row is allowed to fail.
+- No new dependency: pyautogui (already required) for the mouse position,
+  win32api/pywin32 (shipped with pywinauto) only to read the F8/ESC key state.
+  F8 is polled, never injected - the mapper never presses a key or clicks a
+  button by itself; only the operator clicks during a session.
+- The map is read on demand (no caching), so re-mapping takes effect on the
+  next step without restarting the GUI.
+- The mapper runs in a separate process/console; a mapper crash cannot take the
+  claims GUI down and cannot touch patient files.
+- Map data is not committed: it lives under logs/ as runtime data.
+
+Verification performed:
+python -m unittest discover -s tests -> 422 tests OK (previously 388), of which
+32 are new click-map tests and 2 are the new GUI button tests.
+tests.test_agent_final_bill / tests.test_agent_orchestrator / 
+tests.test_gui_agent_plan all OK. CLI smoke-tested with --show (real path,
+prints all four targets as unmapped), --set, --check and --clear.
+
+
+
+Reason:
+The 2026-09-29 12:42 final_bill run (CABLING, NIXEN BLANQUERA) FAILED with
+`final bill flow did not finish within 12 steps` and carried no trace of what it was
+doing (logs/agent_run_20260929_124313.json holds only that sentence), so it was
+impossible to tell whether the "Call administrator" prompt (click No) or the "File
+save" prompt (click OK) had even been reached. Prime suspect, now fixed:
+`toggle_final_checkbox()` re-read the glyph pixels immediately after `real_click()`,
+while PowerBuilder repaints the glyph slightly later - a stale "unticked" reading made
+the step click a SECOND time (unticking the box it had just ticked) and the planner
+re-planned the same step until the 12-step budget ran out. Whatever step was actually
+stuck, the run now stops fast and records the evidence needed to name it.
+
+Files modified:
+
+- core/agent/final_bill_actions.py
+  - CHECKBOX_REPAINT_SETTLE_SECONDS = 0.35: toggle_final_checkbox() now sleeps after
+    EACH click before re-reading checkbox_dark_ratio(), so a repaint in flight can
+    never be mistaken for "the box did not tick"
+  - SAME_STEP_REPEAT_LIMIT = 3 + trace_of(): FinalBillRunner.run() stops on the 3rd
+    consecutive plan of the SAME non-terminal step and names the step, the screen it
+    was stuck on and the collapsed step trail ("open -> check x3 -> ok")
+  - the step-budget exhaustion reason carries the same trail; both failure paths
+    (repeat guard, exhaustion, exception) log a `final bill failure:` line via log_fn
+- core/agent/orchestrator.py
+  - FAILED final_bill rows append `| windows: ...` (final_bill.hbsys_window_titles(),
+    which includes modal #32770 dialogs such as File save / Call Administrator) and
+    `| screenshot: <path>` (save_screenshot("final_bill_stopped")) to the detail kept
+    in agent_run_*.json - a stopped row now shows which dialog was on screen
+  - docstring correction: the Call Administrator prompt is answered by clicking "No"
+    (was "TAB")
+- tests/test_agent_final_bill.py
+  - new FinalCheckboxRepaintTests (glyph is re-read only after the settle, for the
+    first click and for the corrective second click)
+  - test_step_cap_stops_a_stuck_flow replaced by test_a_stuck_step_fails_fast_and_names_itself
+    (stops on the 3rd repeat, names itself, logs `final bill failure:`) plus
+    test_step_cap_stops_a_flow_whose_steps_keep_changing (alternating steps still hit
+    the cap, reason now carries the trail) and test_trace_of_collapses_consecutive_repeats
+- tests/test_agent_orchestrator.py
+  - new test_failed_final_bill_row_keeps_screen_evidence (windows + screenshot + trail
+    appear in the FAILED detail; stubs restored to the module-hygiene stubs)
+
+Behavior before:
+A step whose screen did not change silently consumed the whole 12-step budget (~23 s)
+and the report said only "final bill flow did not finish within 12 steps". The Final
+checkbox glyph was sampled the instant after the click, so a repaint race flipped the
+box twice and looped. A FAILED row recorded no screen state at all.
+
+Behavior after:
+A step that repeats 3 times in a row stops the run immediately with
+"<step> ran 3 times in a row on screen <screen> without changing it - check the HBSys
+display and finish this patient by hand | steps: <trail>", and the trail is also
+appended when the budget is genuinely exhausted. FAILED rows additionally carry the
+open HBSys windows and a `final_bill_stopped_<ts>.png` of the screen, which is what
+decides the next fix: prompt absent vs prompt present and the click missed.
+
+Safety or compatibility notes:
+
+- The two prompt handlers themselves (answer_admin_no, confirm_no, click_print_options_ok)
+  are unchanged - this session only removed the stall that prevented them from running
+  and made the failure diagnosable.
+- The guard NEVER converts a failure into success: a stuck row stays FAILED (BLOCKED
+  semantics untouched), nothing is guessed, no prompt is clicked blind.
+- Only the checkbox step pays the 0.35 s settle; other steps' timing is untouched.
+- Screenshots are taken only on a real failure; the test suite stubs save_screenshot
+  to "" so no patient screen is captured during tests.
+
+Verification performed:
+python -m unittest discover -s tests -> full suite OK (388 tests), including the new
+repaint/guard/evidence tests; tests.test_agent_final_bill (72) and
+tests.test_agent_orchestrator (72) both OK.
+
+
+
+Reason:
+Two live-run defects on `final_bill` rows when several patients run in one
+batch: (1) the next patient was never really loaded — the loader clicked a
+heuristic Edit control, typed the number and reported success without
+verifying anything, so the flow could bill whatever patient was on screen
+(or close the wrong window with a blind "Close Form" click on the shared
+toolbar band); (2) the confinement match was exact-only — the OCR-tolerant
+fuzzy pass Date Fill uses (`best_fuzzy_admission_history_row`) was passed as
+None, and the shared matcher import silently failed (`hbsys_rules` not
+importable from core/agent), so Admit History selection returned False and
+the row BLOCKed.
+
+Files modified:
+
+- core/agent/final_bill_actions.py
+  - HOSPITAL_NO_POINT (166, 174) = Date Fill's verified P.HOSPITAL_NO,
+    HOSPITAL_NO_EDIT_ID 1004 (probed live: "Edit 1004 on the Billing
+    form"), LOAD_WAIT_SECONDS 1.5, ENCOUNTER_WORDS
+  - billing_form_titles() / billing_form_for_patient(): pure helpers
+    (only "Billing (...)" MDI children count as a patient form)
+  - find_billing_hospital_no_edit(): prefers control id 1004, geometric
+    search kept as fallback; hospital_no_click_point(): control-relative
+    centre when 1004 is visible, else the verified coordinate
+  - load_patient_by_hospital_no(): closes a STALE Billing form first
+    (guarded), DOUBLE-CLICKs the Hospital No. field, CTRL+A, types,
+    ENTER, then VERIFIES a new "Billing (...)" form appeared; returns
+    False otherwise (row BLOCKs, never types over a patient)
+  - close_billing_form(): refuses to click when no Billing form is open
+    (or when another patient's form is named), OCR-verifies the tooltip,
+    then waits for the form to disappear -> True/False
+  - select_confinement(): now runs Date Fill's recipe end to end —
+    _ensure_date_fill_imports() (project root + date_fill_hbsys on
+    sys.path for hbsys_rules), raw grid text carried into the shared
+    ConfinementRow, exact match first, then fuzzy_rows_fn, plus an
+    optional log_fn; returns False on a mismatch (popup left open)
+  - ocr_date_match_score() + fuzzy_confinement_row() +
+    FUZZY_ROW_MIN_SCORE 115 / FUZZY_ROW_MIN_MARGIN 25 / ADMIT bonus 10:
+    verbatim port of Date Fill's scoring; admission_history_rows() now
+    also returns the raw grid text and the encounter type
+  - answer_dialog_no(): id-7 first, then the "No" caption (never Yes);
+    answer_dialog_ok(): OK, else Save (new _visible_button_by_text)
+  - FinalBillRunner: close_form_fn defaults to close_billing_form and a
+    False return fails the row with a readable reason instead of
+    re-clicking; _answer_ok() tolerates a "Save"-titled dialog;
+    plan_step()/docstrings updated for the multi-patient sequence
+- core/agent/orchestrator.py
+  - _default_final_bill(): logs the stale form it is about to replace,
+    uses final_bill.billing_form_for_patient() for the wanted title,
+    treats a False/raising loader as "not verified" (row BLOCKs via
+    final_bill_block_reason), and wires the real confinement matcher
+    with log_fn so the chosen Admit History row lands in the run log
+  - module docstring: final_bill dispatch + multi-patient guarantee
+- tests/test_agent_final_bill.py: +16 tests (PatientLookupTests,
+  FuzzyConfinementTests, stubborn-close failure reason; the default
+  close_form_fn binding pinned to close_billing_form)
+- tests/test_agent_orchestrator.py: +4 tests (MultiPatientFinalBillTests
+  with FakeBillingSession: second patient loaded after the first form
+  closes, stale form closed by the loader, same-patient row reuses the
+  open form, two final_bill rows in one batch)
+
+Behavior:
+- Before: a final_bill row could run against a stale Billing form, skip
+  the confinement (fuzzy pass None / matcher import failing) or the
+  runner could click Close Form with no form open; consecutive patients
+  were effectively typed over each other.
+- After: every final_bill row follows the operator sequence exactly —
+  close the stale form -> double-click Hospital No. -> type -> ENTER ->
+  verify the new Billing form -> Admit History exact/fuzzy match ->
+  Final Bill -> "Final" box -> OK -> No (or Save) -> Close Form; every
+  step that cannot be verified BLOCKs that row only, with the batch
+  continuing.
+
+Safety / compatibility:
+- Never clicks Close Form blind: the click only happens while a Billing
+  form is open and the tooltip OCR still reads "Close Form".
+- Loader/runner signatures stay backward compatible (new kwargs only);
+  orchestrator injection surface unchanged, so existing tests/callers
+  keep working. Ambiguous confinement matches still stop for review
+  (threshold + 25-point margin, same numbers as Date Fill).
+
+Verification:
+
+- python -m py_compile on all four touched files: OK
+- Targeted: tests.test_agent_final_bill + tests.test_agent_orchestrator =
+  92/92 OK (75 before this change)
+- Agent suite: fees_actions + final_bill + hbsys_nav + hbsys_screens +
+  orchestrator + plan_store + gui_agent_plan = 173/173 OK
+- Headless two-patient evidence run (orchestrator._default_final_bill
+  wired to a fake session): row 1 load (123456789012345) ->
+  confinement 20260901-20260903 -> bill -> form closed; row 2 load
+  (000000000021401) -> confinement 20260906-20260912 -> bill -> form
+  closed; 2 OK, no stale typing
+- date_fill_hbsys/test_hbsys_date_fill_verifier still OK run from its
+  own directory (unchanged behavior)
+
+
+### 2026-09-26 - Slice F (part 3): Load Plan auto-runs Fees Check + MISMATCH rows route to FINAL BILL
+
+Reason:
+Two user decisions: (1) the plan load flow required manually clicking
+Fees Check before Load Plan — make it one click (with an opt-out
+checkbox); (2) rows with Status MISMATCH were planned as MANUAL REVIEW,
+but the actual fix for mismatched itemized-vs-grouped totals is
+re-running the Final Bill flow — planned action must be FINAL BILL.
+
+Files modified:
+
+- core/agent/fees_actions.py
+  - new priority 2b in decide_action(): Status MISMATCH -> ACTION_FINAL_BILL
+    ("MISMATCH ang itemized vs grouped charges - kailangan i-final bill
+    muna."), ranked above DATE_FILL (bill must be right before dates);
+    TOOL_AVAILABLE check still honored (FINAL_BILL_TOOL_MISSING path)
+  - catch-all manual-review branch no longer special-cases MISMATCH
+    (unreachable now); REVIEW_MISMATCH constant kept for old reports
+  - module docstring action table + priority list updated
+- gui/agent_plan_tab.py
+  - new checkbox "Run Fees Check first" (default ON) next to Load Plan
+  - Load Plan button now calls on_load_plan(): checkbox ON -> runs the
+    Fees Check first on a background thread (fees_checker.run_check,
+    lazy import, read-only DB; UI never freezes; double-click guarded by
+    _loading; Load button disabled during preflight), then loads the
+    report THAT run wrote; OFF -> plain load_plan()
+  - preflight failure: error logged + showerror explaining, plan not
+    reloaded (uncheck to load the existing report); fees_check_fn is
+    injectable for headless tests (same pattern as run_plan_fn)
+  - load_plan() stays a PURE load — the after-run auto-reload never
+    triggers another Fees Check
+- tests/test_agent_fees_actions.py: mismatch routing tests replaced
+  (+test_mismatch_goes_to_final_bill, +test_mismatch_beats_date_fill,
+  build_plan order expectation updated)
+- tests/test_gui_agent_plan.py: +4 tests (preflight runs check then
+  loads fresh CSV; unchecked skips check; failure path shows error and
+  keeps state; after-run reload does NOT re-run the check) +
+  showerror stub in setUp/tearDown
+
+Behavior:
+- Before: Load Plan read whatever CSV already existed (manually
+  refreshed); MISMATCH rows sat in Manual Review and were never executed.
+- After: one Load Plan click = fresh Fees Check -> fresh plan; MISMATCH
+  patients are approved/run through the verified Final Bill flow like
+  NO FINAL BILL rows (and the completion ledger records them the same
+  way, so a fixed patient never returns).
+
+Safety / compatibility:
+- Fees Check stays read-only HBSys access, now on a background thread
+  (same rule as plan execution); no change to fees_checker.py itself.
+- Manual review keeps everything else (ADM/DIS mismatch, NO RECORD,
+  unknown statuses); old run reports referencing MISMATCH unchanged.
+
+Verification:
+- python -m py_compile on all touched files: OK
+- Targeted: test_agent_fees_actions + test_agent_plan_store = 45/45 OK;
+  test_gui_agent_plan = 10/10 OK
+- Full suite: 259 tests OK (previous 254 + 5 net new), 16.0 s
+- Live routing smoke: MISMATCH row -> FINAL_BILL decision; NO RECORD
+  still MANUAL_REVIEW.
+
+
+### 2026-09-25 - Slice F (part 2): Plan base = latest Fees Check CSV + completion ledger (finished rows never repeat)
+
+Reason:
+User: the Agent Plan must be based on the LATEST generated Fees Check
+report. When fees_checker_report.csv is open/locked, fees_checker falls
+back to a timestamped copy (fees_checker_report_<stamp>.csv) and the fixed
+file goes stale — the panel kept reading it. Also: after Approve & Run the
+panel must update so rows that already finished are not repeated on the
+next plan load.
+
+Files modified:
+
+- core/agent/agent_plan_store.py
+  - new latest_fees_csv(base_dir=None): newest fees_checker_report*.csv
+    by mtime (fixed or timestamped fallback); falls back to
+    DEFAULT_FEES_CSV when no report exists
+  - new resolve_fees_csv(value, base_dir=None): blank/canonical name ->
+    newest report; any other explicit Browse/typed path respected as-is
+  - new completion ledger API: COMPLETED_LEDGER =
+    logs/agent_completed_actions.json, load_completed_actions()
+    (missing/corrupt -> empty set), record_completed_actions()
+    (atomic tmp+replace, idempotent), drop_completed_actions()
+    (mirror of drop_completed_xml)
+  - build_plan_from_csv(csv_path, output_root=None, completed=None):
+    completed=None reads the ledger; OK rows drop from the plan and the
+    note gains "N row tapos na sa nakaraang run - hindi na inuulit."
+- core/agent/orchestrator.py
+  - run_approved_plan gains completed_path=None; when save=True it now
+    records every OK row into the ledger via new _record_completed()
+    (never raises; BLOCKED/FAILED/QUEUED/SKIPPED rows are NOT recorded
+    so they retry on the next run)
+- gui/agent_plan_tab.py
+  - load_plan resolves the Fees CSV through resolve_fees_csv() and
+    updates the field to the file actually used
+  - _run_finished reloads the plan after a run with outcomes, so
+    completed rows drop out immediately
+- tests/test_agent_plan_store.py: +11 tests (LatestFeesCsvTests,
+  CompletedLedgerTests)
+- tests/test_agent_orchestrator.py: +3 tests (CompletedLedgerTests);
+  test_run_approved_plan_saves_by_default redirects completed_path to tmp
+- tests/test_gui_agent_plan.py: +2 tests (ledger drop on load; reload +
+  drop after run)
+
+Behavior:
+- Before: the panel always read fees_checker_report.csv (stale when the
+  fixed file was locked); the same CSV produced the same plan after every
+  run, so finished rows reappeared and could be re-executed.
+- After: Load Plan always follows the newest Fees Check CSV (an explicit
+  custom path still wins); OK rows recorded once in
+  logs/agent_completed_actions.json drop from every later plan build with
+  a note count; failed/blocked/queued rows still appear for retry.
+
+Safety / compatibility:
+- All scans/reads read-only; the ledger is written atomically only on
+  save=True runs (save=False tests never touch it); build_plan_from_csv
+  stays backward compatible (fake test folders never match real ledger
+  entries). Reset = delete logs/agent_completed_actions.json.
+- Orchestrator still executes only user-approved rows and every run still
+  writes its logs/agent_run_*.json audit trail.
+
+Verification:
+- python -m py_compile on all touched files: OK
+- Full suite: 254 tests OK (baseline 238 + 16 new), 14.941 s
+- Smoke: resolve_fees_csv(DEFAULT) -> fees_checker_report_20260925_161255.csv
+  (newest mtime) and the plan built from it; ledger absent -> 0 pairs.
+
+
+### 2026-09-25 - Slice F (part 1): Plan-time XML output-folder gate + XML clicker probe note
+
+Reason:
+User decision table for ready rows: if the patient output folder already
+has ALL required XMLs (CF4+CF5+ESOA), the row must NOT appear in the
+Agent Plan — the XML Clicker has nothing left to generate. If some XMLs
+are still missing, the row stays and the plan must say WHICH kinds are
+missing. Same semantics as the runtime XMLClickerPolicy
+(core/xml_output_checker.py).
+Also recorded per user: the routed XML Clicker only starts AT the
+CF4/CF5/eSOA tabs (fixed points P.CF4_XML / P.CF5_XML / P.ESOA_XML at
+y=58) — the intermediate clicks that navigate HBSys to that screen
+happen BEFORE those tabs and are not automated yet; they must be
+captured in a live probe session (see Next below).
+
+Files modified:
+
+- core/agent/fees_actions.py
+  - ActionDecision gains xml_complete flag (default False)
+  - decide_action(row, *, output_root=None): optional read-only scan —
+    complete folder marks xml_complete=True; partial folder keeps the
+    row with a "kulang ng XML: ..." reason naming CF4/CF5/ESOA; absent
+    folder or output_root=None behaves exactly as before
+  - new helpers: DEFAULT_OUTPUT_ROOT, default_output_root()
+    (CLAIMS_OUTPUT_FOLDER env, default C:\claims_bot\output — same
+    convention as pdf_preview_service / workflow_adapters),
+    resolve_output_folder() (bare folder name joined under root;
+    absolute value used as-is)
+  - build_plan(rows, output_root=None) threads the root through
+  - drop_completed_xml(decisions) -> (kept, excluded_count)
+- core/agent/agent_plan_store.py
+  - build_plan_from_csv(csv_path, output_root=None): resolves the
+    default output root, drops completed-XML rows before summarize /
+    to_plan_items, and returns a note ("N row hindi isinama sa plan:
+    kumpleto na ang XML (CF4+CF5+ESOA) sa output folder.") that the
+    Plan Panel shows via the existing note_var
+- tests/test_agent_fees_actions.py: +9 tests (OutputFolderXmlGateTests)
+- tests/test_agent_plan_store.py: +2 tests (OutputXmlGatePlanTests)
+
+No GUI change needed — agent_plan_tab.load_plan() calls
+build_plan_from_csv(csv_path) with no output_root, which now resolves
+the standard output root automatically (line 216 sets note_var).
+
+Behavior:
+- Before: every Ready=YES row always became an xml_clicker plan item
+  with one fixed reason; plan build never touched the filesystem.
+- After: rows whose output folder already has all three XMLs are
+  excluded from the plan (they stay in the source CSV) and counted in
+  the panel note; partial folders remain with the missing kinds named;
+  the legacy reason string is preserved verbatim for absent folders /
+  output_root=None.
+
+Safety / compatibility:
+- Scan is read-only; XML Clicker / Final Bill flows untouched;
+  ActionDecision keeps optional fields so old constructors work;
+  backward compatible with callers passing no output_root (orchestrator,
+  GUI, reports unchanged).
+
+Verification:
+- python -m py_compile on all touched files: OK
+- Targeted: tests.test_agent_fees_actions + tests.test_agent_plan_store
+  = 33/33 OK
+- Full suite: 238 tests OK (baseline 227 + 11 new), 15.978 s
+
+Next (deferred to live probe session, per user):
+Capture the intermediate HBSys navigation clicks that happen BEFORE the
+CF4 XML tab (menus/screens leading to the CF4/CF5/eSOA tab bar at
+(486/536/586, 58)) and add them as a pre-navigation step in
+date_fill_hbsys/xml_generator_clicker.py (open_generator currently only
+focuses the already-open window and clicks the tab). Probe plan: user
+opens HBSys + logs in, walks the navigation once manually while click
+positions are logged, then encode the steps and validate with
+python date_fill_hbsys/xml_generator_clicker.py --live --limit 1
+--confirm-each on a test patient.
+
+### 2026-09-25 - Slice E: Claims Agent orchestrator (approved plan now executes)
+
+Reason:
+User-approved Slice E of the Claims Agent plan: wire the Slice C approved
+plan to real execution — "Approve & Run" dispatches Date Fill, XML Clicker
+and Final Bill through a deterministic orchestrator. NO FINAL BILL rows are
+finally routable now that Slice D's FinalBillRunner exists (the flip of
+TOOL_AVAILABLE[final_bill], reserved by Slice D, happens here).
+
+Files added:
+
+- core/agent/orchestrator.py
+  - run_approved_plan(items, ...) executes APPROVED rows in plan order,
+    one RowOutcome per row (OK / BLOCKED / FAILED / QUEUED / SKIPPED),
+    continue-on-error, JSON audit trail logs/agent_run_YYYYMMDD_HHMMSS.json
+  - dispatch: date_fill -> hbsys_fill_dates.py --live --hospital-no N;
+    xml_clicker -> xml_generator_clicker.py --live --hospital-no N;
+    final_bill -> FinalBillRunner but ONLY when the Billing form for that
+    exact patient is open (final_bill_block_reason() is pure + tested);
+    manual_review -> QUEUED, never executed
+  - hospital number parsed from the folder via hbsys_ready_claims.
+    CLAIM_FOLDER_RE (the same regex the tools use) — unparseable folder =
+    BLOCKED, never guessed; ready-queue membership is pre-checked before
+    any subprocess is launched
+  - every executor injectable (queue_fn / run_tool_fn / forms_fn /
+    runner_fn); RunReport exposes counts + summary_line for the panel
+- tests/test_agent_orchestrator.py — 31 headless tests (folder parsing,
+  Final Bill preconditions, dispatch order + guarantees, report/save,
+  default-executor branches through injected hooks)
+
+Files modified:
+
+- core/agent/fees_actions.py — TOOL_AVAILABLE[ACTION_FINAL_BILL] flipped to
+  True; the NO FINAL BILL branch sets review_code="" when the tool is
+  available and keeps REVIEW_FINAL_BILL_TOOL_MISSING for a withdrawn tool;
+  module/docstring comments updated
+- date_fill_hbsys/hbsys_fill_dates.py — show_popup() + open_run_log() honor
+  CLAIMS_AGENT_QUIET=1 (print instead of modal dialog / CSV auto-open);
+  env unset = existing behavior, unchanged
+- date_fill_hbsys/xml_generator_clicker.py — same guard for
+  show_completion_popup() + open_run_log()
+- gui/agent_plan_tab.py — "Approve & Run" is no longer approve-only:
+  approval + plan JSON persist as before, then an explicit askyesno
+  confirmation, then execution via the orchestrator on a daemon thread
+  (progress marshalled with after(); run_plan_fn injectable,
+  background=False gives synchronous runs for tests); docstring, header
+  label and button text updated
+- tests/test_agent_fees_actions.py — tool-present expectations for the two
+  pinned tests + a new mock.patch.dict test pinning the withdrawn-tool
+  review-code branch (vocabulary stays intact)
+- tests/test_gui_agent_plan.py — askyesno stubbed NO by default (existing
+  approval tests keep their behavior); new approve-and-run execution test;
+  background=False for determinism
+
+Behavior before:
+"Approve & Run (approve only)" persisted the plan JSON and explicitly did
+nothing in HBSys; NO FINAL BILL rows reported tool_available=False and
+could only fall back to manual review; the Date Fill/XML tools always popped
+modal dialogs and auto-opened their CSV run logs (fine for one GUI click,
+wrong for unattended batches).
+
+Behavior after (Slice E):
+An approved plan actually runs — per-row dispatch in plan order, each tool
+invoked for exactly one patient, Final Bill run only when the right
+patient's Billing form is verified open, manual-review rows queued, every
+row reported and saved to logs/agent_run_*.json. Declining the confirmation
+saves the plan without executing anything.
+
+Safety / compatibility notes:
+
+- Only status=APPROVED rows execute; anything else is recorded SKIPPED or
+  QUEUED — approval stays explicit and selection-only.
+- final_bill_block_reason() refuses to run unless the Billing form title
+  matches the folder's patient (title format probe-verified
+  2026-09-25: "Billing (NAME)"); the Hospital No. + Admit History
+  confinement steps remain the operator's manual steps 1-4 — never
+  guessed; a mismatch BLOCKS instead of clicking.
+- The Final Bill commit point (answer No on Call Administrator) and the
+  never-click-&Yes pin are unchanged from Slice D.
+- CLAIMS_AGENT_QUIET only affects orchestrator-launched child tools; the
+  normal GUI buttons behave exactly as before (env unset).
+- HBSys/MySQL stays read-only outside the verified UI flows; the main GUI
+  file was not touched (the tab's new kwargs have defaults).
+- Tkinter's main thread never blocks: execution runs on a daemon thread
+  and UI updates go through after().
+
+Verification performed:
+
+- python -m py_compile on every touched file (incl. the main GUI) -> OK.
+- Full agent suite (unittest discover, pattern test_agent_*.py)
+  -> 104 tests, 0 failures (was 72; +31 orchestrator, +1 fees branch pin).
+- tests.test_gui_agent_plan -> 4 tests, 0 failures (persists-only path +
+  new approve-and-run execution path).
+- Whole tests/ directory (pattern test_*.py) -> 227 tests, 0 failures,
+  0 errors (the two not_transmitted_batches thread tracebacks are
+  pre-existing test noise, unrelated to this change).
+- Quiet-guard smoke: show_popup()/show_completion_popup()/open_run_log()
+  print instead of opening dialogs when CLAIMS_AGENT_QUIET=1.
+- Live HBSys batch intentionally NOT run in this session (execution
+  mutates billing data); the first live run is a user-driven action from
+  the Agent Plan tab with HBSys open.
+
+### 2026-09-25 - Slice D: Final Bill Actions module (verified mechanics + pure planner + injectable runner)
+
+Reason:
+User-approved Slice D of the Claims Agent plan. The live mapping session
+of 2026-09-25 (HBSys PID 16640/22008, patient ...21401) walked the whole
+Final Bill flow by hand and captured exact controls + click mechanics.
+This change turns that evidence into a reusable module so the agent can
+drive HBSys Billing -> Final Bill deterministically instead of NO FINAL
+BILL rows always falling back to manual review.
+
+Files added:
+
+- core/agent/final_bill_actions.py
+  - verified control evidence: Print Options FNWNS370 (Final id 1001 at
+    (333,325,421,350), offset (7,12) -> live toggle point (340,337); OK id
+    1002; PRINT id 1003 never clicked), Call Administrator #32770 (&Yes id
+    6 marked DO NOT click, &No id 7 = the operator answer), Close Form
+    toolbar slot (548,97); FINAL_BILL_EVIDENCE table + evidence_for()
+  - STEP_* vocabulary (8 steps), frozen StepDecision, and plan_step() —
+    a pure planner over (screen, final_checked, bill_finalized, forms_open)
+  - GUI mechanics kept exactly as verified: raise_to_top (HWND_TOPMOST +
+    SWP_NOACTIVATE) before every real mouse click, checkbox state via
+    glyph dark-pixel ratio (the box has no BS_CHECKBOX), toolbar slot via
+    PBTooltips16_70 hover + Tesseract OCR with a refuse-to-click guard,
+    dialogs answered by control id after is_visible()+class filters
+  - FinalBillRunner: detect/menu/check/ok/confirm/save/close primitives
+    all injected (defaults = the real GUI), max_steps cap, first failure
+    reported and never retried, resume via initial_final_checked /
+    initial_bill_finalized; run_final_bill() convenience wrapper
+- tests/test_agent_final_bill.py — 24 headless tests: all planner
+  branches, evidence pins (toggle point (340,337) inside the rect, Yes vs
+  No notes), tooltip label matching, and runner sequences for the live
+  confirm->No path, the File save->OK branch, resume, both blocked paths,
+  primitive-failure reporting and the step cap
+
+Files modified (this session, detector/navigation prerequisites):
+
+- core/agent/hbsys_screens.py — SCREEN_FINAL_BILL_OPTIONS /
+  SCREEN_FINAL_BILL_CONFIRM / SCREEN_FILE_SAVE with titles "Print
+  Options", "Call Administrator", "File save" + _match_popup branches
+- core/agent/hbsys_nav.py — TARGET_FINAL_BILL, MENU_HOP_TABLE uses the
+  real menu path "Billing -> Final Bill" (no fabricated coordinate),
+  menu_fn injection, generalized _run_hops, real _real_menu_select +
+  find_main_window primitives
+- _probe_final_bill.py — dev probe that live-mapped the flow (JSON +
+  screenshots); its helpers are mirrored by the module
+
+Behavior before:
+
+The detector did not know the three Final Bill popups; the Navigator had
+no verified path to Final Bill; no module embodied the click recipe
+(BM_CLICK cannot dismiss these PowerBuilder modals); NO FINAL BILL rows
+could only route to MANUAL_REVIEW_FINAL_BILL.
+
+Behavior after (Slice D):
+
+plan_step() maps every observed state to exactly one next step or a
+BLOCKED reason (never guesses), FinalBillRunner can execute the full
+sequence open menu -> tick Final -> OK -> answer the prompt -> Close Form,
+and the two live branches (confirm -> No, and File save -> OK) are both
+represented and tested.
+
+Safety / compatibility notes:
+
+- plan_step is a pure function; every test runs headless — no HBSys, no
+  DB, no mouse movement in tests.
+- The &Yes button is never a click target (pinned by test); answering the
+  confirm prompt is the only commit point.
+- click_close_form refuses to click when the tooltip OCR does not read
+  "Close Form" (layout-shift guard).
+- HBSys/MySQL stays read-only; no production GUI file was touched.
+- TOOL_AVAILABLE[final_bill] in fees_actions.py deliberately stays False
+  (and FINAL_BILL_TOOL_MISSING stays) until Slice E wires real execution
+  into the orchestrator — flipping it is a Slice E decision, not guessed
+  here.
+
+Verification performed:
+
+- python -m py_compile core/agent/final_bill_actions.py -> OK.
+- AST undefined-name scan of the module -> none.
+- Full agent suite (python unittest discover, pattern test_agent_*.py)
+  -> 72 tests, 0 failures: fees 14 + final_bill 25 + nav 11 + screens 15
+  + plan_store 7. No regressions in nav/screens tests. The default
+  (no-injection) FinalBillRunner constructor is pinned by a test after an
+  edit once dropped its default-primitive static methods.
+- Live end-to-end sequence (same session, via the probe): Billing ->
+  Final Bill -> Print Options -> tick (340,337) -> OK -> Call
+  Administrator -> No -> popup closed -> Close Form (548,97 by tooltip
+  OCR) -> only User Menu left; HBSys z-order restored.
+
+### 2026-09-24 - Slice C: Agent Plan Panel (read-only approval tab from Fees Check CSV)
+
+Reason:
+User-approved Slice C of the Claims Agent plan: a read-only panel that
+shows one row per Fees Check patient with the Slice B planned action and
+lets the user Approve & Run (approve + persist only — execution is Slice E).
+
+Files added:
+
+- core/agent/agent_plan_store.py (read_fees_rows, to_plan_items,
+  build_plan_from_csv returning items + summary + why-empty note;
+  apply_approval marking selection APPROVED/rest SKIPPED with unknown
+  indexes ignored; approved_items; save_approved_plan JSON audit trail
+  under logs/agent_plan_YYYYMMDD_HHMMSS.json; load_plan)
+- gui/agent_plan_tab.py (AgentPlanFrame notebook tab: Fees CSV path +
+  Browse + Load Plan, color-coded Treeview Patient/Action/Why/Status,
+  Select All / Clear Selection, "Approve & Run (approve only)"; NEVER
+  clicks HBSys, NEVER runs a tool, NEVER touches the HBSys DB)
+- tests/test_agent_plan_store.py, tests/test_gui_agent_plan.py
+
+Files modified (thin GUI wiring only, sibling-tab pattern):
+
+- edh_claims_gui_XML_COPY_BUTTON.py (import AgentPlanFrame; new
+  "Agent Plan" notebook tab + build_agent_plan_tab)
+
+Behavior before:
+No shared place to preview per-patient planned actions; the approved set
+for future execution did not exist anywhere.
+
+Behavior after (Slice C):
+The Agent Plan tab loads fees_checker_report.csv (latest Fees Check run),
+renders the routed plan with a counts summary, and on Approve & Run marks
+the selection APPROVED, the rest SKIPPED, and saves the approved rows as a
+JSON audit trail. Nothing executes — the dialog and button say so
+explicitly ("approve only", "Execution is wired in Slice E").
+
+Safety or compatibility notes:
+
+- Read-only contract: CSV read + plan JSON write are the only I/O.
+- Approval is explicit selection only; empty selection shows an info
+  dialog instead of approving anything.
+- Plan JSON filename is timestamped, never overwritten.
+- The tab follows the sibling-tab constructor pattern
+  (settings_getter, log_callback); no coupling to other tabs.
+
+Verification performed:
+python -m unittest tests.test_agent_plan_store tests.test_gui_agent_plan
+tests.test_agent_fees_actions -> 24 tests, all OK. Existing GUI suites
+(hbsys_status, no_xml_panel, verify_panel_removal) -> 19 tests, all OK
+(the new tab did not break main-GUI instantiation).
+
+### 2026-09-24 - Slice B: Fees Action Table (fees row → date_fill / final_bill / xml_clicker / manual_review)
+
+Reason:
+User-approved Slice B of the Claims Agent plan, plus user confirmation that
+Auth Sign Date IS Consent (same Date Fill path) and that ADM/DIS mismatch +
+MISMATCH route to MANUAL_REVIEW (never auto-fixed).
+
+Files added:
+
+- core/agent/fees_actions.py (ACTION_* vocabulary; TOOL_AVAILABLE with
+  final_bill=False until the Slice D Final Bill mapping session;
+  decide_action() priority: unreadable/NO RECORD → manual_review,
+  NO FINAL BILL → final_bill, blank Prof Fee/Consent/Auth(=Consent) dates →
+  date_fill, gate YES → xml_clicker, anything else → manual_review with
+  MISMATCH / ADM_DIS_MISMATCH / NOT_READY_OTHER codes; build_plan,
+  summarize_plan, describe_decision)
+- tests/test_agent_fees_actions.py
+
+Behavior before:
+No shared rule table mapped Fees Check verdicts to the next tool; the
+workflow engine only ran fixed node order with no per-patient branching.
+
+Behavior after (Slice B):
+decide_action() routes one fees row deterministically; build_plan() keeps
+input order; summarize_plan() counts per action for the future Plan Panel.
+No production file modified; no GUI wiring yet; nothing runs automatically.
+
+Safety or compatibility notes:
+
+- Pure function of one row dict — no HBSys, no DB, no clicks.
+- Missing/blank keys are treated as unknown (never defaulted good), so an
+  unreadable row can only ever become manual_review.
+- final_bill decisions carry tool_available=False + review code
+  FINAL_BILL_TOOL_MISSING; callers must send them to MANUAL_REVIEW_FINAL_BILL
+  until the Slice D mapping session produces the tool.
+
+Verification performed:
+python -m unittest tests.test_agent_fees_actions -> 14 tests, all OK
+(priority, Consent=Auth confirmation, missing-tool flag, batch order +
+counts, describe output). Agent slice total: 40 tests OK (screens 15 + nav
+11 + fees 14). Non-GUI regression slice re-run: requirement rules +
+claim-number match + 3 agent modules, all OK.
+
+### 2026-09-24 - Plan: Claims Agent decision flow (Fees Check → Date Fill / Final Bill / XML Clicker) + HBSys window detection plan
+
+Reason:
+The user's live workflow is: after scanning, click Fees Check, then act per
+patient from the "Ready to Generate XML" verdict — blank Prof Fee Sign Date
+(hprofserv.pdoctorsigndate), Consent Date (hpatcon1.consentdate), or Auth
+Sign Date (hpatcon1.authsigndate) means run Date Fill; "NO FINAL BILL"
+(itemized total zero/null) means run Final Bill (no script exists yet);
+"Ready to Generate XML = YES" for all patients means run the XML Clicker.
+The open question was how the tooling knows which HBSys window/screen is
+currently open and how it gets to the Date Fill, XML Clicker, or Final Bill
+screen. The user asked for a plan first ("plan ka nga muna").
+
+Investigation (read-only, no production code touched):
+
+- fees_checker.py read-only checks per patient: itemized (hpatchrgdtl) vs
+  grouped (hpatgrpchrg) totals; Status MATCH / MISMATCH / NO FINAL BILL;
+  ADM/DIS folder-vs-hpatcon1 match; three signed-date columns; and
+  ready_to_generate_xml() as the single source of truth for the
+  "Ready to Generate XML" YES/NO verdict (write_reports + XLSX colors).
+- Date Fill exists: date_fill_hbsys/hbsys_fill_dates.py operator
+  (Hospital No. search → Admission History row → PHIC Beneficiaries row →
+  Claim Form 2 → fill Prof Fee/Consent dates → close forms). Its operator
+  already tracks screen_stage (base/admission_popup/beneficiary/cf2) and
+  recovers to base on failure. Missing vs Date Fill: it fills CF2 Prof Fee
+  and Consent dates but NOT the hpatcon1 Auth Sign Date column path.
+- XML Clicker exists: date_fill_hbsys/xml_generator_clicker.py operator
+  (focus HBSys/eClaims window → open CF4/CF5/eSOA generator tabs →
+  search patient → Select Encounter → validate+generate). Uses absolute
+  1920x1080 toolbar points; detects screens only loosely (title contains
+  checks + OCR probes).
+- Window detection exists: date_fill_hbsys/hbsys_window.py
+  (is_hbsys_window by FNWND370/FNWND230 class or HBSys/HOMIS title, with
+  Chrome_WidgetWin_* browser exclusion; covered by tests/test_hbsys_window.py
+  and the main GUI's HBSys open/closed indicator that gates Date Fill /
+  XML Clicker buttons). It answers open/closed but NOT which screen is open.
+- Workflow engine exists: core/workflow_engine.py + core/workflow_registry.py
+  (12 registered nodes incl. date_fill_regular/abtc, xml_clicker, fees_checker,
+  claims_checker, add_claims_upload, claim_attachments; HBSys gate skips
+  hbsys_touching nodes when HBSys is closed) + gui/workflow_tab.py editor.
+  It orchestrates fixed node ORDER — it has no per-patient rule table and no
+  screen-state routing, so it cannot express "this patient needs Date Fill,
+  that one needs Final Bill".
+- Final Bill has NO script: confirmed — no final-bill/module/screen mapping
+  exists anywhere in the repo. This is the one genuinely new automation.
+
+Plan approved by user (Slice A first):
+
+- A1 Screen Detector: core/agent/hbsys_screens.py — detect_screen() from
+  window titles + optional OCR text, 11-screen vocabulary (HBSYS_CLOSED,
+  ORDER_TRANSACTIONS, ECLAIMS_DASHBOARD, UPLOAD_CLAIMS,
+  UPLOAD_CLAIM_ATTACHMENTS, ADMISSION_HISTORY, PHIC_BENEFICIARIES,
+  CLAIM_FORM_2, CLAIM_FORM_4, DIALOG, UNKNOWN), pure observation, injectable
+  window listing for headless tests.
+- A2 Navigator: core/agent/hbsys_nav.py — Navigator.navigate(target) over
+  declared hop plans with per-hop verification, go_home() safe recovery via
+  Escape-only dismissal, MAX_HOPS fail-safe, coordinates read from the SAME
+  production constants (no duplicated business logic).
+- B Fees Action Table: core/agent/fees_actions.py — decide_action() mapping
+  each fees row to date_fill / final_bill(MISSING tool) / xml_clicker /
+  manual_review, reusing ready_to_generate_xml() as the gate.
+- C Agent Plan Panel: read-only approval panel listing per-patient planned
+  actions (Approve & Run / Skip / Edit later); execution only after approval.
+- D Final Bill: mapping session with the user (open HBSys together, record
+  the Final Bill screen path) before any automation is written; until then
+  final_bill_required patients route to MANUAL_REVIEW_FINAL_BILL.
+- E Wire-up: registry nodes per action + engine per-patient branching +
+  run reports + Patient Review routing; production tools run unchanged.
+
+Files added (plan status — Slice A implemented, B–E pending user go):
+
+- core/agent/hbsys_screens.py, core/agent/hbsys_nav.py
+- tests/test_agent_hbsys_screens.py, tests/test_agent_hbsys_nav.py
+
+Behavior before:
+No shared answer to "which HBSys screen is open now"; every HBSys tool
+assumed its start screen (Date Fill assumed the main screen, XML Clicker
+assumed eClaims reachable, uploaders assumed their popup reachable). No
+rule table mapped Fees Check verdicts to Date Fill / Final Bill / XML
+Clicker. Final Bill automation did not exist.
+
+Behavior after (Slice A):
+Detector + Navigator exist as independent, tested modules. No production
+file modified; no GUI wiring yet; nothing runs automatically.
+
+Safety or compatibility notes:
+
+- Detector never clicks/types; Navigator caps hops at MAX_HOPS, re-verifies
+  every hop, dismisses blockers with Escape only, and routes unknown
+  states to Patient Review instead of guessing.
+- Navigator coordinates come from the existing production constants
+  (CalibratedPointsData, Date Fill P, XML clicker P) — none invented.
+- Final Bill is deliberately NOT automated until the mapping session.
+
+Verification performed:
+python -m unittest tests.test_agent_hbsys_screens
+tests.test_agent_hbsys_nav -> 26 tests, all OK (headless scripted desktop).
+Non-GUI regression slice (requirement rules + claim-number match + the 2 new
+agent modules) -> 62 tests, all OK. Full 12-module GUI suite timed out in the
+30 s tool window (pre-existing slow GUI/PDF tests, not related to Slice A —
+26/26 agent tests pass and no production file was modified).
+
 ### 2026-09-24 - Feature: Patients Without XML panel + Check Missing auto-disable + 2s auto-refresh + Live mode default
 
 Reason:
@@ -5059,3 +6362,889 @@ reusable service module.
 - Generated sheets:
   logs/csf_contact_sheet_1.png, logs/csf_contact_sheet_2.png,
   logs/coe_contact_sheet_1.png, logs/coe_contact_sheet_2.png.
+
+
+## 2026-09-26 -- Claims Agent diagnostic logging (find WHERE it broke)
+
+### Change Title
+Make every blocked/failed agent row name the exact failing step, with live screen
+evidence (forms, windows, Hospital No. field, screenshot) instead of
+"nothing happened".
+
+### Reason
+The live 3-row run reported only: date_fill "exit 1" truncated mid-sentence, and
+final_bill "patient load not verified". Neither said WHICH step failed, what was
+on screen, or whether the typed hospital number ever reached the field, so the
+cause could not be found without re-running the patient by hand.
+
+### Files Modified
+- core/agent/final_bill_actions.py -- new screen-diagnostics helpers
+  (`hbsys_window_titles`, `hospital_no_field_text`, `save_screenshot`,
+  `diagnose_screen`); the loader now types, READS THE FIELD BACK, then presses
+  ENTER, logs the wait second by second, and dumps the diagnostics when the form
+  does not appear; `select_confinement` logs the OCR'd grid rows it compared
+  against; `clear_blocking_popups` names the blocking window; LOAD_WAIT_SECONDS
+  1.5 -> 8.0.
+- core/agent/orchestrator.py -- `_tool_reason` prefers the tool's `[STOP]`
+  record, then the `Reason:` block of a multi-line `[POPUP]` message, then the
+  last line; `_tool_detail` adds `last steps:` (tail of the click/type trace);
+  removed the now-unused `_tool_tail`; BLOCKED final_bill details carry all
+  loader/matcher notes plus the screen snapshot.
+- date_fill_hbsys/hbsys_fill_dates.py -- prints one machine-readable
+  `[STOP] patient=... | status=... | reason=... | screen_stage=... |
+  safe_reset=... | csv=...` line and up to three `[EVIDENCE] screenshot ...`
+  lines before the stop popup.
+- tests/test_agent_final_bill.py -- popup-clear and guarded-close tests stub the
+  screen probes (they used to read the live desktop, so they failed whenever a
+  Billing form was open); new `ScreenDiagnosticsTests` + unknown-dialog test.
+- tests/test_agent_orchestrator.py -- `[STOP]` / popup-`Reason:` / last-steps
+  coverage replacing the old popup-line expectation.
+
+### Behavior Before
+- Failed row detail = tool name + exit code + first 500 chars of stdout, which
+  cut the date_fill trace in the middle of the Admit History step.
+- final_bill "patient load not verified": no field read-back, no wait trace, no
+  list of windows/forms, no screenshot, 1.5s wait.
+- Admit History "could not select": the rows the OCR actually saw were not logged.
+
+### Behavior After
+- Row detail: `hbsys_fill_dates.py exit 1 | reason: [STOP] patient=... |
+  status=needs_review_admission_history | reason=... | screen_stage=admission_popup
+  | csv=... | last steps: [LIVE] press enter -> [LIVE] click Admit History at
+  (435, 58) -> ... | full output: logs/agent_tool_....log`.
+- A blocked load logs: which form was closed, the click point, whether the
+  Hospital No. field received the number, the wait per second, then the open
+  Billing forms, every HBSys window/modal dialog, the field text, and
+  logs/agent_diag_<stamp>.png.
+- Admit History logs the exact rows it read before saying "no row matched".
+- Live smoke check (read-only) on this desktop reported:
+  `billing forms: Billing (COLLADO, JEMALYN GAMENG)`,
+  `windows: HBSys ... [FNWND370]; Epson Scan 2 [#32770]`,
+   `hospital no field: <HRN>`.
+
+### Safety / Compatibility
+- Diagnostics are read-only: window enumeration, control text, one OCR of the
+  Hospital No. band, and a full-screen PNG. No click, no typing, no key press.
+- Every new probe is exception-guarded, so a missing window/OCR degrades the
+  log to "<empty/unreadable>" instead of failing the row.
+- Nothing else changed: no coordinates, no control ids, no match thresholds.
+
+### Verification
+- `python -m py_compile` on the three modified modules: OK.
+- Agent suite (fees_actions, final_bill, hbsys_nav, hbsys_screens,
+  orchestrator, plan_store, gui_agent_plan): 186 tests, OK.
+- `date_fill_hbsys` verifier tests: OK.
+- Live read-only run of `diagnose_screen()` printed the form list, the window
+  list (including the Epson Scan 2 modal), the field text and the screenshot
+  path, as shown above.
+## 2026-09-28 -- GUI crash diagnostics: lifecycle/crash/error trail, focus guard, run heartbeat, unfinished-run warning
+
+### Context
+The GUI closed silently on Agent Plan -> Approve & Run. No code path closes
+the window (only Alt+F4 / the X button do, and code never sends them), so the
+next occurrence must explain itself from a file trail. Everything added is
+modular, fail-open, and never raises.
+
+### Files Modified
+- core/diagnostics.py -- NEW. faulthandler -> logs/gui_crash.log (native
+  crashes, all-thread dump); unhandled exceptions (main thread, worker
+  threads, Tk callbacks) -> logs/gui_errors.log; START/CLOSE/EXIT lifecycle
+  -> logs/gui_lifecycle.log. Idempotent install, never raises, best-effort
+  writes, reset_for_tests() for suites; install_tk_close_logging() follows
+  the directory install_crash_logging() was given. Log folder order:
+  explicit argument, CLAIMS_DIAG_LOG_DIR env var (tests redirect here),
+  else logs/. The atexit EXIT hook binds its folder at registration and is
+  unregistered by reset_for_tests(); the excepthooks go inert when the state
+  is reset, so a test process can no longer append EXIT/exception lines to
+  the production logs.
+- core/agent/window_guard.py -- NEW. Foreground-window guard used by the
+  HBSys tools: warn/block/off via CLAIMS_AGENT_FOCUS_GUARD, fail-open,
+  injectable window-title function for tests.
+- core/agent/orchestrator.py -- run heartbeat: logs/agent_current_run.json
+  (renamed from agent_run_current.json so it never matches the
+  agent_run_*.json audit-trail glob) is rewritten before the run, names the
+  row being ATTEMPTED (current_index/action/patient_folder/hospital_no)
+  before the executor runs, after every row, and ends as state=FINISHED with
+  finished_at/saved_path/summary; new write_run_heartbeat(),
+  last_run_state(), state_path= on run_approved_plan. A heartbeat failure
+  never breaks a run.
+- gui/agent_plan_tab.py -- state_file constructor parameter and
+  _previous_run_warning(): when loading a plan sees state=RUNNING it logs a
+  Tagalog warning (row X/Y, last action, pointer to gui_lifecycle.log).
+- start_claims_gui.py, edh_claims_gui_XML_COPY_BUTTON.py -- install the
+  diagnostics at launch / in EDHClaimsGUI.__init__ (plus the Tk close log).
+- date_fill_hbsys/hbsys_fill_dates.py, date_fill_hbsys/xml_generator_clicker.py
+  -- window guard integrated (refuse/flag input when HBSys is not focused).
+- tests/test_core_diagnostics.py, tests/test_agent_window_guard.py -- NEW
+  suites (install/reset safety, close logging, exit-hook binding, guard
+  modes).
+- tests/test_agent_orchestrator.py -- HeartbeatTests (finished payload,
+  attempted-row naming, per-row rewrite, glob non-overlap, empty/corrupt
+  state, failure never breaks a run, save=False); module-level stubs for the
+  final_bill screen probes; every run_approved_plan() call site now passes
+  run_dir so the heartbeat stays in temp folders.
+- tests/test_gui_agent_plan.py -- unfinished-RUNNING / FINISHED / missing
+  heartbeat warning tests; state_file pointed at a temp dir.
+- tests/test_gui_no_xml_panel.py, tests/test_gui_hbsys_status.py --
+  setUpModule/tearDownModule set CLAIMS_DIAG_LOG_DIR to a temp folder (the
+  real EDHClaimsGUI installs diagnostics in __init__).
+- tests/test_gui_verify_panel_removal.py -- standalone run redirects
+  CLAIMS_DIAG_LOG_DIR before building the GUI.
+
+### Behavior Before
+- A silent close left no trace: no crash file, no exception log, no way to
+  tell "closed normally" from "killed"; a dead run left no record of the row
+  it stopped on; test runs could append gui_*.log / agent_current_run.json
+  into the real logs/ folder.
+
+### Behavior After
+- logs/gui_lifecycle.log: CLOSE+EXIT = closed normally (X / Alt+F4); EXIT
+  without CLOSE = the process ended without the window handler; no EXIT line
+  = killed from outside or a crash before atexit. gui_crash.log non-empty =
+  fatal native crash with thread stacks. gui_errors.log = unhandled
+  exceptions (main thread, worker threads, Tk callbacks).
+- logs/agent_current_run.json shows which row the last run stopped on, and
+  the Agent Plan panel warns on load when it never finished (state=RUNNING).
+- Test runs leave logs/ byte-for-byte unchanged.
+
+### Safety / Compatibility
+- Every diagnostics/guard entry point is fail-open and never raises; the Tk
+  close handler still destroys the window exactly like the default; the
+  original Tk/thread exception reporting still runs; production defaults are
+  unchanged (same folder, same behavior when nothing is configured).
+- The heartbeat file name cannot collide with the agent_run_*.json audit
+  trail; a heartbeat write failure is swallowed.
+
+### Verification
+- python -m unittest tests.test_core_diagnostics tests.test_agent_window_guard
+  tests.test_agent_orchestrator tests.test_gui_agent_plan
+  tests.test_gui_no_xml_panel tests.test_gui_hbsys_status: 124 tests, OK,
+  in one process; a before/after snapshot of logs/ showed zero new or
+  modified files (only the artifacts deleted during cleanup differ).
+- python core/diagnostics.py (standalone selftest): passed.
+- Cleaned test/harness artifacts from logs/: gui_lifecycle.log,
+  agent_current_run.json, agent_run_current.json, 3x agent_diag_*.png
+  (10:28), and agent_plan_20260928_102611.json (a re-save of the 09:24 plan,
+  identical except created_at).
+- tests/test_gui_verify_panel_removal.py still fails 3 stale layout checks
+  (its expected tab list predates Agent Plan/Workflow/PDF Preview and it
+  looks for the old exact "Check Missing" label) -- pre-existing and
+  unrelated to this work.
+## 2026-09-28 -- Agent Date Fill: confinement selection copied from the working Date Fill ABTC/Regular tool
+
+### Context
+Agent Plan -> Approve & Run launches the PRODUCTION tool
+`date_fill_hbsys/hbsys_fill_dates.py` (orchestrator `DATE_FILL_TOOL`), while the
+GUI button "Date Fill ABTC/Regular" runs `hbsys_fill_dates_testing.py`. The owner
+reported that the agent cannot select a confinement while the button works, and
+the logs/screenshots prove two distinct defects:
+
+- `agent_tool_hbsys_fill_dates_..._20260926_155739.log`: the single best OCR pass
+  read only 1 of 2 Admission History rows -> `needs_review_admission_history`.
+- `..._20260926_161157.log` and `..._20260928_105548.log`: `select exact
+  Admission History row ... at (188, 98)` -> `needs_review_phic_beneficiaries`.
+  Screenshot `phic_beneficiaries_select_20260928_105534.png` shows the Admission
+  History popup STILL OPEN: `_confinement_row` built the click point as
+  `(rect.left + 72, parsed.y)` — missing `rect.top` — so the double-click hit the
+  toolbar at y=98 instead of the row at y≈218, the popup never closed, the PHIC
+  click ran on the wrong screen, and the matcher correctly reported "matching
+  PhilHealth Beneficiaries row not found".
+
+The proven reference (Date Fill ABTC/Regular) was copied function-by-function
+into the production tool. The reference itself is untouched.
+
+### Files Modified
+- `date_fill_hbsys/hbsys_read_admission_history.py` — added
+  `read_focused_admission_row_variants()` + `detect_admission_grid_row_centers()`
+  (ported from `hbsys_read_admission_history_testing.py`): per-row focused OCR
+  crops so one weak full-window pass cannot drop a grid row. Additive only; the
+  shared `select_confinement_row` recipe and the Final Bill imports are unchanged.
+- `date_fill_hbsys/hbsys_fill_dates.py` (the tool the agent launches):
+  - `_confinement_row`: click point is now `(rect.left + 72, rect.top + row_y)` —
+    screen-absolute like the working tool (the root-cause fix).
+  - `_read_confinement_rows`: merges ALL OCR passes (7 full-window variants + 4
+    focused row passes) instead of one best pass; new `_merge_parsed_rows()`
+    de-duplicates by date pair; the fuzzy fallback re-scores the repaired best
+    pass (smeared-date cell re-read kept) plus the stored passes.
+  - `select_admission_history_row`: after the shared recipe reports a pick,
+    `_wait_admission_history_closed()` (`ADMIT_HISTORY_CLOSE_TIMEOUT = 3.0s`)
+    requires the popup to actually close; otherwise it stops with
+    `needs_review_admission_history` instead of continuing on the wrong screen.
+  - `click_phic_and_select_claim`: proof-verified selection copied from the
+    working tool — single-click at x=260, retry x=520 (through the guarded
+    `self.click`), recapture, re-match, and accept only when the row OCRs back as
+    the Windows blue selected row; the old blind one-shot click at x=46 with no
+    proof is gone.
+  - `find_phic_beneficiary_row_y_from_variants`: new `minimum_consensus`
+    parameter, 2 at both call sites (copied from the working tool).
+  - `find_phic_beneficiary_row_y`: duplicate-confinement disambiguation now needs
+    `min(2, len(name_tokens))` matching name tokens (was: 1 token sufficed).
+  - `is_blue_highlighted_row()` added (PIL row-highlight proof).
+- `tests/test_date_fill_confinement.py` — NEW: 13 hermetic regression tests
+  (absolute click point, multi-pass merge, popup-closure stop, x=260/520 proof
+  loop with exact click coordinates, 2-pass consensus, blue/gray highlight proof,
+  1-token ambiguity vs 2-token pick). Captures are mocked or temp files; no test
+  touches the real `logs/`.
+
+### Behavior Before
+- One OCR pass decided the Admission History rows; a weak pass that missed the
+  folder's row stopped the claim even when another pass had read it.
+- The Admission History double-click could land off the row (y missing
+  `rect.top`); the recipe reported success anyway, the popup stayed open, and
+  every later step (PHIC, CF2) ran against the wrong screen until the matcher
+  failed — or could have matched grid text from the popup.
+- The PHIC row was clicked once at x=46 with no verification of any kind; row
+  selection could silently fail while the flow reported success.
+
+### Behavior After
+- Every OCR pass contributes rows; the exact/fuzzy matcher sees the union.
+- The double-click uses screen-absolute coordinates (identical math to the
+  working tool), and the flow refuses to continue until the popup is closed —
+  a miss now stops early as `needs_review_admission_history` with the popup
+  left open for the operator.
+- The PHIC row is only accepted with two agreeing OCR passes AND a blue-highlight
+  proof screenshot; clicks are attempted at x=260 then x=520; failure stops as
+  `needs_review_phic_beneficiaries` (same status names as before).
+
+### Safety / Compatibility
+- HINDI ginalaw ang gumaganang `hbsys_fill_dates_testing.py` (ang reference), ang
+  shared `select_confinement_row` recipe, ang Final Bill agent (lahat ng click
+  points nito ay screen-absolute na — `point = (first_x, line[0][0])` mula sa
+  `_ocr_grid_lines`), ang fill sequence (parehas pa rin ang Professional
+  Fee/Consent clicks at discharge date para sa REGULAR), ang CSV columns, ang CLI
+  (`--live --hospital-no`), at ang status names.
+- ABTC-only proof helpers (accreditation/name-row consensus) stay in the testing
+  tool; the agent tool remains REGULAR (discharge-date basis) exactly as before.
+- Bagong stop conditions = earlier failure with the SAME review statuses; the
+  tool never guesses a confinement (never-guess rule intact).
+
+### Verification
+- `python -m py_compile` on both modified modules — OK.
+- `python -m unittest tests.test_date_fill_confinement -v` — 13 tests, OK (0.3s).
+- `python -m unittest tests.test_agent_final_bill tests.test_agent_orchestrator`
+  — 112 tests, OK (shared recipe + Final Bill unaffected).
+- `python -m unittest test_hbsys_date_fill_verifier` (in `date_fill_hbsys/`) —
+  34 tests, OK.
+- Full discovery `python -m unittest discover -s tests` — 355 tests, OK;
+  before/after snapshot of `logs/` — identical (1256 files), i.e. hermetic.
+- Huling live run bago ang fix (`agent_tool_..._20260928_105548.log`) ay
+  huminto sa `needs_review_phic_beneficiaries`; ang susunod na live Agent Plan
+   run (hal. <isang pasyente>) ang pagkakataong patunayan ang bagong
+  flow sa totoong HBSys.
+
+
+
+## 2026-09-28 13:40 -- Final Bill: Admit History multi-pass row reader + live-copy sync (PERA run BLOCK fix)
+
+### Context
+Ang Agent Plan Final Bill run ng 2026-09-28 13:30 at 13:40 ay parehong
+ `BLOCKED` sa unang pasyente (isang pasyente) at na-block
+ang susunod na dalawa dahil hindi na-close ang kanyang `Billing` form.
+Root cause na natukoy sa logs + screenshot:
+
+- `logs/agent_run_20260928_134039.json` --
+  `"confinement period 20260909-20260912 not found in the Admit History list"`
+  na may `"admit history: nothing selected"`, ibig sabing ZERO rows ang
+  na-read ng matcher.
+- `logs/agent_diag_20260928_134039.png` -- ANG POPUPYON AY MAAYONG LAMANG.
+  Naka-display nang malinaw ang row na `09/09/2026 | 09:40 PM | 09/12/2026 |
+  02:31 PM | ADMIT` sa loob ng `Admission History` window, at tama na ang
+   Hospital No. field (`<HRN>`) -- patunay na nasagot na ang typing at
+  na-tatama na ng Admit History.
+- `logs/gui_crash.log` -- WALANG nbagong crash (ang 11:34 na
+  `RPC_E_DISCONNECTED` sa `load_patient_by_hospital_no` ay hindi na
+  nangyari). Pumasa na ang COM-init at foreground fix.
+
+Pangunahing sanhi: ang `confinement_rows_for_matching()` na tumatakbo sa
+LIVE na `C:\claims_bot\core\agent\final_bill_actions.py` ay pa rin ang LUMANG
+single-pass full-screen grab (verified via md5: live 9922f418... 78,241 bytes vs
+worktree 268896d1... 83,929 bytes). Ang single full-screen grab ay nagbababa ng
+13" popup grid sa readability limit ng Tesseract kaya ZERO rows ang
+nababasa -- kahit nasa screen nang perfect ang confinement.
+
+### Fix
+1. Multi-pass OCR reader (port ng Date Fill recipe) sa Final Bill agent:
+   - `_capture_popup_image()` -- kinukuhang popup pixels mismo gamit
+     `capture_as_image()` (hindi na full-screen grab) at sinusulatan sa
+     `logs/final_bill_admission_history_<ts>.png` bilang run evidence.
+   - `_merge_parsed_rows()` -- MERGE ang bawat natatanging
+     (admission_date, discharge_date) sa lahat ng OCR pass, first-pass-wins.
+   - `_confinement_row_from_parsed()` -- click point na
+     `point = (rect.left + 72, rect.top + int(parsed.y))`, i.e. mula sa TOP-LEFT
+     ng popup. Ang dating full-screen crop ay nakatapat sa toolbar sa itaas.
+   - `_read_confinement_rows_multi_pass()` -- pinagsasama ang 7 full-window
+     variants + 4 focused per-row crops.
+   - `confinement_rows_for_matching(popup, *, log_fn=None)` -- multi-pass
+     muna, legacy single-pass bilang fallback kapag capture failed.
+2. Na-sync ang buong worktree file papunta sa live copy
+   `C:\claims_bot\core\agent\final_bill_actions.py` (md5 SAME) at
+   `gui/agent_plan_tab.py`.
+
+### Files Modified
+- core/agent/final_bill_actions.py -- `_capture_popup_image`,
+  `_merge_parsed_rows`, `_confinement_row_from_parsed`,
+  `_read_confinement_rows_multi_pass`, at ang multi-pass na
+  `confinement_rows_for_matching` / `select_confinement`.
+- tests/test_agent_final_bill.py -- BAGONG `ConfinementRowMergeTests` (6 tests):
+  (a) `test_a_misreading_pass_cannot_hide_the_correct_row`,
+  (b) `test_identical_rows_from_many_passes_are_merged_once`,
+  (c) `test_row_keeps_the_grid_text_and_encounter_type`,
+  (d) `test_click_point_is_measured_from_the_popups_top_left_corner`
+  (popup at (122,110), row y=101 -> point (194,211)),
+  (e) `test_unreadable_ocr_passes_yield_no_rows_instead_of_raising`,
+  (f) `test_merge_survives_a_broken_datefill_import`.
+  Dagdag pa rin ang `from unittest import mock` import.
+
+### Validation Against The Real Screenshot
+Ang crop ng tunay na popup mula `agent_diag_20260928_134039.png` ay
+pinatakbo sa mismong reader bago i-deploy:
+
+- full-window passes: 7 -- pass 1 -> `('09/09/2026', '09/12/2026', 'ADMIT')`
+- focused row passes: 4 -- lahat -> `('09/09/2026', '09/12/2026')`
+
+Patungo sa folder na `ADM20260909_DIS20260912`. Pansinin na ang pass 0 ay
+nagbasa ng `09/09/2028` (isang digit ang mali) -- dahil doon kailangan ng
+merge: hindi dapat tanggalin ang tamang row dahil may pass na nagkamali.
+
+### Safety / Compatibility
+- Read-only sa MySQL/HBSys data; walang schema change, walang SQL, walang
+  pagbabago sa XML generator, signing engine, OCR engine, o Claims Checker.
+- Pop-up capture ay screenshot lamang (read-only probe), gaya ng dati.
+- NEVER-GUESS rule hindi nababago: kung walang row na tumutugma sa folder
+  period, BLOCKED pa rin at hinahawakan ng operator -- ang multi-pass reader
+  ay nagpapalakas ng pagkakabasa, hindi ng pagpili ng confinement.
+- Ang legacy single-pass path ay nananatiling fallback, kaya hindi breakage
+  kapag nawala ang popup capture.
+
+### Verification
+- `python -m py_compile` sa live na `C:\claims_bot\core\agent\final_bill_actions.py`
+  at `gui\agent_plan_tab.py` -- OK.
+- `python -m pytest tests/test_agent_final_bill.py tests/test_agent_orchestrator.py tests/test_gui_agent_plan.py -q`
+  -- 131 passed.
+- `python -m pytest tests/ -q` -- 361 passed, 7 subtests passed (20.2s).
+- md5 ng live vs worktree: `core/agent/final_bill_actions.py` SAME,
+  `gui/agent_plan_tab.py` SAME.
+- Huling live run (`agent_run_20260928_134039.json`) -- huling aking
+  pagsubok sa totoong HBSys; dapat na dumaan ang Admit History step para sa
+  PERA at magsimula na ang Close Form -> next patient loop.
+
+---
+
+## 2026-09-28 - Final Bill: PRESS ENTER pagkatapos ng click OK
+
+### Request (operator)
+```
+AFTER CLICK OK PRESS ENTER YAN ANG IDAGDAG MO.
+WAG NA UNG PRESS SAVE OR OK OR NO
+```
+
+### Diagnosis
+Ang dating galit sa selection ng confinement ay na-fix na (popup-pixels
+multi-pass OCR, entry sa itaas). Ang natitirang tanong ay ang post-OK
+step: ang dating code ay nag-click No (STEP_CONFIRM_NO) o click OK/Save
+(STEP_SAVE_OK) - hindi ito ang ginagawa ng operator. Ang operator ay
+nagta-press ENTER pagkatapos ng click OK.
+
+### Behavior change
+Ang post-OK action ay ISANG press_enter. Hindi na walang click ang
+Yes/No (Do/No) at Save/OK - pareho silang tinatugunan ng iisang ENTER.
+
+Bagong step: STEP_PRESS_ENTER = "press_enter".
+Retired (nananatiling pangalan lang para ma-resolve ng lumang log/plan
+file, hindi na naplaplan): STEP_CONFIRM_NO, STEP_SAVE_OK.
+ALL_STEPS 8 -> 7.
+
+### Files affected
+- core/agent/final_bill_actions.py
+  - plan_step(): bagong keyword ok_clicked at enter_pressed; ang
+    SCREEN_FINAL_BILL_CONFIRM at SCREEN_FILE_SAVE ay nagpaplano na ng
+    STEP_PRESS_ENTER. Ang ok_clicked=True + enter_pressed=False ay may
+    pinaprioritadong shortcut na STEP_PRESS_ENTER kahit wala nang dialog
+    (ang ENTER ay mapupunta sa front window - gaya ng ginagawa ng tao).
+  - StepDecision: bagong field na ok_clicked.
+  - FinalBillRunner.__init__(): pinagpalit ang answer_confirm_fn /
+    answer_save_fn ng press_enter_fn (injected sa tests).
+  - FinalBillRunner._perform(): (ok_clicked, enter_pressed) na ang
+    isinusunod na state; nagbabalik ng 4-tuple.
+  - Bagong module-level press_enter_now() + _front_hbsys_window() +
+    PRESS_ENTER_SETTLE_SECONDS (0.6s) at PRESS_ENTER_WAIT_SECONDS
+    (2.0s). Kinakailangan ng ensure_com_thread() at raise_to_top() bago
+    ang send_keys("{ENTER}") - kung hindi, ang ENTER ay mapupunta sa
+    claims GUI/IDE (parehong pagkabigo na nangyari dati sa pag-type ng
+    hospital number).
+  - FinalBillRunner._press_enter() (bago ang _answer_no / _answer_ok,
+    na tina-delete).
+  - Module docstring at FinalBillRunner docstring: updated sa bagong
+    hakbang 7.
+- tests/test_agent_final_bill.py
+  - FakeHbsys.answer_no/answer_save -> FakeHbsys.press_enter.
+  - make_runner() -> press_enter_fn=.
+  - test_confirm_prompt_plans_no -> test_confirm_prompt_plans_enter
+  - test_file_save_prompt_plans_ok -> test_file_save_prompt_plans_enter
+  - Bagong test_enter_is_planned_exactly_once_after_ok.
+  - test_happy_path_matches_the_live_2026_09_25_sequence ->
+    _2026_09_28_sequence, may assertEqual(fake.calls.count("press_enter"), 1).
+  - test_save_prompt_branch_answers_ok_instead ->
+    test_save_prompt_branch_also_uses_enter.
+  - test_default_runner_binds_real_gui_primitives: _press_enter nalen,
+    at _answer_no/_answer_ok ay dapat WALA na.
+  - test_every_planned_step_is_in_the_vocabulary: 7 steps, patay na ang
+    dalawang retired.
+
+### Bug na na-diskubra habang nagta-test
+Ang unang plan_step ay nagpaplano ng STEP_PRESS_ENTER nang paulit-ulit
+kapag nananatili ang confirm screen matapos ang ENTER (walang
+enter_pressed guard). Ayusin: ang ENTER mismo ang authoritative na
+"finalized" signal - hindi ang screen - kaya enter_pressed=True ay
+nagsaset ng bill_finalized=True sa simula ng plan_step. Nakaiwas ito sa
+infinite loop hanggang sa step cap.
+
+### Safety / Compatibility
+- plan_step() at FinalBillRunner puro/injected -> headless pa rin.
+- Walang MySQL/HBSys schema change, walang SQL, walang pagbabago sa XML
+  generator, signing engine, OCR engine, o Claims Checker.
+- Hindi na ginagamit ang control id/caption ng Yes/No at Save/OK, kaya
+  build-agnostic: gumagana kahit walang lumabas na dialog.
+- Ang ENTER ay pinapadala sa window na nasa unahan (confirm dialog ->
+  print popup -> HBSys main), HINDI sa Billing form grid para hindi
+  magbago ang napiling row. Ang Billing form ay hindi kailanman
+  naging target ng ENTER.
+- Pag send_keys ay hindi available, nagta-throw ang step na
+  "press_enter failed: ..." at ang row ay na-BLOCK (hindi silent).
+
+### Verification
+- python -m py_compile core/agent/final_bill_actions.py -- OK.
+- python -m pytest tests/test_agent_final_bill.py -q -- 54 passed.
+- python -m pytest tests/ -q -- 362 passed, 7 subtests passed (16.80s).
+- Headless planner simulation ng tunay na screen sequence:
+  ORDER_TRANSACTIONS -> open_final_bill,
+  FINAL_BILL_OPTIONS -> check_final_box,
+  (checked) -> click_ok,
+  (ok_clicked) -> press_enter,
+  (prompt) -> press_enter,
+  (enter_pressed) -> close_form,
+  (form closed) -> done.
+- md5 ng live vs worktree: core/agent/final_bill_actions.py SAME
+  (b954f53d568cf4a1784eda2564348bd3, 89271 bytes) at py_compile OK sa
+  C:\claims_bot.
+- Live run: kailangan pa ng pag-verify ng isang patient (halimbawa
+  PERA) na ang sequence ay open_final_bill -> check_final_box ->
+
+## 2026-09-28 — Final Bill: File save = TAB+ENTER, Call Administrator = click No, at taskbar notification kapag tapos na ang run
+
+### Request ng operator
+1. Pagkatapos ng click ng OK sa Print Options popup:
+   - kung "File save" ang lumabas -> PRESS TAB, pagkatapos ay ENTER
+     o SPACE;
+   - kung "Call Administrator" ang lumabas (Yes/No) -> CLICK "No".
+2. Kapag tapos na ang run, dapat may malinaw na notification sa taskbar
+   (iilaw o mag-flash) para alam ng operator na wala nang tumatakbo.
+
+### Mga apektadong file
+- `core/agent/final_bill_actions.py`
+- `gui/run_notifier.py` (BAGO)
+- `gui/agent_plan_tab.py`
+- `tests/test_agent_final_bill.py`
+
+### Behavior changes
+- Dalawang hiwalay na step ang pinalitan ang dating iisang
+  `press_enter`:
+  - `STEP_SAVE_TAB_ENTER = "save_tab_enter"` -- "File save" prompt:
+    keyboard-only (TAB, saka ENTER/SPACE). Walang caption/id na
+    hinahanap, kaya gumagana kahit "OK", "Save" o "&Save" ang label.
+  - `STEP_CONFIRM_NO = "answer_confirm_no"` -- "Call Administrator"
+    Yes/No:click ng "No". Ito ang intent ng operator; ang "Yes" ay
+    magpapalit ng computation kaya hindi ito ginagawa.
+- Ang dating `press_enter` / `press_enter_now` / `PRESS_ENTER_*`
+  constants ay tinanggal. Walang naipapadala na ENTRY bilang
+  panlahat na sagot sa dalawang prompt; ang bawat isa ay may sariling
+  aksyon na.
+- Bagong state flag sa planner: `prompt_answered` (pinapalit ang
+  `enter_pressed`). Ito ang authoritative na "the bill is final" signal,
+  hindi ang screen, para hindi ma-plan ulit ang sagot sa prompt na
+  naka-answer na.
+- Kung na-click na ang OK pero walang nababasa na prompt (build na walang
+  nagpo-pop up), ang planner ay nagre-`BLOCK` na may readable na
+  reason sa halip na mag-click ng blind.
+- Bagong module `gui/run_notifier.py`:
+  - `notify_run_finished()` / `notify_run_failed()`;
+  - taskbar flash gamit ang `FlashWindowEx(FLASHW_TRAY)`
+    (HINDI nag-a-activate ng window);
+  - Windows toast gamit ang `winotify` (WinRT) kung available;
+  - Tk corner toast bilang fallback (overrideredirect + topmost, at
+    click binding na "break" para hindi ma-pull ang focus);
+  - fail-soft: bawat call ay naka-wrap, isang notifier lang ang
+    broken ay hindi mabibigo ang run.
+- Tinawag ang notifier sa `_run_finished()` at `_run_failed()` ng
+  Agent Plan tab, at naka-log ang `Run-finished notification: <mode>`.
+
+### Safety notes
+- HINDI nang-a-activate ang notifier ng kahit anong window. Kailangan
+  ito dahil habang ang agent ay nagta-click at nagta-type sa HBSys, at
+  ang isang notification na nag-activate ay gagawin na ang susunod na
+  keystroke ay mali sa window (ang dating bug na natype sa claims GUI
+  imbes na sa Hospital No. field).
+- Hindi na ginagamit ang control id/caption ng Yes/No at Save/OK para sa
+  File save branch; keyboard-only na ito. Ang Call Administrator ay
+  button click dinag-anan bilang "No" dahil ito ang sinabi ng operator.
+- Hindi binabago ang working OCR, PDF merge, auto-sign, XML generator,
+  Claims Checker, o ang dating processing flow.
+
+### Verification
+- python -m py_compile core/agent/final_bill_actions.py
+  gui/agent_plan_tab.py gui/run_notifier.py -- OK.
+- python -m pytest tests/ -q -- 363 passed, 7 subtests passed
+  (23.02s).
+- Probes: `_windows_available()` -> True;
+  `_windows_toast(...)` -> True pagkatapos ng `pip install winotify`
+  (toast ay lumabas para sa real).
+- Live run: kailangan pa ng pag-verify sa isang patient na ang
+  sequence ay open_final_bill -> check_final_box -> click_ok ->
+  (file_save -> save_click_ok | confirm -> answer_confirm_tab) ->
+  close_form -> done, AT na nag-flash ang taskbar nang tapos.
+
+---
+
+## 2026-09-28 - Final Bill: File save = click OK, Call Administrator = press TAB
+
+### Operator instruction
+Pagkatapos ng Final Bill -> tick 'Final' -> click OK:
+- Basahin ang screen.
+- Kung 'File save' ang nakita -> CLICK ang 'OK' (HINDI mag-TAB).
+- Kung 'Call Administrator' ang nakita -> PRESS ng TAB.
+- Saka lang pagkatapos nito, kung tapos na, click 'Close Form' at
+  lumipat sa susunod na selected patient hanggang maubos.
+
+### Affected files
+- core/agent/final_bill_actions.py
+- tests/test_agent_final_bill.py
+
+### Behavior
+- STEP_CONFIRM_NO ('answer_confirm_no', click 'No') -> STEP_CONFIRM_TAB
+  ('answer_confirm_tab', press TAB). Ang click-the-'No' primitive
+  (_answer_no / answer_dialog_no) ay TINANGGAL sa runner.
+- STEP_SAVE_CLICK_OK ('save_click_ok') ang dumaang nasa live: click ang
+  OK ng 'File save' prompt. Na-verify na ito bago nang ipinapailaw,
+  kaya walang pagbabago sa pagganito.
+- TINANGGAL ang STEP_SAVE_TAB_ENTER at STEP_PRESS_ENTER (saka ang
+  _save_tab_enter at _press_enter na default primitives). Ang ENTER ay
+  hindi na ginagamit sa post-OK flow.
+- Dalawang magkaibang sagot ang dalawang prompt (click vs. isang TAB),
+  at pareho ay may verify-after: pag hindi nawala ang dialog, throw
+  ang '...but it stayed open' na reason.
+- Hindi na ginagamit ang 'Call Administrator' bilang focus target ng
+  save prompt (_front_save_prompt) - ang TAB ang k Sagut nun.
+- plan_step: rename ng state field enter_pressed -> prompt_answered
+  (ang pagtutugon sa prompt ang tunay na 'bill is final' signal).
+
+### Safety notes
+- Ang File save ay MOUSE CLICK, kaya kahit may focus sa filename field
+  ay tiyak na dumatarget ang click sa mismong OK button.
+- Ang Call Administrator ay isang keystroke (TAB). Bago ito ipinapadala,
+  ang dialog ay ini-raise sa foreground (raise_to_top) at CoInitializeEx
+  ang thread, para hindi mapunta ang TAB sa claims GUI o sa IDE.
+- Kung OK ang na-click pero walang na-detect na prompt, BLOCKED na
+  (hindi blind na ENTER o click) - may human step.
+- Hindi nag-a-activate ng window ang run notifier, kaya hindi naiubos
+  ng agent ang huling keystroke ang notification.
+
+### Verification
+- python -m py_compile core/agent/final_bill_actions.py -- OK.
+- python -m pytest tests/test_agent_final_bill.py -q -- 56 passed.
+- python -m pytest tests/ -q -- 364 passed, 7 subtests passed (15.90s).
+- Live run: kailangan pa ng pag-verify sa isang patient na ang
+  sequence ay open_final_bill -> check_final_box -> click_ok ->
+  (file_save -> save_click_ok | confirm -> answer_confirm_tab) ->
+  close_form -> done, AT na nag-flash ang taskbar nang tapos.
+
+---
+
+---
+
+## 2026-09-28 - File save: click the BOTTOM "OK"; Close Form only after ALL patients
+
+### Operator instruction
+Dalawang bagong detalye sa dating entry:
+- Ang OK ng "File save" ay yung NASA BABA ng dialog (yung button row sa
+  ibaba), hindi ang unang "OK" na nahanap.
+- HUWAG click ang "Close Form" hangga't hindi tapos lahat ng selected
+  patients.
+
+### Affected files
+- core/agent/final_bill_actions.py
+- core/agent/orchestrator.py
+- tests/test_agent_final_bill.py
+- tests/test_agent_orchestrator.py
+
+### Behavior
+1. "File save" -> ang PINAKABABANG "OK" ang kinli-click.
+   - Bagong `_bottom_most_button(buttons)`: pure, kinukuha ang button na
+     may pinakamalaking `rectangle().top`; tie ay nauuwi sa document order,
+     kaya ang iisang "OK" ay hindi nagbabago.
+   - `answer_dialog_ok()`: `_visible_buttons_by_text()` (plural) na ang
+     ginamit, at `_bottom_most_button()` ang pumipili. Ang dating
+     `_visible_button_by_text()` (unang match) ay hindi na ginagamit dito -
+     siya ang sanhi ng pag-click sa maling "OK" kapag may dalawa.
+2. "Close Form" -> LAST patient of the batch lang.
+   - `plan_step(..., close_form_at_end: bool = False)`: kapag
+     `bill_finalized` at `forms_open`, STEP_CLOSE_FORM ay inilalabas LANG
+     kapag `close_form_at_end` True. Sa dating code, STEP_CLOSE_FORM ang
+     default kada patient.
+   - Kapag False: STEP_DONE na agad (hindi na click ang Close Form).
+   - `FinalBillRunner.__init__(..., close_form_at_end=False)` -> ipinapasa
+     sa `plan_step` bawat loop.
+   - Orchestrator: `_final_bill_rows` = index ng lahat ng APPROVED
+     Final Bill row na may patient_folder + hospital number;
+     `_last_final_bill_index` = huli. `is_last_patient=(index ==
+     _last_final_bill_index)` ang ipinapasa, at
+     `close_form_at_end=is_last_patient` sa runner.
+   - `_default_final_bill(..., is_last_patient=False)` at
+     `_accepts_is_last(fn)` (bagong signature probe) para hindi masira ang
+     custom/legacy na `final_bill_fn` na 2-arg lamang.
+
+### Safety notes
+- Ang Close Form ay click sa toolbar band - iisang window lang ang
+  tinatama. Kaya nga huling hakbang ito, at hindi kada patient: kahit
+  sabihin pa ng run na "close form", hindi na ito nang-click kapag
+  `close_form_at_end` False, kaya walang ibang form na naaapektuhan.
+- Hindi na ni-hit ang "Close Form" sa gitna ng batch. Ang loader ng susunod
+  na patient ang nagsasara ng lumang form (ito na ang dati), kaya walang
+  nawawalang orasat at waling double close.
+- Ang `_bottom_most_button` ay nagta-tie-break sa document order, kaya ang
+  isang "OK" lang ay exactly ang dating behavior - walang regression sa
+  build na iisang OK lang ang meron.
+- Pareho pa rin: ang bawat sagot ay may verify-after (dismiss ng dialog o
+  throw), at hindi nag-a-activate ang run notifier.
+
+### Verification
+- python -m py_compile core/agent/final_bill_actions.py
+  core/agent/orchestrator.py -- OK.
+- python -m pytest tests/test_agent_final_bill.py -q -- 56 passed.
+- python -m pytest tests/ -q -- 368 passed, 7 subtests passed (15.88s).
+- Live run: kailangan pa ng pag-verify sa isang patient na ang sequence ay
+  open_final_bill -> check_final_box -> click_ok -> (file_save ->
+  save_click_ok | confirm -> answer_confirm_tab) -> done, at sa HULING
+  patient lamang ang close_form.
+
+---
+
+## 2026-09-28 - Option (a) for problem rows: run continues, failures NAMED at the end
+
+### Operator decision
+Q: a blocked/failed patient mid-batch should (a) continue and be listed at the
+end, (b) notify on every failure, or (c) both? **Answer: (a)** - keep going and
+list the failures when the run ends. The taskbar notification still fires at the
+end (that was a separate earlier request), but it must not turn into a per-patient
+alarm that interrupts the run.
+
+### What was wrong
+`RunReport` only carried COUNTS (`BLOCKED 2 | FAILED 1`). A count does not tell
+the operator *who* still needs a manual Final Bill, and the counts are printed in
+the log, not in the notification - so the notification could not name anyone
+without opening the JSON by hand.
+
+### Changes
+`core/agent/orchestrator.py`
+- `PROBLEM_OUTCOMES = (OUTCOME_BLOCKED, OUTCOME_FAILED)` - one place that defines
+  "a row the operator must still finish by hand".
+- `RunReport.problem_rows()` - the blocked/failed rows in run order.
+- `RunReport.problem_lines()` - one numbered log line per problem row
+  (`1. HOSPITAL NO | PATIENT - reason`), ready to print at the end.
+- End-of-run summary now prints the count *and* names every problem row, so a
+  plain log tail is enough to find them.
+- The run summary JSON gained `problem_count` and a `problems` array
+  (hospital no + patient + status + reason) for the report tab.
+
+`gui/agent_plan_tab.py`
+- `_run_finished()` logs each problem row by name, not just a count.
+- The end-of-run notification says "Tapos na ang run, pero N patient ang hindi
+  na-finalize" when there are problem rows, and names them.
+- A `messagebox.showwarning` lists the skipped patients at the end. It is shown
+  once, after the run, and it takes no input the agent sends - the HBSys
+  keystrokes for the Final Bill flow are finished by that point.
+
+`tests/test_agent_orchestrator.py` - 6 new tests: problem rows are ordered by run
+order, only BLOCKED/FAILED count (SKIPPED/DONE do not), the lines are numbered
+and carry the reason, the JSON carries the problems array, and a clean run has an
+empty problem list.
+`tests/test_gui_agent_plan.py` - new tests: problem rows are logged by name, the
+notification reports the skipped count, and a clean run raises no warning dialog.
+
+### Safety notes
+- The end-of-run warning dialog is a GUI window. It is raised only AFTER the last
+  patient finished, so it can never swallow a keystroke the Final Bill flow still
+  needs. The taskbar/toast notifier never takes the foreground at all
+  (see `gui/run_notifier.py`) precisely so it cannot become the click target.
+- A problem row still never stops the run (unchanged) - the operator rule "skip
+  and go to the next patient" was already the behaviour; only the reporting is
+  new.
+
+### Files affected
+- `core/agent/orchestrator.py`
+- `gui/agent_plan_tab.py`
+- `tests/test_agent_orchestrator.py`
+- `tests/test_gui_agent_plan.py`
+
+### Verification
+- `python -m pytest tests/ -q` -> **376 passed, 7 subtests** (16.88s)
+
+---
+
+## 2026-09-28 - "File save" OK click: use the BOTTOM-most OK, not the first OK
+
+### Problem
+The operator answered: *"pag nagpakita kasi ang File save, click OK dapat yung OK
+sa **baba** ng file save."* The prompt carries more than one button captioned
+`OK`; the old `answer_dialog_ok()` took the **first** matching control, which is
+not the one in the button row at the bottom of the dialog. A bare caption match
+is therefore ambiguous and unsafe here.
+
+### Change
+`answer_dialog_ok()` (and its new public wrapper `answer_file_save_prompt()`) now
+resolves the target button in three ordered passes and takes the first that
+yields a clickable control:
+
+1. **Bottom-most by control id** - every visible/enabled `OK` / `&OK` / `Save` /
+   `&Save` control is collected and `_bottom_most_button()` returns the one with
+   the greatest `top` (i.e. the lowest on screen). Ties keep document order, so a
+   prompt with a single `OK` behaves exactly as before - no regression.
+2. **Caption match inside the dialog's own bottom band** - used when the
+   control-id pass finds nothing: the lowest `BUTTON_ROW_...` band of the dialog
+   is searched for a button.
+3. **Geometry fallback** - clicks inside the dialog's own bottom button row
+   (`_bottom_row_control`) by rectangle, so a build that renumbers ids and
+   re-captions buttons is still driven deterministically.
+
+The chosen control is reported with its rectangle in the log, so a run report
+shows exactly which OK was clicked instead of only that "something was clicked".
+
+### Safety notes
+- Still a **mouse click on a resolved control** - no TAB, no ENTER, no blind
+  coordinate click from a screenshot.
+- The dialog is raised to the foreground before the click, so the click cannot
+  land on the claims GUI that is on top.
+- If no OK can be resolved the function raises with a readable reason rather
+  than clicking an arbitrary point; the row is then reported as not finalized.
+- The verify step (prompt must disappear) is unchanged.
+
+### Files affected
+- `core/agent/final_bill_actions.py`
+- `tests/test_agent_final_bill.py`
+
+### Verification
+- `python -m pytest tests/ -q` -> **383 passed, 7 subtests** (18.06s)
+
+
+## 2026-10-05 - Final Bill: wala nang Close Form click (before at after ng bawat pasyente)
+
+### Reason
+Ang operator ay nag-utos na huwag nang i-click ang **Close Form** sa Final Bill
+flow — hindi lang sa dulo ng isang pasyente, kundi pati sa paglipat ng pasyente
+sa pasyente. Bago ang change, bagama't tinanggal na ang Close Form *step* sa
+`FinalBillRunner` (2026-10-02), may isa pang aktibong tawag dito:
+`load_patient_by_hospital_no()` ang nagtatawag ng `close_billing_form()` para
+isara ang "stale" Billing form ng naunang pasyente bago mag-type ng bagong
+Hospital No. Tinatanggal na ito para walang anumang automated path na
+nagta-tap sa Close Form toolbar slot (548, 97).
+
+### Files affected
+- `core/agent/final_bill_actions.py`
+- `core/agent/orchestrator.py`
+- `tests/test_agent_final_bill.py`
+
+### Behavior (before -> after)
+- `load_patient_by_hospital_no()`: kung may bukas na `Billing (...)` form, ang
+  loader ay tumatawag ng `close_billing_form()`; kapag hindi na-close ang form
+  ay `return False` (BLOCK ang row).
+  -> **After**: hindi na tumatawag ng close. Ang leftover form ay iniiwang BUKAS
+  at **hinahanap sa log** (`load: leftover Billing form(s) left OPEN (Close Form
+  is never clicked): ...`), saka tuloy ang double-click + CTRL+A + type + ENTER.
+- Verification (hindi nagbago): kailangan pa ring mag-appear ang isang
+  `Billing (...)` form na **hindi** bukas bago ang load; kung wala, `False` ang
+  load at BLOCKED ang row (kasama ang `diagnose_screen()` na nag-ta-name ng mga
+  forms/windows na nasa screen).
+- `clear_blocking_popups()`: **hindi nagbago** — ginagawa pa rin ang pag-close ng
+  leftover "Admission History" popup at ang "Rate validation" dialog, dahil ang
+  mga ito ay kumakain ng click/typing (hindi na Close Form ang dahilan).
+- `close_billing_form()` / `click_close_form()` / `CLOSE_FORM_POINT`: nananatili
+  (para sa `_probe_live.py`, manual recovery, at sa unit tests) pero na-tag
+  bilang **MANUAL PROBE ONLY**; walang automated code path ang tumatawag sa kanila.
+
+### Safety notes
+- **Walang automated Close Form click** — pati na ang loader sa pagitan ng
+  pasyenteng pasyente.
+- Hindi na tinatamaan ang HBSys/MySQL; read-only pa rin.
+- Parameter na `close_stale_form=True` ay **panatilihin** sa signature para sa
+  backward compatibility, pero sinadya nang **hindi ginagamit** (wala nang
+  automated close na pwedeng i-on).
+- Validation (isang bagong `Billing (...)` form na "hindi bukas bago") ang
+  nagre-guard ng tamang pasyente kapag hindi na nagsasara ang form — hindi na
+  ang pag-close.
+- Iba pa rito ang Close Form ng **PhilHealth Beneficiaries / Claim Form 2** sa
+  `date_fill_hbsys/hbsys_fill_dates.py` — hindi ginalaw iyon.
+
+### Verification
+- `python -m py_compile core/agent/final_bill_actions.py core/agent/orchestrator.py tests/test_agent_final_bill.py` -> OK
+- `python -m unittest tests.test_agent_final_bill` -> **85 tests, OK**
+- `python -m unittest tests.test_agent_orchestrator` -> **76 tests, OK**
+- Bagong regression test `test_load_never_clicks_close_form` (tests/test_agent_final_bill.py):
+  kinukumpirma na hindi tumatawag ang loader ng `close_billing_form()` /
+  `click_close_form()`, at nasa log ang leftover form ("left OPEN").
+- Hindi pa live-run sa HBSys — kailangan ng operator ang actual run para sa
+  multi-patient batch.
+## 2026-10-05 (follow-up) - Alisin ang lahat ng Close Form / stale-form na bakas sa BLOCKED
+
+### Reason
+Pagkatapos tanggalin ang Close Form click mismo, nanatili pa ring bakas ng dating
+ugali ang mga log/docstring na nagsasabing "close ang stale form" o "Close Form is
+never clicked". Ayon sa operator, **wala nang Close Form** — dapat malinis na lang
+ang mga leftover na ito para hindi magmukhang may close pa rin ang system.
+
+### Files affected
+- `core/agent/final_bill_actions.py`
+- `core/agent/orchestrator.py`
+- `tests/test_agent_final_bill.py`
+- `tests/test_agent_orchestrator.py`
+
+### Behavior (before -> after)
+Walang pagbabago sa anumang click o guard — **documentation at log lines lamang**
+ang inalis, at isang test fixture na napapanahang lumabas na hindi na nagta-close.
+
+- `orchestrator._default_final_bill()`: may `stale` list na naghahanap ng Billing
+  form ng ibang pasyente at naglalagay ng log na *"a previous patient's Billing
+  form is still open ... Close Form is never clicked"*.
+  -> **After**: tatanggalin ang buong `stale` block at ang log (wala nang sayson
+  para sa "stale" — hindi pa naman ito ang dahilan ng load).
+- `orchestrator.run_approved_plan()`: log na *"form stays open after OK/No ...
+  (no Close Form, before or after)"* -> **After**: iniwan lang ang *"form stays
+  open after OK/No - the next selected patient's loader types the Hospital No."*
+- `load_patient_by_hospital_no()`: log na *"leftover Billing form(s) left OPEN
+  (Close Form is never clicked)"* -> **After**: tatanggalin. `forms_before` ay
+  nananatili dahil **ito ang basehan ng verification** (kailangang may bagong
+  `Billing (...)` form na hindi bukas bago).
+- Docstrings (module header, `CLOSE_FORM_POINT`, `close_billing_form()`,
+  `billing_form_titles()`, `FinalBillRunner.__init__`, orchestrator header at
+  `_default_final_bill()`): lahat ng "2026-10-05: never clicks Close Form" na
+  paulit-ulit ay pinapasimpliwan na "probe / manual-recovery only".
+- `tests/test_agent_orchestrator.py` — `FakeBillingSession`: ang `loader()` ay
+  **nagta-close ng dating Billing form** at ang `runner()` ay nagtatangki ng
+  Close Form bago magbukas ng susunod na pasyente (parang 2026-09-26 pa).
+  -> **After**: `loader()` ay nagta-type lang (HBSys ang nagsa-retitle ng form)
+  at ini-record sa `replaced`; `runner()` ay iniiwang bukas ang form.
+  Na-update ang tatlong test (`..._form_stays_open`, `..._retyped_not_closed`,
+  `test_batch_runs_two_final_bill_rows_in_one_session`) at idinagdag ang
+  assertion na walang nang-close (`runner_closes == []`, `stale_closes == []`).
+
+### Safety notes
+- **Walang ibang BLOCKED ang tinanggal.** Nananatili ang mga tunay na guard:
+  HBSys closed, ibang pasyenteng Billing form, Print Options na hindi natatapos,
+  OK na walang prompt, at hindi magagana ang Hospital No. load.
+- **Walang behavioral change** sa mga click — ang tinitest ay pareho pa rin:
+  walang automated Close Form click kahit kailanman.
+- Ang `close_billing_form()` / `click_close_form()` ay nananatili para sa
+  `_probe_live.py` (manual) at sa sarili nilang unit tests.
+- Hindi pa live-run sa HBSys.
+
+### Verification
+- `python -m py_compile core/agent/final_bill_actions.py core/agent/orchestrator.py tests/test_agent_final_bill.py` -> OK
+- `python -m pytest tests/ -q` -> **499 passed, 7 subtests** (46.96s)

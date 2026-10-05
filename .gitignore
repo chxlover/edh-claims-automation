@@ -128,3 +128,12 @@ Desktop.ini
 # Agent skills (external tool, has own git repo)
 .agents/
 promt.txt
+
+# ---------- Local scratch / probe output (never committed) ----------
+tmp_*.txt
+_phase*.txt
+_t?.txt
+_*.png
+*_current.png
+*_proof.png
+debug_*.png

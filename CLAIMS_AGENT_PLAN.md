@@ -142,70 +142,134 @@ The Agent must be able to determine the required HBSys state and navigate to it.
 
 # 5. HBSys STATE CONTROLLER
 
-This is the FIRST development milestone.
+This is the FIRST development milestone (Phase 1).
 
-Create an independent module:
+Create independent modules:
 
+core/agent/hbsys_states.py
 core/agent/hbsys_state_controller.py
 
 The purpose is to abstract HBSys navigation away from the individual tools.
 
 The Agent should think in terms of STATES, not raw coordinates.
 
-Initial target states:
+## 5.1 STATE MODEL (fine-grained, includes intermediate and blocker screens)
 
+Navigation in HBSys is NOT single-click: Date Fill passes through several buttons
+before the hospital number can be typed, and the XML generators pass through
+intermediate screens before CF4/CF5/eSOA can be processed. The state model must
+therefore include intermediate screens and known blocker/detour screens.
+
+Destination states:
+
+MAIN_WINDOW (safe base; Hospital No. field visible)
 HOSPITAL_NUMBER_ENTRY
+PHIC_BENEFICIARIES
+CF2_FORM
 CF4_XML
 CF5_XML
 ESOA_XML
 
-Later states may include:
+Intermediate states:
 
-ADMISSION_HISTORY
-CF2
-PHIC_BENEFICIARIES
+ADMISSION_HISTORY (popup after "Admit History" click)
+PHIC_BENEFICIARIES_CF4TAB (Beneficiaries opened on the Claim Form 4 tab)
 
-The controller should provide concepts equivalent to:
+Blocker / detour states (must be cleared before continuing):
 
-detect_current_state()
+SELECT_ENCOUNTER (stale popup)
+MODAL_DIALOG (#32770 dialogs)
+PHIC_DETAILS (child window opened by a wrong toolbar click)
+NO_HBSYS
+UNKNOWN
 
-go_to(state)
+Every state must define evidence markers used to recognize it, in preferred order:
 
-verify_state(state)
-
-The exact implementation must use the existing HBSys automation/inspection mechanisms already present in the project.
-
-Do not blindly click based on coordinates if a reliable UI element/state detection method is available.
-
-Preferred order:
-
-1. Direct UI automation / control detection
-2. Existing inspection mechanisms
+1. Window title / class (fast, reliable)
+2. Control text via pywinauto / existing inspection mechanisms
 3. Coordinate automation only when necessary
 4. OCR/pixel detection as fallback
 
-Every navigation action should be verified.
+## 5.2 NAVIGATION GRAPH (multi-step paths, per-step verification)
 
-Example:
+The controller must provide concepts equivalent to:
 
-Agent needs CF4 XML
+detect_current_state()
+go_to(state)
+verify_state(state)
 
-→ State Controller navigates to CF4 XML
-→ verify CF4 XML screen
-→ only then execute CF4 XML generator
+go_to(state) is a STATE MACHINE, not a click table:
+
+1. detect_current_state()
+2. resolve the path from current state to target state
+3. for each step in the path: ACT -> VERIFY the expected intermediate state
+4. PASS -> next step; FAIL -> stop immediately, apply detour rule or raise
+   NavigationError (never blind-continue)
+
+Paths are modeled after the proven flows already present in the tools:
+
+HOSPITAL_NUMBER_ENTRY:
+  focus MAIN_WINDOW -> double-click Hospital No. field -> type HN -> Enter
+  -> verify patient loaded
+
+CF4_XML / CF5_XML / ESOA_XML:
+  clear blockers (Select Encounter, dialogs) -> focus HBSys
+  -> click generator menu point -> wait for generator window
+  -> verify window title contains the generator label
+
+## 5.3 DETOUR RULES (deterministic handling of intermediate buttons/popups)
+
+Known detours are adapted from the existing proven logic in
+date_fill_hbsys/hbsys_fill_dates.py and date_fill_hbsys/xml_generator_clicker.py,
+so the controller becomes the single source of truth for them:
+
+Stale Select Encounter popup -> close it -> retry action
+Beneficiaries opened on Claim Form 4 tab (Cancel visible) -> click Cancel
+  -> verify the regular Beneficiaries grid
+PHIC Details child window opened by mistake -> Ctrl+F4 -> verify closed
+Blocking #32770 dialog -> dismiss -> verify
+Unknown / unexpected screen -> DO NOT guess -> NavigationError -> RECOVERY / REVIEW
+
+## 5.4 SAFE RESET
+
+The controller must be able to return to MAIN_WINDOW from any known state
+(generalization of the existing reset_to_safe_start):
+
+close dialogs -> close Admission History -> close CF2 -> close Beneficiaries
+-> verify MAIN_WINDOW evidence (e.g. "HOSPITAL NO" marker visible)
+
+Used between patients (clean start) and after any mid-path failure before
+recovery or review handoff.
+
+## 5.5 PHASE 1 BOUNDARIES
+
+In scope:
+
+- detect_current_state() with layered evidence
+- go_to(state) with multi-step verified paths
+- verify_state(state)
+- detour rules and safe reset
+- centralized coordinates as the single source for all HBSys automation
+
+Out of scope (later phases):
+
+- typing hospital numbers, selecting admission rows, generating XML
+  (existing tools keep those responsibilities until Phase 2 wiring)
+
+## 5.6 NAVIGATION DISCIPLINE
 
 Never:
 
-click → assume correct → continue
+click -> assume correct -> continue
 
 Instead:
 
 ACTION
-↓
+v
 VERIFY
-↓
-PASS → CONTINUE
-FAIL → RECOVERY / REVIEW
+v
+PASS -> CONTINUE
+FAIL -> RECOVERY / REVIEW
 
 ---
 

@@ -4,21 +4,26 @@ import argparse
 import csv
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import pyautogui
+from PIL import Image
 from pywinauto import Desktop
 
 from hbsys_read_admission_history import (
+    ConfinementRow,
     DATE_RE,
     OcrItem,
     find_admission_history_window,
     parse_rows_with_positions,
+    read_focused_admission_row_variants,
     read_ocr_item_variants,
     read_ocr_items,
+    select_confinement_row,
 )
 from hbsys_date_fill_precheck import (
     PRECHECK_PROCESS,
@@ -34,8 +39,27 @@ from hbsys_ready_claims import (
 )
 from hbsys_window import find_hbsys_window
 
+# 2026-09-28: foreground guard for the BLIND pyautogui input
+# (core/agent/window_guard.py). The project root is APPENDED, not prepended,
+# so this tool's sibling modules keep import priority. The import is optional
+# on purpose: without it the tool behaves exactly as it did before.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+try:
+    from core.agent.window_guard import guard_input as _guard_input
+except Exception:  # noqa: BLE001 - the guard is diagnostics only
+    _guard_input = None
+
 
 LOG_DIR = Path("logs")
+
+# How long select_admission_history_row waits for the Admission History popup
+# to consume the double-click. The popup closes on a successful pick; while it
+# stays open the confinement was never loaded and the next step (PHIC) would
+# run on the wrong screen — seen live 2026-09-26/28 as the double-click
+# landing on the toolbar and every later step reading the wrong screen.
+ADMIT_HISTORY_CLOSE_TIMEOUT = 3.0
 
 
 @dataclass(frozen=True)
@@ -76,41 +100,81 @@ class HbsysOperator:
         self.confirm_each = confirm_each
         self.hbsys_window = None
         self.screen_stage = "base"
+        self._expected_admission_grid = ""
+        self._expected_discharge_grid = ""
+        self._admission_history_image_path = None
+        self._admission_history_window = None
+        self._admission_history_item_passes: list = []
 
     def log_action(self, message: str) -> None:
         prefix = "LIVE" if self.live else "DRY"
         print(f"[{prefix}] {message}")
 
+    def guard_blind_input(self, action: str) -> bool:
+        """Check the foreground window before sending blind input.
+
+        2026-09-28: pyautogui sends clicks/keys to WHATEVER window has focus,
+        so when HBSys is not focused (or is hung - seen live 2026-09-26 as
+        "focus HBSys window: '... (Not Responding)'") the input lands on
+        another application, e.g. the EDH Claims GUI. Default mode WARNS
+        through log_action and then proceeds (behavior unchanged); set
+        CLAIMS_AGENT_FOCUS_GUARD=block to refuse the input instead.
+
+        Fail-open: any guard problem returns True, so this check can never
+        stop a production run.
+        """
+        if _guard_input is None:
+            return True
+        try:
+            return bool(_guard_input(action, log_fn=self.log_action))
+        except Exception:  # noqa: BLE001 - never break a run
+            return True
+
     def maybe_wait(self) -> None:
         time.sleep(self.pause)
 
     def click(self, point: Point, label: str) -> None:
-        self.log_action(f"click {label} at ({point.x}, {point.y})")
+        action = f"click {label} at ({point.x}, {point.y})"
+        self.log_action(action)
         if self.live:
+            if not self.guard_blind_input(action):
+                return
             pyautogui.click(point.x, point.y)
         self.maybe_wait()
 
     def double_click(self, point: Point, label: str) -> None:
-        self.log_action(f"double-click {label} at ({point.x}, {point.y})")
+        action = f"double-click {label} at ({point.x}, {point.y})"
+        self.log_action(action)
         if self.live:
+            if not self.guard_blind_input(action):
+                return
             pyautogui.doubleClick(point.x, point.y)
         self.maybe_wait()
 
     def press(self, key: str) -> None:
-        self.log_action(f"press {key}")
+        action = f"press {key}"
+        self.log_action(action)
         if self.live:
+            if not self.guard_blind_input(action):
+                return
             pyautogui.press(key)
         self.maybe_wait()
 
     def hotkey(self, *keys: str) -> None:
-        self.log_action(f"hotkey {'+'.join(keys)}")
+        action = f"hotkey {'+'.join(keys)}"
+        self.log_action(action)
         if self.live:
+            if not self.guard_blind_input(action):
+                return
             pyautogui.hotkey(*keys)
         self.maybe_wait()
 
     def write(self, text: str) -> None:
-        self.log_action(f"type {text!r}")
+        action = f"type {text!r}"
+        self.log_action(action)
         if self.live:
+            if not self.guard_blind_input(action):
+                return
             pyautogui.write(text, interval=0.01)
         self.maybe_wait()
 
@@ -172,6 +236,44 @@ class HbsysOperator:
         self.log_action(f"no PHIC save message detected after {context}")
         return False
 
+    def dismiss_rate_validation_message(self, timeout: float = 2.5) -> bool:
+        """Dismiss only the known informational dialog after encounter selection.
+
+        HBSys pops a "Rate validation" dialog carrying "Rates no longer exist"
+        when a confinement row is chosen. It is informational: the encounter
+        loads fine once OK is pressed. An *unknown* "Rate validation" dialog is
+        left alone (returns False) so a real rate error stops the run for
+        review instead of being silently dismissed.
+        """
+        if not self.live:
+            return True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for window in Desktop(backend="win32").windows():
+                try:
+                    if window.window_text().strip() != "Rate validation":
+                        continue
+                    text_blob = " ".join(
+                        child.window_text() for child in window.descendants()
+                    )
+                except Exception:
+                    continue
+                if "Rates no longer exist" not in text_blob:
+                    self.log_action(
+                        f"unknown Rate validation dialog was not dismissed: {text_blob!r}"
+                    )
+                    return False
+                self.log_action("dismiss known Rate validation information dialog")
+                try:
+                    window.set_focus()
+                    window.child_window(title="OK", class_name="Button").click()
+                except Exception:
+                    self.press("enter")
+                sleep_short(0.4)
+                return True
+            time.sleep(0.1)
+        return True
+
     def verify_screen_layout(self) -> None:
         width, height = pyautogui.size()
         self.log_action(f"screen size detected: {width}x{height}")
@@ -188,78 +290,143 @@ class HbsysOperator:
         sleep_short(1.5)
 
     def select_admission_history_row(self, claim: ReadyClaim) -> bool:
+        """Click Admit History, then double-click the row for this admission.
+
+        Shared recipe with the Final Bill agent (select_confinement_row from
+        hbsys_read_admission_history): exact folder-to-grid matching first,
+        then OCR-tolerant fuzzy matching, and nothing else guesses — a
+        mismatch stops for review. The grid dates stay in MM/DD/YYYY shape
+        after comparing raw values still OCR-misread (``O1/0l/2026`` etc.),
+        so dates are compared by canonical key, not raw string equality.
+        """
+        self._expected_admission_grid = claim.admission_grid
+        self._expected_discharge_grid = claim.discharge_grid
+        picked = select_confinement_row(
+            open_popup_fn=self._open_admission_history,
+            live=self.live,
+            log_fn=self.log_action,
+            wait_fn=sleep_short,
+            read_rows_fn=self._read_confinement_rows,
+            double_click_fn=self._double_click_row,
+            rate_dialog_fn=self.dismiss_rate_validation_message,
+            expected_admission=claim.admission_grid,
+            expected_discharge=claim.discharge_grid,
+            fuzzy_rows_fn=self._read_fuzzy_confinement_row,
+            on_selected_row_fn=self._set_form_stage_base,
+            context="Date Fill",
+        )
+        if not picked:
+            return False
+        if not self._wait_admission_history_closed():
+            self.log_action(
+                "Admission History popup is still open after selecting the "
+                "row; the confinement was not loaded — stopping for review"
+            )
+            return False
+        return True
+
+    def _wait_admission_history_closed(self) -> bool:
+        """The popup must consume the pick before the next step may run.
+
+        Without this check a double-click that misses the row (wrong
+        coordinates, lost focus) leaves the popup open and every later step
+        silently operates on the wrong screen instead of stopping.
+        """
+        deadline = time.time() + ADMIT_HISTORY_CLOSE_TIMEOUT
+        while time.time() < deadline:
+            if find_admission_history_window() is None:
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _set_form_stage_base(self) -> None:
+        self.screen_stage = "base"
+
+    def _open_admission_history(self, purpose: str):
+        """Click the toolbar slot, or return the open popup when verifying."""
+        if purpose == "verify open":
+            return find_admission_history_window()
         self.click(P.ADMIT_HISTORY, "Admit History")
         self.screen_stage = "admission_popup"
         sleep_short(0.8)
+        return None
 
-        if not self.live:
-            self.log_action(
-                "would OCR Admission History and select row matching "
-                f"{claim.admission_grid} - {claim.discharge_grid}"
-            )
-            return True
+    def _read_confinement_rows(self, window) -> list:
+        """Admission History rows from EVERY OCR pass, merged.
 
-        window = find_admission_history_window()
-        if window is None:
-            raise RuntimeError("Admission History popup did not open.")
-
+        Copied from the proven Date Fill ABTC/Regular tool: full-window
+        variants plus focused per-row crops, so one weak pass cannot hide
+        the row the folder needs (live 2026-09-26: the single best pass read
+        only the OPD row and stopped the claim). Raw grid strings ride along
+        untouched for the shared exact/fuzzy matcher.
+        """
         image_path = self.capture_window(window, "admission_history_select")
-        rows = parse_rows_with_positions(read_ocr_items(image_path))
-        for parsed in rows:
-            row = parsed.row
-            if (
-                row.admission_date == claim.admission_grid
-                and row.discharge_date == claim.discharge_grid
-            ):
-                rect = window.rectangle()
-                click_x = rect.left + 72
-                click_y = rect.top + int(parsed.y)
-                self.log_action(
-                    "select exact Admission History row "
-                    f"{claim.admission_grid}-{claim.discharge_grid} "
-                    f"at ({click_x}, {click_y})"
-                )
-                pyautogui.doubleClick(click_x, click_y)
-                sleep_short(0.8)
-                self.screen_stage = "base"
-                return True
+        self._admission_history_image_path = image_path
+        self._admission_history_window = window
+        variants = list(read_ocr_item_variants(image_path))
+        focused = read_focused_admission_row_variants(image_path)
+        if focused:
+            self.log_action(
+                f"Admission History added {len(focused)} focused row OCR passes"
+            )
+        self._admission_history_item_passes = variants + focused
+        parsed_rows = self._merge_parsed_rows(self._admission_history_item_passes)
+        return [self._confinement_row(window, parsed) for parsed in parsed_rows]
 
+    @staticmethod
+    def _merge_parsed_rows(item_passes: list) -> list:
+        """Every distinct grid row any OCR pass parsed (first pass wins)."""
+        merged: list = []
+        seen: set = set()
+        for items in item_passes:
+            for parsed in parse_rows_with_positions(items):
+                key = (parsed.row.admission_date, parsed.row.discharge_date)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(parsed)
+        return merged
+
+    def _confinement_row(self, window, parsed):
+        """One shared ConfinementRow for the exact and fuzzy passes.
+
+        BOTH coordinates are screen-absolute: x from the window's left edge,
+        y from the window's top edge — the same ``rect.top + row_y`` the
+        proven Date Fill ABTC/Regular tool clicks. Without the top offset the
+        double-click landed on the toolbar above the popup (live 2026-09-26/28:
+        click at y=98 while the row sat at y=218), the popup never closed,
+        and every later step ran on the wrong screen.
+        """
+        rect = window.rectangle()
+        point = (rect.left + 72, rect.top + int(parsed.y))
+        return ConfinementRow(
+            admission_grid=parsed.row.admission_date,
+            discharge_grid=parsed.row.discharge_date,
+            point=point,
+            encounter_type=parsed.row.normalized_encounter_type,
+        )
+
+    def _read_fuzzy_confinement_row(self):
+        """Re-score the OCR-tolerant row over every pass of the grid image.
+
+        The repaired single best pass runs first (its date-cell re-read
+        rescues smeared dates like ``09/2212026``), then the same merged
+        variants/focused passes the exact match used.
+        """
+        item_passes = [read_ocr_items(self._admission_history_image_path)]
+        item_passes.extend(self._admission_history_item_passes)
+        parsed_rows = self._merge_parsed_rows(item_passes)
         fuzzy = self.best_fuzzy_admission_history_row(
-            rows,
-            claim.admission_grid,
-            claim.discharge_grid,
+            parsed_rows,
+            self._expected_admission_grid,
+            self._expected_discharge_grid,
         )
-        if fuzzy is not None:
-            rect = window.rectangle()
-            click_x = rect.left + 72
-            click_y = rect.top + int(fuzzy.y)
-            self.log_action(
-                "select OCR-tolerant Admission History row "
-                f"{fuzzy.row.admission_date}-{fuzzy.row.discharge_date} "
-                f"for folder {claim.admission_grid}-{claim.discharge_grid} "
-                f"at ({click_x}, {click_y})"
-            )
-            pyautogui.doubleClick(click_x, click_y)
-            sleep_short(0.8)
-            self.screen_stage = "base"
-            return True
+        if fuzzy is None:
+            return None
+        return self._confinement_row(self._admission_history_window, fuzzy)
 
-        if len(rows) == 1:
-            parsed = rows[0]
-            row = parsed.row
-            self.log_action(
-                "Only one Admission History row was detected, but it did not "
-                "safely match the folder admission/discharge dates: "
-                f"HBSys OCR {row.admission_date}-{row.discharge_date}, "
-                f"folder {claim.admission_grid}-{claim.discharge_grid}. Stopping."
-            )
-            return False
-
-        self.log_action(
-            "matching Admission History row not found for "
-            f"{claim.admission_grid}-{claim.discharge_grid}; stopping for review"
-        )
-        return False
+    def _double_click_row(self, click_x: int, click_y: int) -> None:
+        self.double_click(Point(click_x, click_y), "Admission History row")
 
     def best_fuzzy_admission_history_row(self, rows, admission_date, discharge_date):
         scored = []
@@ -306,6 +473,14 @@ class HbsysOperator:
         return path
 
     def click_phic_and_select_claim(self, claim: ReadyClaim) -> bool:
+        """Single-click the beneficiary row and PROVE it got highlighted.
+
+        Copied from the proven Date Fill ABTC/Regular tool: click inside the
+        row (x=260, retry x=520), recapture, and only accept the pick when the
+        same row OCRs back as the Windows blue selected row. The old blind
+        single click at x=46 sent no proof, so a miss either stopped for
+        review on the wrong screen or silently carried the fill onward.
+        """
         self.click(P.PHIC, "PHIC")
         self.screen_stage = "beneficiary"
         sleep_short(1.0)
@@ -327,6 +502,7 @@ class HbsysOperator:
             claim.admission_grid,
             claim.discharge_grid,
             claim.patient_name,
+            minimum_consensus=2,
         )
         if row_y is None:
             self.log_action(
@@ -335,15 +511,43 @@ class HbsysOperator:
             return False
 
         rect = self.hbsys_window.rectangle()
-        click_x = rect.left + 46
-        click_y = rect.top + int(row_y)
+        click_y = rect.top + int(round(row_y))
+        for attempt, x_offset in enumerate((260, 520), start=1):
+            click_x = rect.left + x_offset
+            self.click(
+                Point(click_x, click_y),
+                f"PhilHealth Beneficiaries row {claim.admission_grid}-"
+                f"{claim.discharge_grid} attempt {attempt}",
+            )
+            sleep_short(0.6)
+            proof_path = self.capture_window(
+                self.hbsys_window,
+                f"phic_beneficiaries_selected_proof_{attempt}",
+            )
+            proof_y = self.find_phic_beneficiary_row_y_from_variants(
+                read_ocr_item_variants(proof_path),
+                claim.admission_grid,
+                claim.discharge_grid,
+                claim.patient_name,
+                minimum_consensus=2,
+            )
+            if proof_y is not None and self.is_blue_highlighted_row(
+                proof_path, proof_y
+            ):
+                self.log_action(
+                    "PhilHealth Beneficiaries row highlighted and verified "
+                    f"on attempt {attempt}"
+                )
+                return True
+            self.log_action(
+                f"PhilHealth Beneficiaries attempt {attempt}: clicked row is "
+                "not the highlighted match"
+            )
         self.log_action(
-            "select PhilHealth Beneficiaries row "
-            f"{claim.admission_grid}-{claim.discharge_grid} at ({click_x}, {click_y})"
+            "PhilHealth Beneficiaries row never highlighted as selected; "
+            "stopping for review"
         )
-        pyautogui.click(click_x, click_y)
-        sleep_short(0.5)
-        return True
+        return False
 
     def find_phic_beneficiary_row_y_from_variants(
         self,
@@ -351,6 +555,7 @@ class HbsysOperator:
         admission_date: str,
         discharge_date: str,
         patient_name: str = "",
+        minimum_consensus: int = 1,
     ) -> float | None:
         """Select a PHIC row using all OCR passes and row-position consensus."""
         row_matches: list[float] = []
@@ -385,6 +590,12 @@ class HbsysOperator:
 
         clusters.sort(key=lambda cluster: (-len(cluster), sum(cluster) / len(cluster)))
         best_cluster = clusters[0]
+        if len(best_cluster) < minimum_consensus:
+            self.log_action(
+                "PHIC OCR did not reach the required row-position consensus: "
+                f"{len(best_cluster)}/{minimum_consensus} pass(es)"
+            )
+            return None
         if len(clusters) > 1 and len(best_cluster) == len(clusters[1]):
             self.log_action(
                 "PHIC OCR variants matched different rows with equal confidence; "
@@ -489,7 +700,11 @@ class HbsysOperator:
         scored.sort(key=lambda item: (-item[0], item[1]))
         best_score, best_y, best_text = scored[0]
         second_score = scored[1][0] if len(scored) > 1 else -1
-        if best_score == 0 or best_score == second_score:
+        # Copied from the proven Date Fill ABTC/Regular tool: one matching
+        # name token is not proof when several rows share the confinement.
+        required_name_tokens = min(2, len(name_tokens))
+
+        if best_score < required_name_tokens or best_score == second_score:
             self.log_action(
                 "multiple PHIC rows share same confinement but name match is ambiguous"
             )
@@ -501,6 +716,27 @@ class HbsysOperator:
             f"selected duplicate confinement by patient name score={best_score}: {best_text!r}"
         )
         return best_y
+
+    @staticmethod
+    def is_blue_highlighted_row(image_path: Path, row_y: float) -> bool:
+        """Confirm that the exact OCR row is the Windows blue selected row.
+
+        Copied from the proven Date Fill ABTC/Regular tool: the click alone
+        proves nothing, only the highlighted row does.
+        """
+        with Image.open(image_path).convert("RGB") as image:
+            y1 = max(0, int(row_y) - 7)
+            y2 = min(image.height, int(row_y) + 8)
+            x2 = min(image.width, 1580)
+            pixels = list(image.crop((5, y1, x2, y2)).getdata())
+        if not pixels:
+            return False
+        blue_pixels = sum(
+            1
+            for red, green, blue in pixels
+            if blue >= 120 and blue > red * 1.25 and blue > green * 1.15
+        )
+        return blue_pixels / len(pixels) >= 0.08
 
     @staticmethod
     def normalize_for_name_match(value: str) -> str:
@@ -717,6 +953,12 @@ class HbsysOperator:
                     pyautogui.press("esc")
                 sleep_short(0.5)
 
+            if not self.dismiss_rate_validation_message(timeout=1.5):
+                self.log_action(
+                    "safe reset stopped: unknown Rate validation dialog is open"
+                )
+                return False
+
             if self.screen_stage == "cf2":
                 self.click(P.CLOSE_FORM_CF2, "Close Claim Form 2 after failure")
                 self.screen_stage = "beneficiary"
@@ -843,6 +1085,10 @@ def build_cross_check_fields(claim: ReadyClaim) -> dict[str, str]:
 
 
 def open_run_log(path: Path) -> None:
+    if os.environ.get("CLAIMS_AGENT_QUIET") == "1":
+        # Slice E Claims Agent: never open the CSV from an unattended run.
+        print(f"Run log: {path.resolve()}")
+        return
     try:
         os.startfile(path.resolve())  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - opening CSV is convenience only.
@@ -851,6 +1097,11 @@ def open_run_log(path: Path) -> None:
 
 def show_popup(title: str, message: str, *, error: bool = False) -> None:
     """Show a small topmost Windows popup for important Date Fill status."""
+    if os.environ.get("CLAIMS_AGENT_QUIET") == "1":
+        # Slice E Claims Agent runs the tool unattended: print instead of
+        # opening a modal dialog. Env unset = existing behavior, unchanged.
+        print(f"[POPUP] {title}: {message}")
+        return
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -1013,6 +1264,26 @@ def main() -> int:
     ]
     if failed_rows:
         failed = failed_rows[-1]
+        stop_reason = describe_stop_status(failed.get("status", ""))
+        # One machine-readable line so the agent's run report says WHERE it
+        # stopped (which patient, which stage, why, and where the evidence is)
+        # instead of the first 500 characters of stdout.
+        print(
+            "[STOP] "
+            f"patient={failed.get('patient_name', '')} | "
+            f"hospital_no={failed.get('hospital_no', '')} | "
+            f"expected ADM {failed.get('admission', '')} - "
+            f"DIS {failed.get('discharge', '')} | "
+            f"status={failed.get('status', '')} | "
+            f"reason={' '.join(stop_reason.split())} | "
+            f"screen_stage={operator.screen_stage} | "
+            f"safe_reset={failed.get('safe_reset_confirmed', '') or 'not reached'} | "
+            f"csv={log_path.resolve()}"
+        )
+        for image in sorted(
+            LOG_DIR.glob("*.png"), key=lambda item: item.stat().st_mtime
+        )[-3:]:
+            print(f"[EVIDENCE] screenshot {image.resolve()}")
         stop_message = (
             "Date Fill stopped before completion.\n\n"
             f"Patient: {failed.get('patient_name', '')}\n"

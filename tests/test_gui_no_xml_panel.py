@@ -12,19 +12,44 @@ Run from the project root:
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
 import tkinter as tk
 import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import edh_claims_gui_XML_COPY_BUTTON as gui_module  # noqa: E402
+from core import diagnostics  # noqa: E402
 from gui.add_claims_upload_tab import AddClaimsUploadFrame  # noqa: E402
 from gui.claim_attachments_tab import ClaimAttachmentsFrame  # noqa: E402
+
+_DIAG_LOGS = None
+
+
+def setUpModule():
+    """Point core.diagnostics at a temp folder (2026-09-28).
+
+    EDHClaimsGUI.__init__ installs the crash/lifecycle logging; without the
+    redirect every GUI test run would append START/EXIT lines to the real
+    logs/gui_lifecycle.log.
+    """
+    global _DIAG_LOGS
+    diagnostics.reset_for_tests()
+    _DIAG_LOGS = mkdtemp(prefix="edh_gui_test_diag_")
+    os.environ["CLAIMS_DIAG_LOG_DIR"] = _DIAG_LOGS
+
+
+def tearDownModule():
+    os.environ.pop("CLAIMS_DIAG_LOG_DIR", None)
+    diagnostics.reset_for_tests()  # closes the open gui_crash.log stream
+    if _DIAG_LOGS:
+        shutil.rmtree(_DIAG_LOGS, ignore_errors=True)
 
 
 def button_state(button) -> str:

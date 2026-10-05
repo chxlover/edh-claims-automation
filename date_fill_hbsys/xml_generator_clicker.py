@@ -37,6 +37,14 @@ from hbsys_read_admission_history import (  # noqa: E402
 from hbsys_ready_claims import DEFAULT_READY_DIR, ReadyClaim, load_ready_claims  # noqa: E402
 from hbsys_window import is_hbsys_window, window_title  # noqa: E402
 
+# 2026-09-28: foreground guard for the BLIND pyautogui input
+# (core/agent/window_guard.py); optional on purpose - without it the tool
+# behaves exactly as it did before.
+try:
+    from core.agent.window_guard import guard_input as _guard_input  # noqa: E402
+except Exception:  # noqa: BLE001 - the guard is diagnostics only
+    _guard_input = None
+
 
 LOG_DIR = Path("logs")
 FTPURL_DIR = Path(r"C:\Shared Folder\FTPURL")
@@ -143,30 +151,58 @@ class XmlGeneratorOperator:
         prefix = "LIVE" if self.live else "DRY"
         print(f"[{prefix}] {message}")
 
+    def guard_blind_input(self, action: str) -> bool:
+        """Check the foreground window before sending blind input.
+
+        2026-09-28: pyautogui sends clicks/keys to WHATEVER window has focus,
+        so when HBSys is not focused the input lands on another application,
+        e.g. the EDH Claims GUI. Default mode WARNS through log_action and
+        then proceeds (behavior unchanged); set CLAIMS_AGENT_FOCUS_GUARD=block
+        to refuse the input instead. Fail-open: guard problems return True.
+        """
+        if _guard_input is None:
+            return True
+        try:
+            return bool(_guard_input(action, log_fn=self.log_action))
+        except Exception:  # noqa: BLE001 - never break a run
+            return True
+
     def maybe_wait(self) -> None:
         time.sleep(self.pause)
 
     def click(self, point: Point, label: str) -> None:
-        self.log_action(f"click {label} at ({point.x}, {point.y})")
+        action = f"click {label} at ({point.x}, {point.y})"
+        self.log_action(action)
         if self.live:
+            if not self.guard_blind_input(action):
+                return
             pyautogui.click(point.x, point.y)
         self.maybe_wait()
 
     def double_click(self, point: Point, label: str) -> None:
-        self.log_action(f"double-click {label} at ({point.x}, {point.y})")
+        action = f"double-click {label} at ({point.x}, {point.y})"
+        self.log_action(action)
         if self.live:
+            if not self.guard_blind_input(action):
+                return
             pyautogui.doubleClick(point.x, point.y)
         self.maybe_wait()
 
     def press(self, key: str) -> None:
-        self.log_action(f"press {key}")
+        action = f"press {key}"
+        self.log_action(action)
         if self.live:
+            if not self.guard_blind_input(action):
+                return
             pyautogui.press(key)
         self.maybe_wait()
 
     def hotkey(self, *keys: str) -> None:
-        self.log_action(f"hotkey {'+'.join(keys)}")
+        action = f"hotkey {'+'.join(keys)}"
+        self.log_action(action)
         if self.live:
+            if not self.guard_blind_input(action):
+                return
             pyautogui.hotkey(*keys)
         self.maybe_wait()
 
@@ -828,6 +864,10 @@ def write_run_log(rows: list[dict[str, str]]) -> Path:
 
 
 def open_run_log(path: Path) -> None:
+    if os.environ.get("CLAIMS_AGENT_QUIET") == "1":
+        # Slice E Claims Agent: never open the CSV from an unattended run.
+        print(f"Run log: {path.resolve()}")
+        return
     try:
         os.startfile(path.resolve())  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - opening CSV is convenience only.
@@ -835,6 +875,11 @@ def open_run_log(path: Path) -> None:
 
 
 def show_completion_popup(message: str) -> None:
+    if os.environ.get("CLAIMS_AGENT_QUIET") == "1":
+        # Slice E Claims Agent runs this tool unattended: print instead of
+        # a modal MessageBox. Env unset = existing behavior, unchanged.
+        print(f"[POPUP] XML Generator Clicker: {message}")
+        return
     try:
         ctypes.windll.user32.MessageBoxW(  # type: ignore[attr-defined]
             0,

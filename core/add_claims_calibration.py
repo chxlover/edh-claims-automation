@@ -50,7 +50,7 @@ class CalibratedPoints:
     # Upload Claims popup (LOCAL coordinates relative to popup window origin)
     search_box: tuple[int, int] = (562, 271)
     search_button: tuple[int, int] = (1392, 269)
-    grid_checkbox_x: int = 10
+    grid_checkbox_x: int = 37
     add_button: tuple[int, int] = (972, 477)
     ok_button: tuple[int, int] = (554, 376)
 
