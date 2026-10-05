@@ -7231,6 +7231,50 @@ ang inalis, at isang test fixture na napapanahang lumabas na hindi na nagta-clos
   Close Form bago magbukas ng susunod na pasyente (parang 2026-09-26 pa).
   -> **After**: `loader()` ay nagta-type lang (HBSys ang nagsa-retitle ng form)
   at ini-record sa `replaced`; `runner()` ay iniiwang bukas ang form.
+### 2026-10-05 - Pag-publish sa GitHub (`07552c4`) + `.gitignore` scratch rules
+
+### Reason
+Una naming i-push sa `origin/main` ang lahat ng natapos na work (Close Form
+removal, Final Bill agent, plan GUI, tests). Bago mag-push, nilinis ang mga
+dumi at ang bagong maaaring patient identifier.
+
+### Files affected
+- `.gitignore`
+- `CHANGE_RULES.md` (redaction ng mga bagong entry lamang)
+
+### Behavior
+- `.gitignore` (+`Local scratch/probe output` section): `tmp_*.txt`,
+  `_phase*.txt`, `_t?.txt`, `_*.png`, `*_current.png`, `*_proof.png`,
+  `debug_*.png`. -> **After**: hindi na na-`git add -A` ang mga probe/OCR dump
+  at debug screenshot ng session (nasa disk pa rin, wala lang sa repo).
+  May kaunting sagot: hindi rin kasama ang `docs/conversation_handover*`
+  (naglalaman ng pangalan + HRN ng pasyente) - nananatiling local.
+- Redaction sa mga **bagong** entry/pakali lamang (ang mga nakaraang entry na
+  naka-commit na ay hindi hinawakan):
+  - `CHANGE_RULES.md` 2026-10-02 entry: `COLLANTES, RYAN JAMES CAWILE -
+    000000000021853` -> `pasyente #21853`; `COLLANTES BLOCKED case` ->
+    `BLOCKED case`; `live COLLANTES scenario` -> `live BLOCKED scenario`.
+  - `CHANGE_RULES.md` (ibang bagong linya): `TOLENTINO 000000000014140` ->
+    `<isang pasyente>`; `PERA, JEANNY JACOBEN 000000000021537` ->
+    `<isang pasyente>`; `hospital no field: 000000000021748` -> `<HRN>`.
+  - `core/agent/final_bill_actions.py:310`, `tests/test_agent_final_bill.py:187`,
+    `tests/test_agent_hbsys_screens.py:184`: `(COLLANTES)` -> `(patient #21853)`.
+
+### Safety notes
+- Walang source code na binago sa bahaging ito - pawang comment, dokumento,
+  at ignore rules lamang.
+- Ang mga test fixture na pangalan (`SANTOS, MARIA`, `DELA CRUZ, JUAN`) ay
+  **hindi tunay** at hindi binago.
+- Secret scan sa lahat ng staged `.py` bago mag-push: wala. Ang `.gitignore`
+  ay nagtatago na ng `db_connection_config.json` at `hbsys_bot.py`.
+- Hindi kasama sa commit ang `docs/` (patient-identifying handover dump).
+
+### Verification
+- `python -m unittest tests.test_agent_final_bill tests.test_agent_hbsys_screens`
+  -> 107 tests OK (pagkatapos ng redaction edits)
+- `git rev-parse HEAD origin/main` -> pareho ang `07552c4d0b17b3e6bf09a8fc2e9f848515d3f71d`
+- `git push origin main --porcelain` -> `Done`, `up to date`
+
   Na-update ang tatlong test (`..._form_stays_open`, `..._retyped_not_closed`,
   `test_batch_runs_two_final_bill_rows_in_one_session`) at idinagdag ang
   assertion na walang nang-close (`runner_closes == []`, `stale_closes == []`).
