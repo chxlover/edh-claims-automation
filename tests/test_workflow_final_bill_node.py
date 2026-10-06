@@ -286,6 +286,41 @@ class ExitCodeTests(unittest.TestCase):
         finally:
             tmp.cleanup()
 
+    def test_system_exit_does_not_halt_the_batch(self):
+        # A SystemExit (e.g. a step calling sys.exit() on a confinement mismatch)
+        # must NOT halt the --live batch: it becomes a FAILED row and the NEXT
+        # patient still runs. Modeled on
+        # test_one_blocked_of_three_exits_one_and_skips_its_marker.
+        tmp, root = make_root(FOLDER_B, FOLDER_JUAN)
+        try:
+            with mock.patch.object(
+                runner,
+                "run_patient",
+                side_effect=[
+                    SystemExit("confinement mismatch: ADM-DIS not selectable"),
+                    ("OK", "done"),
+                ],
+            ):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = runner.main(["--live", "--output-root", str(root)])
+            self.assertEqual(
+                code, runner.EXIT_NOT_OK,
+                "a FAILED row still stops the chain (fail-safe exit 1)",
+            )
+            self.assertFalse(
+                runner.marker_path(root / FOLDER_B).exists(),
+                "SystemExit must NOT produce an OK marker (next run retries it)",
+            )
+            self.assertTrue(
+                runner.marker_path(root / FOLDER_JUAN).exists(),
+                "the patient AFTER a SystemExit must still run (continue-on-error)",
+            )
+            # The full traceback reaches stdout so the exact mismatch is visible.
+            self.assertIn("Traceback", out.getvalue())
+        finally:
+            tmp.cleanup()
+
     def test_all_marked_is_nothing_to_do_exit_zero(self):
         tmp, root = make_root(FOLDER_JUAN)
         try:

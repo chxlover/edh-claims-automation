@@ -39,6 +39,75 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-10-06 - Fix: Final Bill batch continues to next patient on ANY error (incl. SystemExit) + traceback logging
+
+Reason:
+
+Live Final Bill runs halted mid-batch when a per-patient step raised or called
+`sys.exit()` (e.g. a confinement mismatch surfacing as a `SystemExit`, or any
+non-`Exception` escape). `except Exception` does not catch `SystemExit`, so the
+first such patient aborted the whole batch and later patients never ran. There
+was also no traceback, so an operator could not see which patient/value
+mismatch caused the halt.
+
+Files modified:
+
+- core/agent/orchestrator.py
+  - added `import traceback`;
+  - `run_approved_plan()`: broadened the per-row guard `except Exception` ->
+    `except (Exception, SystemExit)`; the full `traceback.format_exc()` is now
+    logged via `log_fn` (run log + agent_run_*.json audit trail) so the exact
+    offending patient/value is diagnosable; the row still becomes
+    `OUTCOME_FAILED` (NOT BLOCKED) and the batch continues to the next row.
+- core/agent/final_bill_runner.py
+  - added `import traceback`;
+  - `main()` LIVE loop: broadened `except Exception` -> `except (Exception,
+    SystemExit)` and logs `traceback.format_exc()`; a `SystemExit`/raising step
+    becomes a `FAILED` row (no `.final_bill_ok` marker -> retried next run)
+    instead of killing the `--live` batch. The pre-existing
+    `except KeyboardInterrupt` above it still aborts cleanly for the operator.
+- tests/test_workflow_final_bill_node.py (+1 test)
+  - ExitCodeTests.test_system_exit_does_not_halt_the_batch: the patient AFTER a
+    SystemExit still runs, no OK marker is written, and a traceback reaches stdout.
+- tests/test_agent_orchestrator.py (+1 test)
+  - DispatchTests.test_system_exit_marks_failed_and_batch_continues: a SystemExit
+    executor becomes FAILED and the next row still runs + traceback reaches the run log.
+
+Behavior:
+
+- Before: a `SystemExit` (or any non-`Exception` escape) from one patient's step
+  killed the entire Final Bill batch; later patients were skipped; no traceback.
+- After: every per-patient Exception/SystemExit is caught, logged with a full
+  traceback, recorded as a FAILED row, and the batch continues to the next
+  patient. `KeyboardInterrupt` still stops the batch only on operator request.
+  Confinement mismatches that produce evidence + `picked=None` still route to
+  BLOCKED (unchanged) - this hardens only the ERROR path.
+
+Safety / compatibility:
+
+- No change to OCR, signing, XML generation, HBSys coordinates, or the existing
+  BLOCKED review-queue routing (H001-H010 unchanged).
+- `run_approved_plan` executor injection surface (fn(hosp, folder) -> (status,
+  detail)) is unchanged; existing callers/tests keep working.
+- `KeyboardInterrupt` is still NOT caught by the broadened guard (handled first
+  in final_bill_runner.main), so operator abort stays intact.
+- New behaviour affects only the ERROR path; OK / BLOCKED / SKIPPED rows are
+  byte-for-byte unchanged.
+
+Verification:
+
+- `python -W error::SyntaxWarning -m py_compile` on orchestrator.py,
+  final_bill_runner.py, and both edited test files: OK.
+- `import core.agent.orchestrator, core.agent.final_bill_runner`: OK.
+- Curated agent-core regression (7 modules, headless): 297/297 OK, including the
+  two new SystemExit tests and existing continue-on-error siblings
+  (test_executor_exception_marks_failed_and_batch_continues,
+  test_final_bill_runner_failure_maps_to_failed,
+  test_date_fill_tool_failure_passes_through).
+- Note: the full ~580-test discovery suite could not be run in this sandbox
+  (30s per-command timeout); the 7 agent-core modules most affected by this
+  change were run green instead.
+
 ### 2026-10-02 - Fix: Final Bill post-OK prompt detection (Print Options stays open behind File save / Call Administrator)
 
 Reason:

@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -222,7 +223,16 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             log("[LIVE] stopped by operator — finished folders stay marked, rest retried next run")
             return EXIT_NOT_OK
-        except Exception as exc:  # noqa: BLE001 — one patient must not kill the batch
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — one patient must not kill the batch
+            # SystemExit may come from a step that calls sys.exit()/raises
+            # SystemExit (e.g. a confinement-mismatch surfacing via HBSys).
+            # Log the full traceback so the exact mismatch is visible, then
+            # continue to the NEXT patient instead of killing the whole
+            # --live batch. (KeyboardInterrupt is handled above -> operator abort.)
+            log(
+                f"ERROR in {folder.name} ({type(exc).__name__}): {exc}\n"
+                f"{traceback.format_exc()}"
+            )
             status, detail = OUTCOME_FAILED, f"runner raised {type(exc).__name__}: {exc}"
 
         if status == OUTCOME_OK:

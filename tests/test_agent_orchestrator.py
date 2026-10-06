@@ -410,6 +410,29 @@ class DispatchTests(unittest.TestCase):
         self.assertIn("RuntimeError: boom", report.outcomes[0].detail)
         self.assertEqual(len(executors.calls), 2)
 
+    def test_system_exit_marks_failed_and_batch_continues(self):
+        # A SystemExit (e.g. a step calling sys.exit()/raising SystemExit on a
+        # confinement mismatch) must NOT halt the Agent Plan: it becomes a
+        # FAILED row and the next item still runs. Mirrors
+        # test_executor_exception_marks_failed_and_batch_continues, but for the
+        # BaseException-escape that `except Exception` previously let through.
+        executors = RecordingExecutors()
+        executors.raise_on[actions.ACTION_DATE_FILL] = SystemExit("stop the batch")
+        items = [
+            make_item(actions.ACTION_DATE_FILL),
+            make_item(actions.ACTION_XML_CLICKER),
+        ]
+        report, executors, logs = self.run_plan(items, executors)
+
+        self.assertEqual(
+            [outcome.status for outcome in report.outcomes],
+            [orchestrator.OUTCOME_FAILED, orchestrator.OUTCOME_OK],
+        )
+        self.assertIn("SystemExit: stop the batch", report.outcomes[0].detail)
+        self.assertEqual(len(executors.calls), 2, "SystemExit must not halt the batch")
+        # The full traceback reaches the run log so the exact mismatch is visible.
+        self.assertIn("Traceback", "\n".join(logs))
+
     def test_executor_blocked_result_passes_through(self):
         executors = RecordingExecutors()
         executors.results[actions.ACTION_XML_CLICKER] = (

@@ -45,6 +45,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -956,7 +957,14 @@ def run_approved_plan(
                         "selected patient's loader types the Hospital No."
                     )
                 status, detail = executors[action](hospital_no, folder)
-            except Exception as exc:  # noqa: BLE001 - report, keep going
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 - report, keep going
+                # Full traceback so a confinement-mismatch / sys.exit() that
+                # escapes a step is diagnosable in the run log (the one-liner
+                # below still travels to agent_run_*.json as the row detail).
+                log(
+                    f"ERROR in {action} for {outcome.patient_folder} "
+                    f"({type(exc).__name__}): {exc}\n{traceback.format_exc()}"
+                )
                 status, detail = OUTCOME_FAILED, f"{type(exc).__name__}: {exc}"
             outcome.status = (
                 status
