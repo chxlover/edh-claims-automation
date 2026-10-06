@@ -1211,6 +1211,108 @@ class PatientLookupTests(unittest.TestCase):
         self.assertTrue(loaded)
         closer.assert_not_called()
         clicker.assert_not_called()
+        closer.assert_not_called()
+        clicker.assert_not_called()
+
+    # -- Slice H: relink verification ------------------------------------
+
+    def _run_load(self, forms_sequence, **kwargs):
+        """Drive the loader with a scripted list_open_forms sequence."""
+        calls = {"n": 0}
+
+        def fake_forms():
+            calls["n"] += 1
+            index = min(calls["n"] - 1, len(forms_sequence) - 1)
+            return list(forms_sequence[index])
+
+        patches = [
+            mock.patch.object(fb, "list_open_forms", side_effect=fake_forms),
+            mock.patch.object(fb, "find_hbsys_main", return_value=object()),
+            mock.patch.object(fb, "raise_to_top", return_value=True),
+            mock.patch.object(fb, "clear_blocking_popups", return_value=True),
+            mock.patch.object(fb, "hospital_no_click_point", return_value=(166, 174)),
+            mock.patch.object(fb, "hospital_no_field_text", return_value="000000000123456"),
+            mock.patch.object(fb, "close_billing_form"),
+            mock.patch.object(fb, "click_close_form"),
+            mock.patch.object(fb, "diagnose_screen", return_value=""),
+            mock.patch("pywinauto.mouse.double_click"),
+            mock.patch("pywinauto.keyboard.send_keys"),
+        ]
+        for patch in patches:
+            patch.start()
+        try:
+            return fb.load_patient_by_hospital_no("000000000123456", **kwargs)
+        finally:
+            for patch in reversed(patches):
+                patch.stop()
+
+    def test_new_form_mode_still_refuses_when_no_window_appears(self):
+        """Regression: the default mode is unchanged - only a NEW form counts."""
+        self.assertFalse(self._run_load([["User Menu"]], timeout=0.4))
+
+    def test_relink_mode_accepts_the_already_open_form_of_this_patient(self):
+        # Re-typing the same Hospital No. can REFRESH the same window instead of
+        # opening a second one. That is still a correct load, and in "new_form"
+        # mode it would time out and block a row that is actually fine.
+        notes = []
+        loaded = self._run_load(
+            [["Billing (SANTOS, MARIA )"], ["Billing (SANTOS, MARIA )"]],
+            timeout=0.4,
+            verify_mode=fb.LOAD_VERIFY_RELINK,
+            expect_title="Billing (SANTOS, MARIA)",
+            log_fn=notes.append,
+        )
+        self.assertTrue(loaded)
+        self.assertTrue(any("relink" in line for line in notes))
+
+    def test_relink_mode_refuses_a_form_belonging_to_another_patient(self):
+        # Safety net: another patient's window never satisfies this mode.
+        self.assertFalse(
+            self._run_load(
+                [["Billing (VALENTINO, NIKKI)"], ["Billing (VALENTINO, NIKKI)"]],
+                timeout=0.4,
+                verify_mode=fb.LOAD_VERIFY_RELINK,
+                expect_title="Billing (SANTOS, MARIA)",
+            )
+        )
+
+    def test_relink_mode_refuses_when_another_form_is_open_beside_it(self):
+        # Two windows open and only one is this patient = ambiguous, block.
+        self.assertFalse(
+            self._run_load(
+                [
+                    ["Billing (SANTOS, MARIA )", "Billing (VALENTINO, NIKKI)"],
+                    ["Billing (SANTOS, MARIA )", "Billing (VALENTINO, NIKKI)"],
+                ],
+                timeout=0.4,
+                verify_mode=fb.LOAD_VERIFY_RELINK,
+                expect_title="Billing (SANTOS, MARIA)",
+            )
+        )
+
+    def test_relink_matches_the_title_with_the_trailing_space(self):
+        # HBSys titles the missing-middle-name form "Billing (SANTOS, MARIA )".
+        loaded = self._run_load(
+            [
+                ["Billing (SANTOS, MARIA )"],
+                ["Billing (SANTOS, MARIA )"],
+            ],
+            timeout=0.4,
+            verify_mode=fb.LOAD_VERIFY_RELINK,
+            expect_title="Billing (SANTOS, MARIA )",
+        )
+        self.assertTrue(loaded)
+
+    def test_relink_mode_without_expect_title_falls_back_to_new_form(self):
+        # No title to match: never guess, wait for a genuinely new window.
+        self.assertFalse(
+            self._run_load(
+                [["Billing (SANTOS, MARIA )"], ["Billing (SANTOS, MARIA )"]],
+                timeout=0.4,
+                verify_mode=fb.LOAD_VERIFY_RELINK,
+                expect_title="",
+            )
+        )
 
     def test_guarded_close_refuses_when_no_billing_form_is_open(self):
         # The shared toolbar band is live on the main screen too; with no

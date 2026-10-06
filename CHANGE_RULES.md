@@ -7292,3 +7292,122 @@ dumi at ang bagong maaaring patient identifier.
 ### Verification
 - `python -m py_compile core/agent/final_bill_actions.py core/agent/orchestrator.py tests/test_agent_final_bill.py` -> OK
 - `python -m pytest tests/ -q` -> **499 passed, 7 subtests** (46.96s)
+
+## 2026-10-06 - Workflow Tab: `final_bill` node (folder contract, Option B)
+
+**Layunin:** idagdag ang Final Bill bilang workflow step (bago mag-Date Fill)
+gamit ang **folder contract** -- ibig sabihin, ang Hospital No. ay galing sa
+**output folder name** (`NAME - HPERCODE - ADM..._DIS...`), hindi sa plan row.
+Ang UI automation ay ang pareho nang verified `_default_final_bill` ng Agent
+Plan -- walang duplicate logic.
+
+### Files
+
+- **NEW** `core/agent/final_bill_runner.py` -- CLI runner:
+  `--live / --output-root / --limit / --force`. Nag-i-iterate ng output
+  folders (sorted ascending = patient grouping), parse via
+  `core.add_claims_uploader.parse_folder_name`, nag-skip ng may
+  `.final_bill_ok` marker maliban kung `--force`. DRY mode (default): nag-i-list
+  lang, exit 0, WALANG pywinauto import. LIVE: `default_final_bill(folder,
+  hospital_no, log, timeout)` kada pasyente, marker isinusulat LANG kapag OK,
+  continue-on-error sa batch, exit 1 kapag may BLOCKED/FAILED (engine humihinto
+  sa chain -- fail-safe, opt-out ang `continue_on_fail`).
+- **`core/agent/orchestrator.py`** -- 1 line: `default_final_bill =
+  _default_final_bill` alias (iisang implementation).
+- **`core/workflow_registry.py`** -- `NodeSpec(key="final_bill", category="HBSys",
+  module="core.agent.final_bill_runner", live_args=("--live",), hbsys_touching=True,
+  supports_dry=True)`; self-test 12->13 + hbsys/dry/entry-point sets updated.
+- **`core/workflow_engine.py`** -- default order: `final_bill` sa position 2
+  (bago `date_fill_regular`); self-test 8->9 nodes / 7->8 connections / n1->n9.
+- **`gui/workflow_tab.py`** -- asserts 8->9 (9->10 add, 8->9 delete/restore);
+  `move_node(1)` expectation = `final_bill`.
+- **NEW** `tests/test_workflow_final_bill_node.py` -- 23 tests
+  (Registry/Default/Folders/Marker/Dry/Exit/Limit/Env/Engine).
+
+### Behavior
+
+- **Before:** wala pang Final Bill step -- Date Fill agad pagkatapos ng Claims
+  Processor kahit hindi pa finalized ang bill.
+- **After:** default workflow = 9 nodes; Final Bill bago Date Fill
+  (Slice H rule: FINAL BILL bago DATE FILL). Lumang 8-node `workflow_config.json`
+  ay naglo-load pa rin -- rollback-safe; bagong node sa **Restore Default**.
+- Marker resumable: OK folders ay hindi ulit; BLOCKED/FAILED walang marker ->
+  retry; `--force` para sa deliberate re-run.
+
+### Safety notes
+
+- **`workflow_config.json` ay HINDI ginalaw** -- naglo-load pa rin ang lumang
+  8-node config. Ang `gui/workflow_tab.py` self-test ay nag-o-overwrite +
+  nag-delete nito (`save_config` + `finally: unlink`); PINATAKBO ito nang may
+  backup/restore -- hash-verified na naibalik nang buo.
+- `print()` sa runner ay SADYA: stdout = log channel ng subprocess node
+  (ini-stream ng `ScriptNodeAdapter`). Walang ActivityLogger (no SQLite
+  double-write); `flush=True` bawat linya.
+- Marker `.final_bill_ok` = JSON (hospital_no, outcome, detail, at) -- dotfile;
+  hindi nakokosas sa `.pdf`/`.xml` suffix filters ng claims_checker/fees_checker/
+  xml_auto_copy.
+- Exit 1 sa: BLOCKED/FAILED, hindi mahanap na output root, marker write failure,
+  operator interrupt. HBSys gate ay nag-skip kapag sarado -- hindi nag-click nang
+  walang window.
+- Hindi pa live-validated ang `relink` double-reload check; gumagamit ng default
+  (`always_reload=False`); ang loader ay tumatakbo bawat pasyente dahil magkaiba
+  ang bukas na form (verified ng `final_bill_block_reason`).
+
+### Pre-existing: Date Fill / XML Clicker sibling-import launch fix
+
+- **Problem (pre-existing):** `Date Fill (REGULAR|ABTC)` at `XML Clicker` ->
+  `ModuleNotFoundError: No module named 'hbsys_read_admission_history_testing'`.
+  HINDI dahil sa `final_bill` -- pareho ito sa lumang default (node ay HINDI
+  pa sinusubukan bago dumating dito).
+- **Root cause:** `date_fill_hbsys/hbsys_fill_dates_testing.py` (l. 16) at
+  `xml_generator_clicker.py` (l. 28-38) gumagamit ng bare sibling imports.
+  `ScriptNodeAdapter` (`core/workflow_adapters.py:183`) ay `python -m
+  <package.module>` with `cwd=PROJECT_ROOT`, kaya `date_fill_hbsys/` WALANG
+  entry sa `sys.path`. (`core/workflow_adapters.py` mula sa commit `7d5840e`;
+  HINDI tinouch ng Slice-H session.)
+- **Reference (existing launchers):** `date_fill_hbsys_launcher.py:47` at
+  `xml_generator_clicker_launcher.py:24` gumagamit ng `cwd=tool.parent`
+  (= `date_fill_hbsys/`), kung saan gumagana ang bare imports.
+- **Fix (registry-only, 3 lines):** idinagdag sa `NodeSpec` ng
+  `date_fill_regular`, `date_fill_abtc`, `xml_clicker` ang
+  `extra_env={"PYTHONPATH": "date_fill_hbsys"}` (`build_env()` sa
+  `core/workflow_adapters.py:134` = `env.update(spec.extra_env)`). `PYTHONPATH`
+  ay `None` sa env (verified), walang clobber; kwarg-order-free (dataclass).
+- **Verification:** `import date_fill_hbsys.hbsys_fill_dates_testing` +
+  `...xml_generator_clicker` -> IMPORT OK (nakaraan na l. 16) with
+  `PYTHONPATH=date_fill_hbsys`. (HINDI pina-run ang dry `main`: walang HBSys
+  dito -> engine gate i-skip; may unguarded `pyautogui.size()` sa dry.)
+- **Safety:** registry data lamang; walang launcher/module/adapter code change;
+  `python -m` + `cwd=PROJECT_ROOT` di nagbago; dry = log-only (clicks guarded
+  `if self.live:`).
+
+
+### Verification (2026-10-06 entry)
+
+- `python -m py_compile` (lahat ng 6 files) -- COMPILE CLEAN.
+- `python -m core.workflow_registry` -- PASSED (13 entries; `final_bill`
+  entry point on disk verified).
+- `python -m core.workflow_engine` -- PASSED (default 9 nodes, 8 chained
+  connections n1->n9; HBSys gate skips UI node when HBSys closed).
+- `python -m core.agent.final_bill_runner` (DRY, real `output\`) -- 4 patient
+  folder(s) na-parse, `[DRY] ... would run Final Bill`, exit 0, WALANG
+  `.final_bill_ok`, WALANG pywinauto import.
+- `python -m core.agent.final_bill_runner --help` (dry smoke) -- PASSED.
+- `python -m core.agent.final_bill_runner` (live, no HBSys) -- BLOCKED correctly
+  (`hbsys_not_found`), exit 1.
+- date_fill import fix: `import date_fill_hbsys.hbsys_fill_dates_testing`,
+  `...xml_generator_clicker` -> IMPORT OK (ModuleNotFoundError resolved).
+- `python -m unittest discover -s tests -p "test_workflow*.py"` -- 23/23 OK.
+- `python -m gui.workflow_tab` -- PASSED (echo e2e COMPLETED; backup/restore
+  ng workflow_config.json hash-verified).
+- `python -m unittest discover -s tests -p "test_*.py"` -- 580 tests OK
+  (557 baseline + 23; re-run AFTER date_fill env fix -> 580 OK, walang regression).
+
+NOTE (2026-10-06): ang CHANGELOG ay may nangyaring truncation accident habang
+ini-append ang entry na ito (isang `find()`-based script ay sumunod sa maagang
+`### Verification` header). Naayos ang committed history via `git checkout`;
+ang huling hindi na-commit na `plan_steps` demo entry (session-start na file na
+nagwawakas sa "...Standalone smoke test ng module.") ay NA-LARGE -- HINDI ito
+narating ng `git checkout` (wala sa anumang commit, wala sa stash). Kailangan
+ng may-ari na muling-idagdag mula sa sarili, kung kailangan pa. Ang entry na
+ito (2026-10-06) ay naka-append nang buo at rollback-safe.

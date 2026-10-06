@@ -33,6 +33,7 @@ from core.agent import orchestrator  # noqa: E402
 FOLDER = "DELA CRUZ, JUAN - 123456789012345 - ADM20260901_DIS20260903"
 OTHER_FOLDER = "SANTOS, MARIA - 000000000021401 - ADM20260906_DIS20260912"
 BAD_FOLDER = "NOT A PATIENT FOLDER"
+THIRD_FOLDER = "DELA CRUZ, PEDRO - 123456789012346 - ADM20260906_DIS20260912"
 
 
 # -- test hygiene (2026-09-28) -------------------------------------------------
@@ -186,6 +187,13 @@ class DispatchTests(unittest.TestCase):
         return report, executors, logs
 
     def test_rows_run_in_plan_order(self):
+        """Slice H: rows of the SAME patient are grouped, FINAL BILL first.
+
+        The raw plan had xml_clicker(OTHER) before final_bill(OTHER) because
+        both landed in the same folder. Ordering is what the operator asked
+        for on 2026-10-05: a patient's FINAL BILL runs before anything else
+        for that patient. Pass order_steps=False for the old raw plan order.
+        """
         items = [
             make_item(actions.ACTION_XML_CLICKER, folder=OTHER_FOLDER),
             make_item(actions.ACTION_DATE_FILL),
@@ -196,19 +204,142 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(
             [call[0] for call in executors.calls],
             [
+                actions.ACTION_FINAL_BILL,
                 actions.ACTION_XML_CLICKER,
                 actions.ACTION_DATE_FILL,
-                actions.ACTION_FINAL_BILL,
             ],
         )
+        # Each row still used ITS OWN patient's hospital number.
         self.assertEqual(
             [call[1] for call in executors.calls],
-            ["000000000021401", "123456789012345", "000000000021401"],
+            ["000000000021401", "000000000021401", "123456789012345"],
+        )
+        self.assertEqual(
+            [outcome.action for outcome in report.outcomes],
+            [
+                actions.ACTION_FINAL_BILL,
+                actions.ACTION_XML_CLICKER,
+                actions.ACTION_DATE_FILL,
+            ],
         )
         self.assertEqual(
             [outcome.status for outcome in report.outcomes],
             [orchestrator.OUTCOME_OK] * 3,
         )
+
+    def test_order_steps_false_keeps_the_raw_plan_order(self):
+        items = [
+            make_item(actions.ACTION_XML_CLICKER, folder=OTHER_FOLDER),
+            make_item(actions.ACTION_DATE_FILL),
+            make_item(actions.ACTION_FINAL_BILL, folder=OTHER_FOLDER),
+        ]
+        _report, executors, _logs = self.run_plan(items, order_steps=False)
+        self.assertEqual(
+            [call[0] for call in executors.calls],
+            [
+                actions.ACTION_XML_CLICKER,
+                actions.ACTION_DATE_FILL,
+                actions.ACTION_FINAL_BILL,
+            ],
+        )
+
+    def test_one_step_per_patient_keeps_the_plan_order(self):
+        """Regression: three DIFFERENT patients — nothing to regroup."""
+        items = [
+            make_item(actions.ACTION_DATE_FILL, folder=OTHER_FOLDER),
+            make_item(actions.ACTION_XML_CLICKER, folder=THIRD_FOLDER),
+            make_item(actions.ACTION_DATE_FILL),
+        ]
+        _report, executors, _logs = self.run_plan(items)
+        self.assertEqual(
+            [call[0] for call in executors.calls],
+            [
+                actions.ACTION_DATE_FILL,
+                actions.ACTION_XML_CLICKER,
+                actions.ACTION_DATE_FILL,
+            ],
+        )
+
+    def test_date_fill_runs_even_when_final_bill_blocked(self):
+        """The operator's decision 2026-10-05: the Hospital No. is the reference.
+
+        DATE FILL must NOT be skipped when the FINAL BILL step of the same
+        patient blocks or fails — a note is logged instead, and the row still
+        runs. The precondition is ORDER (FINAL BILL first), not a gate.
+        """
+        executors = RecordingExecutors()
+        executors.results[actions.ACTION_FINAL_BILL] = (
+            orchestrator.OUTCOME_BLOCKED,
+            "no Billing form open",
+        )
+        items = [
+            make_item(actions.ACTION_FINAL_BILL),
+            make_item(actions.ACTION_DATE_FILL),
+        ]
+        report, executors, logs = self.run_plan(items, executors)
+
+        self.assertEqual(
+            [call[0] for call in executors.calls],
+            [actions.ACTION_FINAL_BILL, actions.ACTION_DATE_FILL],
+        )
+        self.assertEqual(
+            [outcome.status for outcome in report.outcomes],
+            [orchestrator.OUTCOME_BLOCKED, orchestrator.OUTCOME_OK],
+        )
+        # The operator is told out loud why Date Fill still ran.
+        notes = [line for line in logs if "note:" in line]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("FINAL BILL", notes[0])
+
+    def test_no_note_when_date_fill_is_the_only_step_of_its_patient(self):
+        """Normal case: Final Bill finished in a past run → nothing to say."""
+        items = [
+            make_item(actions.ACTION_FINAL_BILL, folder=OTHER_FOLDER),
+            make_item(actions.ACTION_DATE_FILL),
+        ]
+        _report, _executors, logs = self.run_plan(items)
+        self.assertEqual([line for line in logs if "note:" in line], [])
+
+    def test_final_bill_step_never_gets_a_note(self):
+        items = [
+            make_item(actions.ACTION_FINAL_BILL),
+            make_item(actions.ACTION_DATE_FILL),
+        ]
+        _report, _executors, logs = self.run_plan(items)
+        for line in logs:
+            if "note:" in line:
+                self.assertNotIn(
+                    orchestrator.hospital_number_from_folder(FOLDER), line
+                )
+        # exactly one note, and it belongs to the DATE FILL row only
+        self.assertEqual(len([l for l in logs if "note:" in l]), 1)
+
+    def test_date_fill_note_is_logged_when_final_bill_is_in_the_plan(self):
+        """Advisory only: DATE FILL still RUNS (Hospital No. is the reference)."""
+        items = [
+            make_item(actions.ACTION_FINAL_BILL),
+            make_item(actions.ACTION_DATE_FILL),
+        ]
+        report, executors, logs = self.run_plan(items)
+        self.assertEqual(
+            [call[0] for call in executors.calls],
+            [actions.ACTION_FINAL_BILL, actions.ACTION_DATE_FILL],
+        )
+        self.assertTrue(
+            any("FINAL BILL ay nasa plan din" in line for line in logs),
+            logs,
+        )
+        date_row = report.outcomes[1]
+        self.assertEqual(date_row.status, orchestrator.OUTCOME_OK)
+        self.assertIn("FINAL BILL ay nasa plan din", date_row.detail)
+
+    def test_no_note_when_patient_has_only_date_fill(self):
+        items = [make_item(actions.ACTION_DATE_FILL)]
+        report, _executors, logs = self.run_plan(items)
+        self.assertFalse(
+            any("FINAL BILL ay nasa plan din" in line for line in logs), logs
+        )
+        self.assertNotIn("FINAL BILL ay nasa plan din", report.outcomes[0].detail)
 
     def test_manual_review_is_queued_never_executed(self):
         item = make_item(
@@ -1253,6 +1384,112 @@ class DefaultExecutorTests(unittest.TestCase):
         self.assertEqual(loaded_hosp, [])
         self.assertEqual(len(runner_called), 1)
 
+    def test_final_bill_reloads_when_always_reload_is_on(self):
+        # Slice H: the operator's rule is "type the Hospital No. again before
+        # every step" — the Hospital No. is the reference. Default off, so the
+        # test above pins the old behaviour; this pins the opt-in.
+        loaded_hosp = []
+
+        def fake_loader(hospital_no):
+            loaded_hosp.append(hospital_no)
+            return True
+
+        status, _detail = orchestrator._default_final_bill(
+            FOLDER,
+            "123456789012345",
+            lambda message: None,
+            30,
+            forms_fn=lambda: ["Billing (DELA CRUZ, JUAN )", "User Menu"],
+            runner_fn=lambda **kwargs: SimpleNamespace(
+                success=True, reason="Final Bill committed", final_step="done"
+            ),
+            loader_fn=fake_loader,
+            confinement_fn=lambda admission, discharge: True,
+            always_reload=True,
+        )
+        self.assertEqual(status, orchestrator.OUTCOME_OK)
+        self.assertEqual(loaded_hosp, ["123456789012345"])
+
+    def test_always_reload_uses_relink_verification(self):
+        # The real loader (not a stub) must be called with relink mode and this
+        # patient's Billing title, so re-typing the same Hospital No. counts.
+        from core.agent import final_bill_actions as final_bill
+
+        seen = {}
+
+        def fake_load(hospital_no, log_fn=None, verify_mode=None, expect_title=""):
+            seen["verify_mode"] = verify_mode
+            seen["expect_title"] = expect_title
+            return True
+
+        real_load = final_bill.load_patient_by_hospital_no
+        final_bill.load_patient_by_hospital_no = fake_load
+        try:
+            status, _detail = orchestrator._default_final_bill(
+                FOLDER,
+                "123456789012345",
+                lambda message: None,
+                30,
+                forms_fn=lambda: ["Billing (DELA CRUZ, JUAN )", "User Menu"],
+                runner_fn=lambda **kwargs: SimpleNamespace(
+                    success=True, reason="ok", final_step="done"
+                ),
+                confinement_fn=lambda admission, discharge: True,
+                always_reload=True,
+            )
+        finally:
+            final_bill.load_patient_by_hospital_no = real_load
+
+        self.assertEqual(status, orchestrator.OUTCOME_OK)
+        self.assertEqual(seen["verify_mode"], final_bill.LOAD_VERIFY_RELINK)
+        # The title comes from billing_form_for_patient(folder name); the
+        # trailing space HBSys shows for a missing middle name is normalized
+        # away by billing_title_key inside the loader, so the raw folder-derived
+        # title is exactly what belongs here.
+        self.assertEqual(
+            seen["expect_title"],
+            final_bill.billing_form_for_patient(
+                orchestrator.patient_name_from_folder(FOLDER)
+            ),
+        )
+        self.assertEqual(
+            final_bill.billing_title_key(seen["expect_title"]),
+            final_bill.billing_title_key("Billing (DELA CRUZ, JUAN )"),
+        )
+
+    def test_default_path_keeps_the_original_loader_call_signature(self):
+        # Regression: with always_reload off the loader is called WITHOUT the
+        # new kwargs, so existing injectors/doubles keep working unchanged.
+        from core.agent import final_bill_actions as final_bill
+
+        seen = {}
+
+        def fake_load(hospital_no, log_fn=None):
+            seen["called"] = hospital_no
+            forms_state[0] = ["Billing (DELA CRUZ, JUAN )", "User Menu"]
+            return True
+
+        forms_state = [["User Menu"]]
+        real_load = final_bill.load_patient_by_hospital_no
+        final_bill.load_patient_by_hospital_no = fake_load
+        try:
+            status, _detail = orchestrator._default_final_bill(
+                FOLDER,
+                "123456789012345",
+                lambda message: None,
+                30,
+                forms_fn=lambda: forms_state[0],
+                runner_fn=lambda **kwargs: SimpleNamespace(
+                    success=True, reason="ok", final_step="done"
+                ),
+                confinement_fn=lambda admission, discharge: True,
+            )
+        finally:
+            final_bill.load_patient_by_hospital_no = real_load
+
+        self.assertEqual(status, orchestrator.OUTCOME_OK)
+        self.assertEqual(seen["called"], "123456789012345")
+
     def test_final_bill_blocked_when_confinement_not_in_admit_history(self):
         runner_called = []
 
@@ -1584,6 +1821,147 @@ class MultiPatientFinalBillTests(unittest.TestCase):
         self.assertEqual(self.session.runner_closes, [])
         self.assertEqual(self.session.stale_closes, [])
         self.assertIn("run final_bill: " + FOLDER, logs)
+
+
+class StepChainOrderTests(unittest.TestCase):
+    """Slice H: one patient's FINAL BILL runs before its DATE FILL."""
+
+    def setUp(self):
+        self.calls = []
+        self.run_dir = self.enterContext(TemporaryDirectory())
+
+    def _run(self, items, **kwargs):
+        def recorder(action):
+            def executor(hospital_no, folder):
+                self.calls.append((action, folder))
+                return orchestrator.OUTCOME_OK, "done"
+            return executor
+        return orchestrator.run_approved_plan(
+            items,
+            date_fill_fn=recorder(actions.ACTION_DATE_FILL),
+            final_bill_fn=recorder(actions.ACTION_FINAL_BILL),
+            xml_clicker_fn=recorder(actions.ACTION_XML_CLICKER),
+            log_fn=lambda message: None,
+            save=False,
+            run_dir=self.run_dir,
+            **kwargs,
+        )
+
+    def test_final_bill_runs_before_the_same_patient_date_fill(self):
+        items = [
+            make_item(actions.ACTION_DATE_FILL),
+            make_item(actions.ACTION_FINAL_BILL),
+        ]
+        self._run(items)
+
+        self.assertEqual(
+            self.calls,
+            [
+                (actions.ACTION_FINAL_BILL, FOLDER),
+                (actions.ACTION_DATE_FILL, FOLDER),
+            ],
+        )
+
+    def test_order_steps_false_keeps_the_raw_plan_order(self):
+        items = [
+            make_item(actions.ACTION_DATE_FILL),
+            make_item(actions.ACTION_FINAL_BILL),
+        ]
+        self._run(items, order_steps=False)
+
+        self.assertEqual(
+            self.calls,
+            [
+                (actions.ACTION_DATE_FILL, FOLDER),
+                (actions.ACTION_FINAL_BILL, FOLDER),
+            ],
+        )
+
+    def test_patient_groups_are_not_split_by_another_patient(self):
+        items = [
+            make_item(actions.ACTION_DATE_FILL),
+            make_item(actions.ACTION_FINAL_BILL, folder=OTHER_FOLDER),
+            make_item(actions.ACTION_FINAL_BILL),
+        ]
+        self._run(items)
+
+        self.assertEqual(
+            self.calls,
+            [
+                (actions.ACTION_FINAL_BILL, FOLDER),
+                (actions.ACTION_DATE_FILL, FOLDER),
+                (actions.ACTION_FINAL_BILL, OTHER_FOLDER),
+            ],
+        )
+
+    def test_single_step_plan_keeps_its_original_order(self):
+        """Regression: nothing to chain means nothing to reorder."""
+        items = [
+            make_item(actions.ACTION_DATE_FILL, folder=FOLDER),
+            make_item(actions.ACTION_XML_CLICKER, folder=OTHER_FOLDER),
+            make_item(actions.ACTION_DATE_FILL, folder=THIRD_FOLDER),
+        ]
+        self._run(items)
+
+        self.assertEqual(
+            self.calls,
+            [
+                (actions.ACTION_DATE_FILL, FOLDER),
+                (actions.ACTION_XML_CLICKER, OTHER_FOLDER),
+                (actions.ACTION_DATE_FILL, THIRD_FOLDER),
+            ],
+        )
+
+    def test_date_fill_note_is_advisory_and_never_blocks(self):
+        # FINAL BILL for this patient is also in the plan. The note must appear
+        # in the log and in the row detail, but the row still executes.
+        items = [
+            make_item(actions.ACTION_DATE_FILL),
+            make_item(actions.ACTION_FINAL_BILL),
+        ]
+        logs = []
+
+        def executor(hospital_no, folder):
+            self.calls.append((actions.ACTION_DATE_FILL, folder))
+            return orchestrator.OUTCOME_OK, "dates filled"
+        report = orchestrator.run_approved_plan(
+            items,
+            date_fill_fn=executor,
+            final_bill_fn=lambda hospital_no, folder: (
+                orchestrator.OUTCOME_OK, "billed"
+            ),
+            log_fn=logs.append,
+            save=False,
+            run_dir=self.run_dir,
+        )
+
+        self.assertEqual(report.counts[orchestrator.OUTCOME_OK], 2)
+        self.assertEqual(len(self.calls), 1)   # date_fill really ran
+        note_lines = [line for line in logs if line.strip().startswith("note:")]
+        self.assertTrue(note_lines, "the advisory note must be logged")
+        self.assertIn("FINAL BILL", note_lines[0])
+        date_fill_row = next(
+            outcome for outcome in report.outcomes
+            if outcome.action == actions.ACTION_DATE_FILL
+        )
+        self.assertEqual(date_fill_row.status, orchestrator.OUTCOME_OK)
+        self.assertIn("FINAL BILL", date_fill_row.detail)
+        self.assertIn("dates filled", date_fill_row.detail)
+
+    def test_no_note_when_the_patient_has_no_final_bill_row(self):
+        items = [make_item(actions.ACTION_DATE_FILL)]
+        logs = []
+        self._run(items)
+        report = orchestrator.run_approved_plan(
+            items,
+            date_fill_fn=lambda hospital_no, folder: (
+                orchestrator.OUTCOME_OK, "dates filled"
+            ),
+            log_fn=logs.append,
+            save=False,
+            run_dir=self.run_dir,
+        )
+        self.assertEqual(report.outcomes[0].detail, "dates filled")
 
 
 if __name__ == "__main__":

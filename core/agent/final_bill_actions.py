@@ -1798,12 +1798,18 @@ def clear_blocking_popups(log_fn=None) -> bool:
     return True
 
 
+LOAD_VERIFY_NEW_FORM = "new_form"
+LOAD_VERIFY_RELINK = "relink"
+
+
 def load_patient_by_hospital_no(
     hospital_no: str,
     timeout: float = LOAD_WAIT_SECONDS,
     *,
     close_stale_form: bool = True,
     log_fn=None,
+    verify_mode: str = LOAD_VERIFY_NEW_FORM,
+    expect_title: str = "",
 ) -> bool:
     """Load one patient into the Billing form - the operator's steps 1-2.
 
@@ -1830,6 +1836,17 @@ def load_patient_by_hospital_no(
     these with "load:"), so the run report names the exact failing step for
     the next review: which popup blocked, which forms were on screen, and
     whether the Hospital No. field received the typed number.
+
+    verify_mode (Slice H, 2026-10-05):
+      "new_form" (DEFAULT, unchanged behaviour) waits for a Billing form that
+         was not open before this call. Used when moving to a NEW patient.
+      "relink" additionally accepts the ALREADY-OPEN form of the SAME patient,
+         matched by billing_title_key against `expect_title`. Needed when the
+         operator's rule is "type the Hospital No. again before every step":
+         re-entering the same Hospital No. may refresh the same window instead
+         of spawning a second one, and that is still a correct load. A window
+         belonging to a DIFFERENT patient never satisfies this mode - the row
+         blocks instead.
     """
     import time
 
@@ -1896,15 +1913,37 @@ def load_patient_by_hospital_no(
     started = time.time()
     deadline = started + max(0.0, float(timeout))
     reported: set = set()
+    want_key = billing_title_key(expect_title) if expect_title else ""
+    relink = str(verify_mode or LOAD_VERIFY_NEW_FORM) == LOAD_VERIFY_RELINK
+    if relink:
+        log(
+            f"load: relink mode - a Billing form already showing this patient "
+            f"({expect_title!r}) counts as loaded, not only a brand new window"
+        )
     while time.time() < deadline:
         opened = set(billing_form_titles(list_open_forms()))
-        if opened - forms_before:
+        fresh = opened - forms_before
+        if fresh:
             log(
                 "load: verified after "
                 f"{round(time.time() - started, 1)}s — "
-                f"{', '.join(sorted(opened - forms_before))} is now open"
+                f"{', '.join(sorted(fresh))} is now open"
             )
             return True
+        if relink and want_key:
+            # Same patient's window is open AND nothing else took its place:
+            # re-entering the same Hospital No. can refresh that window instead
+            # of opening a second one. Compared by normalized key, never
+            # byte-for-byte (HBSys titles can carry an empty middle name).
+            keys = {billing_title_key(title) for title in opened}
+            if want_key in keys and (not keys - {want_key}):
+                log(
+                    "load: verified after "
+                    f"{round(time.time() - started, 1)}s — "
+                    f"{', '.join(sorted(opened))} already showed this patient and "
+                    "was refreshed by the Hospital No. (relink)"
+                )
+                return True
         elapsed = int(time.time() - started)
         if elapsed not in reported:
             reported.add(elapsed)

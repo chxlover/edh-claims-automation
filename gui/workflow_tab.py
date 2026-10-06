@@ -503,9 +503,9 @@ if __name__ == "__main__":
         )
         frame.update_idletasks()
 
-        # default workflow loads as an 8-row execution order
-        assert len(frame.config.nodes) == 8, "default workflow loads 8 nodes"
-        assert frame.order_list.size() == 8, "8 rows in the list"
+        # default workflow loads as a 9-row execution order
+        assert len(frame.config.nodes) == 9, "default workflow loads 9 nodes"
+        assert frame.order_list.size() == 9, "9 rows in the list"
         default_types = [n.node_type for n in
                          sorted(frame.config.nodes, key=lambda x: x.order)]
         assert default_types[0] == "claims_processor"
@@ -521,7 +521,7 @@ if __name__ == "__main__":
         frame.move_node(1)  # n1 down
         types_after_down = [n.node_type for n in
                             sorted(frame.config.nodes, key=lambda x: x.order)]
-        assert types_after_down[0] == "date_fill_regular", types_after_down
+        assert types_after_down[0] == "final_bill", types_after_down
         assert frame.order_list.curselection(), "selection kept after move"
         frame.move_node(-1)  # back up
         types_after_up = [n.node_type for n in
@@ -543,21 +543,21 @@ if __name__ == "__main__":
             f"{NODE_REGISTRY['claims_checker_recheck'].label}  (Checks)"
         )
         frame.add_node()
-        assert len(frame.config.nodes) == 9, "add node works"
+        assert len(frame.config.nodes) == 10, "add node works"
         new_node = max(frame.config.nodes, key=lambda n: n.order)
         assert new_node.node_type == "claims_checker_recheck"
         assert frame._selected_node == new_node.id
 
         # delete removes ONLY the instance (registry intact)
         frame.delete_node()
-        assert len(frame.config.nodes) == 8, "delete node works"
+        assert len(frame.config.nodes) == 9, "delete node works"
         assert "claims_checker_recheck" in NODE_REGISTRY
 
         # save -> file; restore default
         frame.save_config()
         assert Path("workflow_config.json").is_file()
         frame.restore_default()
-        assert len(frame.config.nodes) == 8
+        assert len(frame.config.nodes) == 9
 
         # status paint colors the row (crash-free)
         frame._paint_node_status("n1", NODE_STATUS_RUNNING)

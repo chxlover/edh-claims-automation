@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from core.agent import fees_actions as actions
+from core.agent import plan_steps as step_plan
 
 BASE_DIR = Path(r"C:\claims_bot")
 DEFAULT_FEES_CSV = BASE_DIR / "fees_checker_report.csv"
@@ -184,7 +185,12 @@ def to_plan_items(decisions: list) -> list[dict]:
     return items
 
 
-def build_plan_from_csv(csv_path: str | Path, output_root=None, completed=None) -> tuple:
+def build_plan_from_csv(
+    csv_path: str | Path,
+    output_root=None,
+    completed=None,
+    fan_out: bool = True,
+) -> tuple:
     """Read CSV -> route rows -> panel items + summary + source note.
 
     Returns (items, summary_dict, note). `note` explains an empty plan
@@ -198,6 +204,12 @@ def build_plan_from_csv(csv_path: str | Path, output_root=None, completed=None) 
     (logs/agent_completed_actions.json): rows already executed OK drop out
     of the plan so finished work is never repeated. Pass a set of
     (patient_folder, action) pairs to control it explicitly.
+
+    `fan_out` (Slice H, default True) turns one fees row that needs BOTH a
+    Final Bill and dates into TWO adjacent panel rows — FINAL BILL first, then
+    DATE FILL for the same folder. The completion ledger still keys on
+    (folder, action), so a Final Bill finished in an earlier run leaves only
+    the DATE FILL row. Set fan_out=False for the old one-row-per-fees-row plan.
     """
     path = Path(csv_path)
     if not path.is_file():
@@ -215,9 +227,15 @@ def build_plan_from_csv(csv_path: str | Path, output_root=None, completed=None) 
         output_root = actions.default_output_root()
     if completed is None:
         completed = load_completed_actions()
-    decisions = actions.build_plan(rows, output_root=output_root)
+    if fan_out:
+        # Slice H: NO FINAL BILL + missing dates -> FINAL BILL row, then a
+        # DATE FILL row right below it for the same patient.
+        decisions = step_plan.build_step_plan(rows, output_root=output_root)
+    else:
+        decisions = actions.build_plan(rows, output_root=output_root)
     decisions, xml_done = actions.drop_completed_xml(decisions)
     decisions, run_done = drop_completed_actions(decisions, completed)
+    decisions = step_plan.order_plan_items(decisions)
     summary = actions.summarize_plan(decisions)
     note_parts = []
     if xml_done:

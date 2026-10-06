@@ -190,10 +190,29 @@ class AgentPlanFrame(ttk.Frame):
             command=self.get_final_bill_coordinates,
         ).pack(side="left", padx=(8, 0))
 
+        # Slice H: one patient can have TWO rows (FINAL BILL, then DATE FILL).
+        # Both switches default ON — the operator's rule is that the Hospital
+        # No. is the reference, so it is typed again before every step.
+        self.fan_out_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            row3,
+            text="2 steps (Final Bill + Date Fill)",
+            variable=self.fan_out_var,
+        ).pack(side="left", padx=(8, 0))
+        self.always_reload_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            row3,
+            text="Always re-enter Hospital No.",
+            variable=self.always_reload_var,
+        ).pack(side="left", padx=(8, 0))
+
+        row4 = ttk.Frame(controls)
+        row4.pack(fill="x")
+
         self.note_label = ttk.Label(
-            row3, textvariable=self.note_var, foreground="#b06000"
+            row4, textvariable=self.note_var, foreground="#b06000"
         )
-        self.note_label.pack(side="left", padx=(16, 0))
+        self.note_label.pack(side="left")
 
 
         # -- Plan table ---------------------------------------------------
@@ -318,7 +337,12 @@ class AgentPlanFrame(ttk.Frame):
         csv_path = str(plan_store.resolve_fees_csv(raw_path))
         if csv_path != raw_path:
             self.fees_csv_var.set(csv_path)
-        items, summary, note = plan_store.build_plan_from_csv(csv_path)
+        # Slice H: with the switch on, one patient can contribute TWO rows
+        # (FINAL BILL, then DATE FILL), so the counts below are STEPS.
+        fan_out = bool(self.fan_out_var.get())
+        items, summary, note = plan_store.build_plan_from_csv(
+            csv_path, fan_out=fan_out
+        )
         self.items = items
         self._render_items()
 
@@ -329,14 +353,22 @@ class AgentPlanFrame(ttk.Frame):
             f"Manual Review: {summary.get(actions.ACTION_MANUAL_REVIEW, 0)}",
         ]
         total = sum(summary.values())
+        patients = len({
+            str(item.get("patient_folder") or "").strip()
+            for item in items
+            if str(item.get("patient_folder") or "").strip()
+        })
+        noun = "steps" if (fan_out and total > patients) else "patients"
         self.summary_var.set(
-            f"Plan: {total} patients — " + " | ".join(parts)
+            f"Plan: {total} {noun} ({patients} patient(s)) — "
+            + " | ".join(parts)
         )
         self.note_var.set(note)
         self.approve_btn.configure(state="normal" if items else "disabled")
         self.log(
-            f"Loaded plan from {csv_path}: {total} patients. "
-            + (" | ".join(parts) if items else note)
+            f"Loaded plan from {csv_path}: {total} {noun} "
+            f"({patients} patient(s)). "
+            + ("| ".join(parts) if items else note)
         )
         warning = self._previous_run_warning()
         if warning:
@@ -414,15 +446,25 @@ class AgentPlanFrame(ttk.Frame):
         for row in approved_rows:
             if row.get("action") in counts:
                 counts[row.get("action")] += 1
+        # Slice H: rows are now STEPS, so count the patients too — otherwise
+        # "2 DATE FILL + 1 FINAL BILL" would read like three patients.
+        patients = {
+            str(row.get("patient_folder") or "").strip()
+            for row in approved_rows
+            if str(row.get("patient_folder") or "").strip()
+        }
         confirmed = messagebox.askyesno(
             "Approve & Run — execute on HBSys?",
-            f"Approved {approved_count} row(s), skipped {skipped_count}.\n\n"
+            f"Approved {approved_count} step(s) sa {len(patients)} "
+            f"patient(s), skipped {skipped_count}.\n\n"
             f"Saved: {saved_path}\n\n"
-            f"DATE FILL: {counts[actions.ACTION_DATE_FILL]}\n"
-            f"FINAL BILL: {counts[actions.ACTION_FINAL_BILL]}\n"
-            f"XML CLICKER: {counts[actions.ACTION_XML_CLICKER]}\n"
+            f"DATE FILL: {counts[actions.ACTION_DATE_FILL]} step(s)\n"
+            f"FINAL BILL: {counts[actions.ACTION_FINAL_BILL]} step(s)\n"
+            f"XML CLICKER: {counts[actions.ACTION_XML_CLICKER]} step(s)\n"
             f"MANUAL REVIEW: {counts[actions.ACTION_MANUAL_REVIEW]} "
             "(queued — hindi tatakbo)\n\n"
+            "May pasyenteng dalawang hakbang (FINAL BILL, DATE FILL) — "
+            "FINAL BILL ang muna.\n\n"
             "Tatakbo ang approved rows ngayon sa HBSys (background thread). "
             "Buksan muna ang HBSys bago mag-YES.\n\n"
             "Ipatakbo na?",
@@ -455,9 +497,18 @@ class AgentPlanFrame(ttk.Frame):
                 except Exception:
                     pass
                 run_fn = self.run_plan_fn or orchestrator.run_approved_plan
+                # Slice H toggles. Read on the Tk thread BEFORE the worker
+                # starts, so the worker never touches a StringVar off-thread.
+                kwargs = {}
+                if self.fan_out_var.get():
+                    kwargs["order_steps"] = True
+                else:
+                    kwargs["order_steps"] = False
+                kwargs["always_reload"] = bool(self.always_reload_var.get())
                 report = run_fn(
                     approved_rows,
                     log_fn=lambda message: self._ui(lambda: self.log(message)),
+                    **kwargs,
                 )
             except Exception as exc:  # noqa: BLE001 - surface, never crash Tk
                 self._ui(lambda: self._run_failed(exc))
@@ -478,6 +529,19 @@ class AgentPlanFrame(ttk.Frame):
         self.log(f"Run finished: {report.summary_line}")
         if report.saved_path:
             self.log(f"Run report: {report.saved_path}")
+        # Slice H: after Final Bills finish, the next plan load is what shows
+        # the Date Fill steps that were left. Say it once, no auto-run.
+        finished_final_bills = sum(
+            1
+            for outcome in (getattr(report, "outcomes", None) or [])
+            if outcome.action == actions.ACTION_FINAL_BILL
+            and outcome.status == "OK"
+        )
+        if finished_final_bills:
+            self.log(
+                f"  {finished_final_bills} FINAL BILL step(s) ang natapos — "
+                "buksan ang Plan Panel para makita ang na-update na DATE FILL."
+            )
         # Problem rows (BLOCKED / FAILED) are named here, not just counted: the
         # operator's rule is "keep going, list them at the end" so the skipped
         # patients are visible without opening the JSON.
@@ -559,11 +623,22 @@ class AgentPlanFrame(ttk.Frame):
     # -- Internals --------------------------------------------------------
 
     def _render_items(self) -> None:
+        # Slice H: mark the rows that are a FOLLOW-UP step of the same patient.
+        # The plan already lists them adjacently; the marker only says why.
+        final_bill_folders = {
+            item.get("patient_folder", "")
+            for item in self.items
+            if item.get("action") == actions.ACTION_FINAL_BILL
+        }
         for item_id in self.plan_tree.get_children():
             self.plan_tree.delete(item_id)
         for item in self.items:
             action = item.get("action", "")
             label = ACTION_LABELS.get(action, action)
+            if action == actions.ACTION_DATE_FILL and (
+                item.get("patient_folder", "") in final_bill_folders
+            ):
+                label = "2nd step - " + label
             if not item.get("tool_available", True):
                 label += " [TOOL MISSING]"
             self.plan_tree.insert(

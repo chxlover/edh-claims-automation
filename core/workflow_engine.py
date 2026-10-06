@@ -41,8 +41,8 @@ A missing or corrupt file never runs; the GUI offers Restore Default.
 
 DEFAULT_WORKFLOW reproduces the current manual happy-path pipeline
 (README pipeline order):
-    claims_processor → date_fill_regular → xml_clicker → copy_xml →
-    fees_checker → claims_checker → add_claims_upload →
+    claims_processor → final_bill → date_fill_regular → xml_clicker →
+    copy_xml → fees_checker → claims_checker → add_claims_upload →
     claim_attachments
 (archive stays a manual GUI action in v1; INCOMPLETE/review outcomes
 remain handled by the existing manual tools, unchanged.)
@@ -137,6 +137,7 @@ def default_workflow() -> WorkflowConfig:
     """
     keys = [
         "claims_processor",
+        "final_bill",
         "date_fill_regular",
         "xml_clicker",
         "copy_xml",
@@ -508,20 +509,20 @@ if __name__ == "__main__":
     # -- default workflow ---------------------------------------------------
     default = default_workflow()
     check(
-        "default: 8 nodes in current manual pipeline order",
+        "default: 9 nodes in current manual pipeline order",
         [n.node_type for n in default.nodes] == [
-            "claims_processor", "date_fill_regular", "xml_clicker", "copy_xml",
-            "fees_checker", "claims_checker", "add_claims_upload",
+            "claims_processor", "final_bill", "date_fill_regular", "xml_clicker",
+            "copy_xml", "fees_checker", "claims_checker", "add_claims_upload",
             "claim_attachments",
         ]
-        and [n.order for n in default.nodes] == list(range(1, 9)),
+        and [n.order for n in default.nodes] == list(range(1, 10)),
     )
     check(
         "default: chained connections, all enabled",
-        len(default.connections) == 7
+        len(default.connections) == 8
         and all(c.enabled for c in default.connections)
         and default.connections[0].source_id == "n1"
-        and default.connections[-1].target_id == "n8",
+        and default.connections[-1].target_id == "n9",
     )
     d2 = default_workflow()
     d2.nodes[0].enabled = False

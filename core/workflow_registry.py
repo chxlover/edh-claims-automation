@@ -96,7 +96,19 @@ NODE_REGISTRY: dict[str, NodeSpec] = {
             description="OCR scans → patient groups → signed PDF/A folders in output\\",
         ),
         NodeSpec(
+            key="final_bill",
+            label="Final Bill (HBSys Billing → Final)",
+            category="HBSys",
+            module="core.agent.final_bill_runner",
+            args=(),
+            live_args=("--live",),
+            hbsys_touching=True,
+            supports_dry=True,
+            description="Final Bill every patient folder in output\\ (skips .final_bill_ok)",
+        ),
+        NodeSpec(
             key="date_fill_regular",
+            extra_env={"PYTHONPATH": "date_fill_hbsys"},
             label="Date Fill (REGULAR, discharge date)",
             category="HBSys",
             module="date_fill_hbsys.hbsys_fill_dates_testing",
@@ -108,6 +120,7 @@ NODE_REGISTRY: dict[str, NodeSpec] = {
         ),
         NodeSpec(
             key="date_fill_abtc",
+            extra_env={"PYTHONPATH": "date_fill_hbsys"},
             label="Date Fill (ABTC, admission date)",
             category="HBSys",
             module="date_fill_hbsys.hbsys_fill_dates_testing",
@@ -119,6 +132,7 @@ NODE_REGISTRY: dict[str, NodeSpec] = {
         ),
         NodeSpec(
             key="xml_clicker",
+            extra_env={"PYTHONPATH": "date_fill_hbsys"},
             label="XML Clicker (CF4 → CF5 → eSOA)",
             category="HBSys",
             module="date_fill_hbsys.xml_generator_clicker",
@@ -291,8 +305,8 @@ if __name__ == "__main__":
         print(f"{'OK  ' if ok else 'FAIL'} {label}")
 
     check(
-        "registry: 12 catalog entries",
-        len(NODE_REGISTRY) == 12,
+        "registry: 13 catalog entries",
+        len(NODE_REGISTRY) == 13,
     )
     check(
         "registry: keys are unique",
@@ -311,14 +325,14 @@ if __name__ == "__main__":
         "registry: HBSys-touching nodes flagged",
         {k for k, s in NODE_REGISTRY.items() if s.hbsys_touching}
         == {"date_fill_regular", "date_fill_abtc", "xml_clicker",
-            "add_claims_upload", "claim_attachments"},
+            "add_claims_upload", "claim_attachments", "final_bill"},
     )
     check(
         "registry: dry-run capable nodes flagged",
         all(
             NODE_REGISTRY[k].supports_dry
             for k in ("date_fill_regular", "xml_clicker",
-                      "add_claims_upload", "claim_attachments")
+                      "add_claims_upload", "claim_attachments", "final_bill")
         ),
     )
     check(
@@ -345,7 +359,7 @@ if __name__ == "__main__":
         validate_registry() == [],
     )
     # entry-point existence, verified explicitly for the report
-    for key in ("claims_processor", "date_fill_regular", "xml_clicker",
+    for key in ("claims_processor", "final_bill", "date_fill_regular", "xml_clicker",
                 "copy_xml", "fees_checker", "claims_checker",
                 "add_claims_upload", "claim_attachments",
                 "merge_pdf", "convert_pdfa"):

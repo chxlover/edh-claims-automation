@@ -343,6 +343,142 @@ class AgentPlanPanelTests(unittest.TestCase):
         self.assertEqual(len(infos), 1)
         self.assertIn("Lahat ng napiling patient ay na-finalize", infos[0][1])
 
+    # -- Slice H: two-step patients, toggle wiring, follow-up marker -------
+
+    def _write_two_step_csv(self):
+        """One patient needing BOTH Final Bill and Date Fill, one plain row."""
+        path = self.root / "two_step.csv"
+        with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.DictWriter(handle, fieldnames=HEADERS)
+            writer.writeheader()
+            writer.writerow(dict(
+                ready_row("TWO STEP PATIENT"),
+                **{
+                    "Status": "NO FINAL BILL",
+                    "Prof Fee Sign Date (hprofserv.pdoctorsigndate)": "",
+                    "Consent Date (hpatcon1.consentdate)": "",
+                    "Auth Sign Date (hpatcon1.authsigndate)": "",
+                    "Ready to Generate XML": "NO",
+                },
+            ))
+            writer.writerow(ready_row("READY PATIENT"))
+            # Same patient shape but the bill is already done: ONE Date Fill
+            # step only, so the follow-up marker must NOT appear on it.
+            writer.writerow(dict(
+                ready_row("DATE FILL ONLY"),
+                **{
+                    "Status": "MATCH",
+                    "Prof Fee Sign Date (hprofserv.pdoctorsigndate)": "",
+                    "Consent Date (hpatcon1.consentdate)": "",
+                    "Auth Sign Date (hpatcon1.authsigndate)": "",
+                    "Ready to Generate XML": "NO",
+                },
+            ))
+        return path
+
+    def test_load_plan_shows_two_rows_for_one_patient(self):
+        self.frame.fees_csv_var.set(str(self._write_two_step_csv()))
+        self.frame.load_plan()
+
+        folders = [item["patient_folder"] for item in self.frame.items]
+        self.assertIn("TWO STEP PATIENT", folders)
+        self.assertEqual(
+            folders.count("TWO STEP PATIENT"), 2,
+            "one patient needing Final Bill + Date Fill = two plan rows",
+        )
+        pair = [
+            item["action"] for item in self.frame.items
+            if item["patient_folder"] == "TWO STEP PATIENT"
+        ]
+        self.assertEqual(
+            pair,
+            [
+                agent_plan_tab.actions.ACTION_FINAL_BILL,
+                agent_plan_tab.actions.ACTION_DATE_FILL,
+            ],
+            "FINAL BILL must come first",
+        )
+
+    def test_second_step_row_is_marked_in_the_table(self):
+        self.frame.fees_csv_var.set(str(self._write_two_step_csv()))
+        self.frame.load_plan()
+
+        # One entry per ROW. The two-step patient has TWO rows that share the
+        # same folder name, so a folder-keyed dict would silently drop step 1.
+        rows = [
+            self.frame.plan_tree.item(child, 'values')[:2]
+            for child in self.frame.plan_tree.get_children()
+        ]
+        two_step = [
+            label for folder, label in rows if folder == 'TWO STEP PATIENT'
+        ]
+        self.assertEqual(len(two_step), 2)
+        self.assertFalse(
+            two_step[0].startswith('2nd step -'),
+            'the Final Bill row is step 1 - no marker',
+        )
+        self.assertTrue(
+            two_step[1].startswith('2nd step -'),
+            'the follow-up Date Fill row says it is step 2',
+        )
+        # A Date Fill row with no Final Bill for the same patient is NOT marked.
+        solo = [label for folder, label in rows if folder == 'DATE FILL ONLY']
+        self.assertEqual(len(solo), 1)
+        self.assertIn('DATE FILL', solo[0])
+        self.assertFalse(solo[0].startswith('2nd step -'))
+
+    def test_toggles_are_passed_to_the_orchestrator(self):
+        agent_plan_tab.messagebox.askyesno = lambda *args, **kwargs: True
+        seen = {}
+
+        def fake_run(rows, *, log_fn=None, **kwargs):
+            seen.update(kwargs)
+            return orchestrator.RunReport()
+
+        self.frame.run_plan_fn = fake_run
+        self.frame.fees_csv_var.set(str(self._write_two_step_csv()))
+        self.frame.load_plan()
+        self.frame.plan_tree.selection_set(self.frame.plan_tree.get_children())
+        # Defaults: both Slice H behaviours on.
+        self.frame.approve_selected()
+
+        self.assertTrue(seen.get("order_steps"))
+        self.assertTrue(seen.get("always_reload"))
+
+    def test_unchecking_the_toggles_reaches_the_orchestrator(self):
+        agent_plan_tab.messagebox.askyesno = lambda *args, **kwargs: True
+        seen = {}
+
+        def fake_run(rows, *, log_fn=None, **kwargs):
+            seen.update(kwargs)
+            return orchestrator.RunReport()
+
+        self.frame.run_plan_fn = fake_run
+        self.frame.fan_out_var.set(False)
+        self.frame.always_reload_var.set(False)
+        self.frame.fees_csv_var.set(str(self._write_two_step_csv()))
+        self.frame.load_plan()
+        self.frame.plan_tree.selection_set(self.frame.plan_tree.get_children())
+        self.frame.approve_selected()
+
+        self.assertFalse(seen.get("order_steps"))
+        self.assertFalse(seen.get("always_reload"))
+
+    def test_confirmation_counts_steps_and_patients(self):
+        prompts = []
+        agent_plan_tab.messagebox.askyesno = (
+            lambda title, body=None, **kwargs: prompts.append(body) or False
+        )
+        self.frame.fees_csv_var.set(str(self._write_two_step_csv()))
+        self.frame.load_plan()
+        self.frame.plan_tree.selection_set(self.frame.plan_tree.get_children())
+        self.frame.approve_selected()
+
+        body = prompts[0]
+        self.assertIn("step(s)", body)
+        self.assertIn("patient(s)", body)
+        self.assertIn("FINAL BILL ang muna", body)
+
     # -- Load Plan preflight: Fees Check first (user request 2026-09-26) ---
 
     def _write_extra_csv(self, name, folders):

@@ -51,6 +51,7 @@ from pathlib import Path
 
 from core.agent import agent_plan_store as plan_store
 from core.agent import fees_actions as actions
+from core.agent import plan_steps as step_plan
 from core.agent.hbsys_screens import expected_prompt_screen
 from date_fill_hbsys.hbsys_ready_claims import (
     CLAIM_FOLDER_RE,
@@ -500,7 +501,7 @@ def final_bill_block_reason(folder: str, open_forms) -> str:
 
 def _default_final_bill(
     folder, hospital_no, log_fn, timeout, *, forms_fn=None, runner_fn=None,
-    loader_fn=None, confinement_fn=None, expected_screen="",
+    loader_fn=None, confinement_fn=None, expected_screen="", always_reload=False,
 ):
     """Verified FinalBillRunner for one patient. Returns (status, detail).
 
@@ -541,9 +542,27 @@ def _default_final_bill(
         log_fn(f"  load: {message}")
 
     if loader_fn is None:
-        loader_fn = lambda hospital_no: final_bill.load_patient_by_hospital_no(  # noqa: E731
-            hospital_no, log_fn=note_loader
-        )
+        # Slice H: always_reload=True re-enters the Hospital No. even when this
+        # patient's Billing form is already open (the operator's rule: type the
+        # Hospital No. again before every step - it is the reference). The
+        # loader then uses "relink" verification, because re-entering the SAME
+        # Hospital No. may refresh that window instead of opening a second one.
+        # `wanted` is read at CALL time (defined below), not at build time.
+        # The new kwargs are passed ONLY in relink mode, so the default path
+        # keeps the exact call signature it always had.
+        def _loader(hosp, _wanted=lambda: wanted, _reload=always_reload):
+            if _reload:
+                return final_bill.load_patient_by_hospital_no(
+                    hosp,
+                    log_fn=note_loader,
+                    verify_mode=final_bill.LOAD_VERIFY_RELINK,
+                    expect_title=_wanted(),
+                )
+            return final_bill.load_patient_by_hospital_no(
+                hosp, log_fn=note_loader
+            )
+
+        loader_fn = _loader
 
     confinement_notes: list = []
 
@@ -564,18 +583,28 @@ def _default_final_bill(
 
     # Load this patient whenever their Billing form is not already open. The
     # loader's verification is what proves the right patient is on screen.
+    # always_reload (Slice H) types the Hospital No. again even when this
+    # patient's form is already open — the operator's rule: the Hospital No. is
+    # the reference, so it is entered before EVERY step.
     current_forms = [str(title).strip() for title in (forms_fn() or [])]
     # Titles are matched by normalized key, never byte-for-byte: HBSys can title
     # this same patient's form "Billing (VALENTINO, NIKKI )" (an empty middle
     # name leaves a space before ")") while the folder name carries none.
     current_keys = {final_bill.billing_title_key(title) for title in current_forms}
+    already_open = bool(wanted) and final_bill.billing_title_key(wanted) in current_keys
     load_attempted = False
     load_ok = True
-    if wanted and final_bill.billing_title_key(wanted) not in current_keys:
-        log_fn(
-            f"loading patient in Billing form: hospital no {hospital_no} "
-            f"({wanted})"
-        )
+    if wanted and (always_reload or not already_open):
+        if already_open:
+            log_fn(
+                f"re-entering hospital no {hospital_no}: {wanted} is already "
+                "open — typing it again to confirm the patient on screen"
+            )
+        else:
+            log_fn(
+                f"loading patient in Billing form: hospital no {hospital_no} "
+                f"({wanted})"
+            )
         load_attempted = True
         try:
             load_ok = bool(loader_fn(hospital_no))
@@ -665,6 +694,11 @@ def _default_final_bill(
     return OUTCOME_FAILED, detail or "final bill run failed"
 
 
+# Public alias: the Workflow Tab final_bill node (core/agent/final_bill_runner.py)
+# runs this SAME implementation — one verified flow, two entry points, no
+# duplicated logic (AGENTS.md: never duplicate code between GUI and core).
+default_final_bill = _default_final_bill
+
 
 # -- Orchestration ------------------------------------------------------------
 
@@ -749,6 +783,8 @@ def run_approved_plan(
     timeout: int = DEFAULT_TOOL_TIMEOUT,
     completed_path=None,
     state_path=None,
+    order_steps: bool = True,
+    always_reload: bool = False,
 ) -> RunReport:
     """Execute the approved plan rows in order; never stop at a bad row.
 
@@ -771,11 +807,24 @@ def run_approved_plan(
         state_path: heartbeat file rewritten after every row (None =
             logs/agent_current_run.json). It names the row the run stopped on
             when the process ends before the run finishes.
+        order_steps: group rows by patient and run FINAL BILL before DATE FILL
+            for the same patient (Slice H). Ordering is STABLE, so a plan in
+            which no patient needs two steps runs in exactly the same order as
+            before. Set False to use the raw plan order.
+        always_reload: type the Hospital No. again before EVERY step, even when
+            this patient's Billing form is already open (Slice H; the operator's
+            rule — the Hospital No. is the reference). Default False = the old
+            behaviour, which skips the loader when the form is already open.
 
     Returns:
-        A RunReport with one RowOutcome per input row, order preserved.
+        A RunReport with one RowOutcome per input row, in execution order.
     """
     log = log_fn or (lambda message: None)
+    # Slice H: same patient's FINAL BILL runs before its DATE FILL. Stable
+    # sort — a plan where no patient needs two steps is byte-for-byte the same
+    # execution order as before.
+    if order_steps:
+        items = step_plan.order_plan_items(items)
     date_fill_fn = date_fill_fn or (
         lambda hosp, folder: _default_date_fill(hosp, folder, log, timeout)
     )
@@ -790,6 +839,7 @@ def run_approved_plan(
         lambda hosp, folder: _default_final_bill(
             folder, hosp, log, timeout,
             expected_screen=expected_screen["value"],
+            always_reload=always_reload,
         )
     )
     executors = {
@@ -869,6 +919,14 @@ def run_approved_plan(
             )
         else:
             log(f"run {action}: {outcome.patient_folder}")
+            # Slice H: advisory only — never blocks. Says out loud when this
+            # patient's FINAL BILL row is in the same plan, so the operator
+            # can see why DATE FILL ran anyway (Hospital No. is the reference).
+            chain_note = step_plan.prerequisite_note_for_plan(
+                action, item, items
+            )
+            if chain_note:
+                log("  note: " + _one_line(chain_note))
             # Name the row being ATTEMPTED, so a process that dies inside the
             # executor still says which patient it was working on.
             _heartbeat(
@@ -906,6 +964,9 @@ def run_approved_plan(
                 else OUTCOME_FAILED
             )
             outcome.detail = str(detail or "")
+            if chain_note:
+                # Keep the advisory in the JSON audit trail too, not only the log.
+                outcome.detail = f"{outcome.detail} | {chain_note}".strip(" |")
             log(
                 f"{outcome.status}: {outcome.patient_folder} — "
                 + _one_line(outcome.detail)

@@ -105,6 +105,120 @@ class BuildPlanFromCsvTests(unittest.TestCase):
         self.assertEqual(summary["final_bill"], 1)
 
 
+class FanOutTests(unittest.TestCase):
+    """Slice H: a fees row needing Final Bill AND dates becomes two rows."""
+
+    def setUp(self):
+        self.temporary = TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.folder = (
+            "DELA CRUZ, JUAN - 123456789012345 - ADM20260901_DIS20260903"
+        )
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write(self, rows):
+        csv_path = self.root / "fees.csv"
+        write_csv(csv_path, rows)
+        return csv_path
+
+    def no_dates(self):
+        return dict(
+            ready_row(self.folder),
+            **{
+                "Status": "NO FINAL BILL",
+                "Prof Fee Sign Date (hprofserv.pdoctorsigndate)": "",
+                "Consent Date (hpatcon1.consentdate)": "",
+                "Auth Sign Date (hpatcon1.authsigndate)": "",
+                "Ready to Generate XML": "NO",
+            }
+        )
+
+    def test_one_row_becomes_final_bill_then_date_fill(self):
+        items, summary, _note = store.build_plan_from_csv(
+            self.write([self.no_dates()]), output_root=self.root
+        )
+        self.assertEqual(
+            [item["action"] for item in items],
+            [actions.ACTION_FINAL_BILL, actions.ACTION_DATE_FILL],
+        )
+        # Same patient, two steps, two panel rows.
+        self.assertEqual(
+            {item["patient_folder"] for item in items}, {self.folder}
+        )
+        self.assertEqual(summary["final_bill"], 1)
+        self.assertEqual(summary["date_fill"], 1)
+        self.assertTrue(
+            all(item["status"] == store.STATUS_PENDING for item in items)
+        )
+
+    def test_fan_out_false_keeps_one_row_per_fees_row(self):
+        items, _summary, _note = store.build_plan_from_csv(
+            self.write([self.no_dates()]), output_root=self.root, fan_out=False
+        )
+        self.assertEqual(
+            [item["action"] for item in items], [actions.ACTION_FINAL_BILL]
+        )
+
+    def test_completed_final_bill_leaves_only_the_date_fill_row(self):
+        """The feedback loop: next plan load shows just what is left."""
+        completed = {(self.folder, actions.ACTION_FINAL_BILL)}
+        items, _summary, note = store.build_plan_from_csv(
+            self.write([self.no_dates()]),
+            output_root=self.root,
+            completed=completed,
+        )
+        self.assertEqual(
+            [item["action"] for item in items], [actions.ACTION_DATE_FILL]
+        )
+        self.assertIn("1 row tapos na", note)
+
+    def test_step_rows_stay_adjacent_for_the_same_patient(self):
+        other = "SANTOS, MARIA - 000000000021401 - ADM20260906_DIS20260912"
+        items, _summary, _note = store.build_plan_from_csv(
+            self.write([
+                self.no_dates(),
+                dict(
+                    ready_row(other),
+                    **{
+                        "Status": "NO FINAL BILL",
+                        "Consent Date (hpatcon1.consentdate)": "",
+                        "Ready to Generate XML": "NO",
+                    }
+                ),
+                ready_row("THIRD PATIENT"),
+            ]),
+            output_root=self.root,
+        )
+        pairs = [(item["patient_folder"], item["action"]) for item in items]
+        self.assertEqual(pairs, [
+            (self.folder, actions.ACTION_FINAL_BILL),
+            (self.folder, actions.ACTION_DATE_FILL),
+            (other, actions.ACTION_FINAL_BILL),
+            (other, actions.ACTION_DATE_FILL),
+            ("THIRD PATIENT", actions.ACTION_XML_CLICKER),
+        ])
+
+    def test_manual_review_row_never_gains_a_date_fill_step(self):
+        items, _summary, _note = store.build_plan_from_csv(
+            self.write([
+                dict(
+                    ready_row("NO RECORD PATIENT"),
+                    **{
+                        "Status": "NO RECORD",
+                        "Prof Fee Sign Date (hprofserv.pdoctorsigndate)": "",
+                        "Ready to Generate XML": "NO",
+                    }
+                )
+            ]),
+            output_root=self.root,
+        )
+        self.assertEqual(
+            [item["action"] for item in items], [actions.ACTION_MANUAL_REVIEW]
+        )
+
+
 class ApprovalTests(unittest.TestCase):
     def _items(self):
         return [
