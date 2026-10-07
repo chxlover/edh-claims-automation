@@ -39,6 +39,95 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-10-07 - Fix: PHIC row consensus elects the wrong confinement row (wrong-row click)
+
+Reason:
+
+Live workflow failure ngayong araw — Date Fill node sumabot sa
+`SKIPPED_SELECTED_ROW_MISMATCH` para sa pasyenteng `DE LEON, YERIN ROBE
+CHRISTINA DEL ROSARIO` (000000000009254). Na-reproduce offline mula sa
+`logs/phic_beneficiaries_select_20261007_133146.png`:
+
+- Naka-blue-highlight na ang tamang row (09/16/2026-09/18/2026) nang mag-open
+  ang PHIC Beneficiaries form (`is_blue_highlighted_row(png, 205) = True`).
+- Ang blue (white-on-blue) na target row ay maling nababasa ng OCR — year
+  misread `2026 -> 2028` (kapareho ng sa Admission History log).
+- Isang OCR pass lang ang nakakita ng target row (y=205); apat na passes ay
+  bumagsak sa dated-name fallback at bumoto ng IBAng confinement ng parehong
+  pasyente (07/11/2025-07/14/2025, y≈288).
+- Majority-cluster consensus → mananalo ang maling row 4-1 → tatlong click sa
+  y=281 → gumalaw ang highlight palayo sa tamang row → hindi na ma-confirm ang
+  blue proof → `SKIPPED_SELECTED_ROW_MISMATCH` (safe stop pero nakapag-click
+  na ng mali).
+
+Sinubukan ding idagdag ang inverted-contrast OCR passes para sa blue rows pero
+hindi nakatulong (walang dagdag na pass ang nakabasa ng target row), kaya
+logic-level ang fix — walang OCR engine na pinalitan.
+
+Files added / modified:
+
+- date_fill_hbsys/hbsys_fill_dates_testing.py
+  - bagong `_parse_mdy()` at `phic_row_date_evidence()`: inuuri ang
+    confinement-column dates ng bawat boto — `"confine"` (month/day tugma sa
+    claim; taon misread ay tolerado), `"refute"` (malinaw na ibang
+    confinement), `"unknown"` (garbled/missing); ang BIRTHDAY at ibang later
+    na date columns ay hindi bumuboto (unang dalawang date lang).
+  - `find_phic_beneficiary_row_y_from_variants()`: ang `"refute"` na boto ay
+    **abstain** na (hindi na puwedeng manalo sa cluster) + bagong optional
+    `require_confinement_evidence=True` para sa tentative locate.
+  - `click_phic_and_select_claim()`:
+    1. kapag walang 2-vote consensus → single-pass **tentative locate** na
+       gamit confinement-date evidence lamang (taon misread OK);
+    2. **already-highlighted short-circuit** — kung naka-blue na ang target
+       row sa select capture: audit `MATCH` + return True na **walang click**
+       (ito ang eksaktong nag-save ng failed run — naka-blue na pala ang
+       tamang row; ang lumang code ang gumalaw nito palayo);
+    3. **proof re-target** — kapag hindi blue, ang susunod na attempt ay
+       kakabigin sa `proof_y` mula sa proof OCR, hindi sa lumang `click_y`
+       (dati: 3 beses sa y=281 habang report ng proof ay y≈207).
+  - `is_blue_highlighted_row()`: `Image.getdata()` → `tobytes()` byte scan
+    (inutusan ng Pillow 14 DeprecationWarning sa run log).
+- date_fill_hbsys/hbsys_fill_dates.py (production) — parehong apat na
+  pagbabago, para manatiling pareho ang production at testing stacks (ugali ng
+  mga naunang PHIC fix records).
+- date_fill_hbsys/test_hbsys_date_fill_verifier.py — 4 bagong test:
+  refuted-votes consensus, tentative-evidence requirement,
+  already-highlighted no-click, proof re-target click coordinates.
+- CHANGE_RULES.md — record na ito.
+
+Behavior:
+
+- Before: pwedeng makapag-elect ang majority na maling row mula sa fallback
+  votes; laging nagki-click kahit naka-select na ang tamang row; paulit-ulit sa
+  lumang kahit anong y.
+- After: ang malinaw na ibang confinement boto ay abstain; walang click kapag
+  naka-blue na ang tamang row; nagre-re-target mula sa proof OCR; ganun pa rin
+  ang safe-stop kapag walang ligtas na patunay.
+
+Safety / compatibility:
+
+- HINDI pinaluwag ang min-2 consensus para sa normal na pagki-click — ang
+  tentative single-pass ay locate lamang at laging dadaan sa blue-highlight
+  proof gate; kapag mali ang tentative at hindi blue, proof-gated pa rin ang
+  klik → safe stop pa rin ang outcome (hindi masama kaysa dating behavior).
+- Walang OCR/signing/XML/Claims Checker na binago; ang umiiral na fallback,
+  first-name guard, ABTC strict/accreditation/name proofs ay pareho pa rin —
+  vote classification lang ang idinagdag (`require_confinement_evidence=False`
+  by default kaya walang ibang caller ang naapektuhan).
+- `claims_checker.py` na `getdata()` ay hindi hinawakan (DO NOT CHANGE).
+
+Verification performed:
+
+- `python -m unittest test_hbsys_date_fill_verifier` → **38/38 OK**
+  (34 umiiral + 4 bago; walang na-regress).
+- Offline end-to-end sa totoong failed-run screenshot:
+  strict consensus → `None` (mga 07/11 boto = abstain), tentative locate →
+  `y=205.2`, blue = True, buong `click_phic_and_select_claim` → `True` na may
+  **0 grid clicks** at audit `phic_highlighted_row_match=MATCH`.
+- `py_compile -W error::SyntaxWarning` sa tatlong .py file → OK.
+- LIVE HBSys run ay HINDI pa na-uulit dito (kailangan ng bukang HBSys) —
+  i-re-run ng may-ari ang Date Fill node sa pasyenteng ito para makumpirma.
+
 ### 2026-10-07 - Feature: mini robot run-status overlay sa lower-left screen corner
 
 Reason:

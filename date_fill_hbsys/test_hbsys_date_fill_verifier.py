@@ -437,6 +437,191 @@ class VisualSelectionProofTests(unittest.TestCase):
             self.assertTrue(self.operator.is_blue_highlighted_row(path, 200))
             self.assertFalse(self.operator.is_blue_highlighted_row(path, 250))
 
+    def test_refuted_other_confinement_votes_cannot_win_consensus(self) -> None:
+        """Live 2026-10-07: the blue target row OCRs as 09/16/2028 while four
+        passes read the patient's OTHER confinement (07/11/2025). Those votes
+        must abstain instead of outvoting the claim row."""
+        target_row = [
+            OcrItem("09/16/2028", 0.99, 40, 205),
+            OcrItem("09/18/2026", 0.99, 120, 205),
+            OcrItem("DE LEON YERIN ROBE CHRISTINA DEL ROSARIO", 0.99, 250, 205),
+        ]
+        other_row = [
+            OcrItem("07/11/2025", 0.99, 40, 288),
+            OcrItem("07/14/2025", 0.99, 120, 288),
+            OcrItem("DE LEON YERIN ROBE CHRISTINA DEL ROSARIO", 0.99, 250, 288),
+        ]
+        variants = [target_row, other_row, other_row, other_row, other_row]
+        arguments = (
+            "09/16/2026",
+            "09/18/2026",
+            "DE LEON, YERIN ROBE CHRISTINA DEL ROSARIO",
+        )
+
+        # The refuted 2025 votes abstain, so the one lone 2026 vote stays
+        # below the required consensus instead of electing y=288.
+        self.assertIsNone(
+            self.operator.find_phic_beneficiary_row_y_from_variants(
+                variants,
+                *arguments,
+                strict=False,
+                minimum_consensus=2,
+            )
+        )
+
+        # Two clean target passes now win the consensus outright.
+        self.assertEqual(
+            self.operator.find_phic_beneficiary_row_y_from_variants(
+                [target_row, target_row, other_row, other_row],
+                *arguments,
+                strict=False,
+                minimum_consensus=2,
+            ),
+            205,
+        )
+
+        # The single-pass tentative locate lands on the claim row, never on
+        # the patient's other confinement.
+        self.assertEqual(
+            self.operator.find_phic_beneficiary_row_y_from_variants(
+                variants,
+                *arguments,
+                strict=False,
+                minimum_consensus=1,
+                require_confinement_evidence=True,
+            ),
+            205,
+        )
+
+    def test_tentative_locate_requires_confinement_date_evidence(self) -> None:
+        garbled_row = [
+            OcrItem("00/16/2026", 0.99, 40, 205),
+            OcrItem("DE LEON YERIN ROBE", 0.99, 250, 205),
+        ]
+        arguments = (
+            "09/16/2026",
+            "09/18/2026",
+            "DE LEON, YERIN ROBE CHRISTINA DEL ROSARIO",
+        )
+
+        # Month 00 is unreadable: the vote is tolerated by the normal
+        # consensus but is too weak for the tentative single-pass locate.
+        self.assertEqual(
+            self.operator.find_phic_beneficiary_row_y_from_variants(
+                [garbled_row],
+                *arguments,
+                strict=False,
+                minimum_consensus=1,
+            ),
+            205,
+        )
+        self.assertIsNone(
+            self.operator.find_phic_beneficiary_row_y_from_variants(
+                [garbled_row],
+                *arguments,
+                strict=False,
+                minimum_consensus=1,
+                require_confinement_evidence=True,
+            )
+        )
+
+    @mock.patch("hbsys_fill_dates_testing.sleep_short")
+    @mock.patch("hbsys_fill_dates_testing.pyautogui.click")
+    def test_click_phic_confirms_already_highlighted_row_without_clicking(
+        self, mock_click: mock.Mock, _mock_sleep: mock.Mock
+    ) -> None:
+        claim = SimpleNamespace(
+            admission_grid="09/16/2026",
+            discharge_grid="09/18/2026",
+            patient_name="DE LEON, YERIN ROBE CHRISTINA DEL ROSARIO",
+        )
+        operator = HbsysOperator(live=True, pause=0, confirm_each=False)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "phic_select.png"
+            image = Image.new("RGB", (1600, 400), "white")
+            ImageDraw.Draw(image).rectangle((5, 198, 1579, 212), fill=(0, 120, 215))
+            image.save(path)
+
+            operator.hbsys_window = SimpleNamespace(
+                rectangle=lambda: SimpleNamespace(left=10, top=20)
+            )
+            operator.capture_window = lambda window, prefix: path
+            operator.dismiss_claim_form4_after_phic_if_visible = lambda: True
+            variant = [
+                OcrItem("09/16/2026", 0.99, 40, 205),
+                OcrItem("09/18/2026", 0.99, 120, 205),
+                OcrItem("DE LEON YERIN ROBE CHRISTINA DEL ROSARIO", 0.99, 250, 205),
+            ]
+            with mock.patch(
+                "hbsys_fill_dates_testing.read_ocr_item_variants",
+                return_value=[variant],
+            ):
+                result = operator.click_phic_and_select_claim(claim)
+
+        self.assertTrue(result)
+        row_clicks = [
+            call.args for call in mock_click.call_args_list if call.args[1] > 100
+        ]
+        self.assertEqual(row_clicks, [])
+        self.assertEqual(operator.audit["phic_highlighted_row_match"], "MATCH")
+
+    @mock.patch("hbsys_fill_dates_testing.sleep_short")
+    @mock.patch("hbsys_fill_dates_testing.pyautogui.click")
+    def test_click_phic_retargets_next_click_from_proof_ocr(
+        self, mock_click: mock.Mock, _mock_sleep: mock.Mock
+    ) -> None:
+        claim = SimpleNamespace(
+            admission_grid="09/16/2026",
+            discharge_grid="09/18/2026",
+            patient_name="DE LEON, YERIN ROBE CHRISTINA DEL ROSARIO",
+        )
+
+        def row_at(y: float) -> list[OcrItem]:
+            return [
+                OcrItem("09/16/2026", 0.99, 40, y),
+                OcrItem("09/18/2026", 0.99, 120, y),
+                OcrItem("DE LEON YERIN ROBE CHRISTINA DEL ROSARIO", 0.99, 250, y),
+            ]
+
+        operator = HbsysOperator(live=True, pause=0, confirm_each=False)
+        with TemporaryDirectory() as directory:
+            plain = Path(directory) / "plain.png"
+            highlighted = Path(directory) / "highlighted.png"
+            Image.new("RGB", (1600, 400), "white").save(plain)
+            proof = Image.new("RGB", (1600, 400), "white")
+            ImageDraw.Draw(proof).rectangle((5, 293, 1579, 307), fill=(0, 120, 215))
+            proof.save(highlighted)
+
+            operator.hbsys_window = SimpleNamespace(
+                rectangle=lambda: SimpleNamespace(left=10, top=20)
+            )
+            operator.dismiss_claim_form4_after_phic_if_visible = lambda: True
+            captures = iter([plain, plain, plain, highlighted])
+            operator.capture_window = lambda window, prefix: next(captures)
+            ocr_passes = iter(
+                [
+                    [row_at(200), row_at(200)],
+                    [row_at(300), row_at(300)],
+                    [row_at(300), row_at(300)],
+                    [row_at(300), row_at(300)],
+                ]
+            )
+            with mock.patch(
+                "hbsys_fill_dates_testing.read_ocr_item_variants",
+                side_effect=lambda _path: next(ocr_passes),
+            ):
+                result = operator.click_phic_and_select_claim(claim)
+
+        self.assertTrue(result)
+        row_clicks = [
+            tuple(call.args)
+            for call in mock_click.call_args_list
+            if call.args[1] > 100
+        ]
+        # Attempt 1 clicked the initial locate (y=200); the proof OCR kept
+        # reporting y=300, so attempt 2 must click the re-targeted row.
+        self.assertEqual(row_clicks, [(270, 220), (400, 320)])
+
     def test_safe_reset_accepts_hospital_n0_ocr(self) -> None:
         proof_text = "HBSYS BILLING HOSPITAL N0: 000000000019272 CASE TYPE"
 

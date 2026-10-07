@@ -497,18 +497,49 @@ class HbsysOperator:
             raise RuntimeError("HBSys window is not focused.")
 
         image_path = self.capture_window(self.hbsys_window, "phic_beneficiaries_select")
+        ocr_variants = read_ocr_item_variants(image_path)
         row_y = self.find_phic_beneficiary_row_y_from_variants(
-            read_ocr_item_variants(image_path),
+            ocr_variants,
             claim.admission_grid,
             claim.discharge_grid,
             claim.patient_name,
             minimum_consensus=2,
         )
         if row_y is None:
+            # Single-pass rescue (Change Record 2026-10-07): the selected
+            # (blue) target row OCRs poorly — its year misreads as 2028 — so
+            # often only ONE pass carries the claim's own confinement
+            # month/day. Trust that locate only together with the blue proof
+            # below or the proof-gated click loop.
+            row_y = self.find_phic_beneficiary_row_y_from_variants(
+                ocr_variants,
+                claim.admission_grid,
+                claim.discharge_grid,
+                claim.patient_name,
+                minimum_consensus=1,
+                require_confinement_evidence=True,
+            )
+            if row_y is not None:
+                self.log_action(
+                    f"PHIC tentative single-pass row locate y={row_y:.1f} "
+                    "carrying the claim confinement dates"
+                )
+        if row_y is None:
             self.log_action(
                 "matching PhilHealth Beneficiaries row not found; stopping for review"
             )
             return False
+
+        # HBSys can open Beneficiaries with the claim's row ALREADY selected.
+        # Clicking before checking moved the highlight OFF the correct row
+        # (live failure 2026-10-07), so confirm first.
+        if self.is_blue_highlighted_row(image_path, row_y):
+            self.log_action(
+                f"PhilHealth Beneficiaries row {claim.admission_grid}-"
+                f"{claim.discharge_grid} already highlighted; selection "
+                "confirmed without clicking"
+            )
+            return True
 
         rect = self.hbsys_window.rectangle()
         click_y = rect.top + int(round(row_y))
@@ -546,11 +577,81 @@ class HbsysOperator:
                     f"PhilHealth Beneficiaries attempt {attempt}: clicked row is "
                     "not the highlighted match"
                 )
+                # Self-correction: if the proof OCR locates the claim row at
+                # a different y than the row we clicked, the next attempt
+                # must click the proof location, not repeat the stale one
+                # (live failure 2026-10-07 clicked y=281 three times while
+                # the proof kept reporting y≈207).
+                if proof_y is not None:
+                    proof_click_y = rect.top + int(round(proof_y))
+                    if abs(proof_click_y - click_y) > 4:
+                        self.log_action(
+                            f"re-target next PHIC click to y={proof_click_y}: "
+                            "proof OCR located the claim row elsewhere"
+                        )
+                        click_y = proof_click_y
         self.log_action(
             "PhilHealth Beneficiaries row never highlighted as selected; "
             "stopping for review"
         )
         return False
+
+    @staticmethod
+    def _parse_mdy(value: str) -> tuple[int, int] | None:
+        """Parse MM/DD/YYYY into (month, day); None when OCR garbled it."""
+        match = re.fullmatch(r"\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*", value or "")
+        if not match:
+            return None
+        month, day = int(match.group(1)), int(match.group(2))
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return None
+        return month, day
+
+    def phic_row_date_evidence(
+        self,
+        items: list[OcrItem],
+        row_y: float,
+        admission_date: str,
+        discharge_date: str,
+    ) -> str:
+        """Classify the confinement-column dates OCR read on one grid row.
+
+        Returns:
+            "confine" — a date matches the claim's month/day (year OCR
+                        misreads such as 2026 -> 2028 are tolerated).
+            "refute"  — the dates are readable but belong to a different
+                        confinement of the same patient (for example the
+                        07/11/2025 stay when the claim is 09/16/2026). Such
+                        a vote must never help elect the clicked row.
+            "unknown" — no usable date evidence (garbled or missing).
+
+        Only the first two readable dates count: ADMISSION DATE and
+        DISCHARGE DATE are the first two date columns, while BIRTHDAY and
+        similar later columns must not carry the decision.
+        """
+        target_days = {
+            parsed
+            for expected in (admission_date, discharge_date)
+            if (parsed := self._parse_mdy(expected)) is not None
+        }
+        target_months = {month for month, _ in target_days}
+        row_dates: list[tuple[int, int]] = []
+        for item in sorted(
+            (value for value in items if abs(value.y - row_y) <= 10),
+            key=lambda value: value.x,
+        ):
+            for match in DATE_RE.finditer(item.text):
+                parsed = self._parse_mdy(match.group(0))
+                if parsed is not None:
+                    row_dates.append(parsed)
+        confinement = row_dates[:2]
+        if not confinement:
+            return "unknown"
+        if any(date in target_days for date in confinement):
+            return "confine"
+        if any(month in target_months for month, _ in confinement):
+            return "unknown"
+        return "refute"
 
     def find_phic_beneficiary_row_y_from_variants(
         self,
@@ -559,6 +660,7 @@ class HbsysOperator:
         discharge_date: str,
         patient_name: str = "",
         minimum_consensus: int = 1,
+        require_confinement_evidence: bool = False,
     ) -> float | None:
         """Select a PHIC row using all OCR passes and row-position consensus."""
         row_matches: list[float] = []
@@ -570,6 +672,26 @@ class HbsysOperator:
                 patient_name,
             )
             if row_y is None:
+                continue
+            evidence = self.phic_row_date_evidence(
+                items, row_y, admission_date, discharge_date
+            )
+            if evidence == "refute":
+                # Live failure 2026-10-07: four passes read the patient's
+                # OTHER confinement (07/11/2025) because the blue target row
+                # OCRs poorly, and that wrong majority elected the clicked
+                # row. A row whose dates clearly belong to another stay must
+                # abstain instead of voting.
+                self.log_action(
+                    f"PHIC OCR variant {variant_number} abstains: row y="
+                    f"{row_y:.1f} reads a different confinement than the claim"
+                )
+                continue
+            if require_confinement_evidence and evidence != "confine":
+                self.log_action(
+                    f"PHIC OCR variant {variant_number} ignored for the "
+                    f"tentative locate: no claim confinement dates at y={row_y:.1f}"
+                )
                 continue
             row_matches.append(row_y)
             self.log_action(
@@ -766,15 +888,17 @@ class HbsysOperator:
             y1 = max(0, int(row_y) - 7)
             y2 = min(image.height, int(row_y) + 8)
             x2 = min(image.width, 1580)
-            pixels = list(image.crop((5, y1, x2, y2)).getdata())
-        if not pixels:
+            # tobytes() instead of the deprecated Image.getdata() (Pillow 14).
+            raw = image.crop((5, y1, x2, y2)).tobytes()
+        pixel_count = len(raw) // 3
+        if not pixel_count:
             return False
-        blue_pixels = sum(
-            1
-            for red, green, blue in pixels
-            if blue >= 120 and blue > red * 1.25 and blue > green * 1.15
-        )
-        return blue_pixels / len(pixels) >= 0.08
+        blue_pixels = 0
+        for index in range(0, len(raw), 3):
+            red, green, blue = raw[index], raw[index + 1], raw[index + 2]
+            if blue >= 120 and blue > red * 1.25 and blue > green * 1.15:
+                blue_pixels += 1
+        return blue_pixels / pixel_count >= 0.08
 
     @staticmethod
     def normalize_for_name_match(value: str) -> str:
