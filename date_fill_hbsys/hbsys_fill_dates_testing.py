@@ -826,6 +826,8 @@ class HbsysOperator:
         admission_only_candidates: list[tuple[float, str, list[OcrItem]]] = []
         dated_name_candidates: list[tuple[float, str, list[OcrItem]]] = []
         name_tokens = self.name_match_tokens(patient_name)
+        parts = self.name_parts(patient_name)
+        first_name_token = parts["first"]
         normalized_accreditation = re.sub(
             r"[^A-Z0-9]",
             "",
@@ -860,6 +862,17 @@ class HbsysOperator:
 
         if len(candidates) == 1:
             row_y, row_text, _row = candidates[0]
+            # A single confinement match is NOT proof when a sibling shares the
+            # same last name (BALUNSAT, KATE ARIANE vs AMARA MARCELINE). Require
+            # the first-name token to be present in the row text.
+            if first_name_token and first_name_token not in self.normalize_for_name_match(
+                row_text
+            ):
+                self.log_action(
+                    "PHIC single confinement candidate rejected: first name "
+                    f"{first_name_token!r} not found in {row_text!r}"
+                )
+                return None
             return row_y
         if not candidates:
             if strict:
@@ -900,6 +913,16 @@ class HbsysOperator:
         scored: list[tuple[int, float, str]] = []
         for row_y, row_text, _row in candidates:
             normalized_row_text = self.normalize_for_name_match(row_text)
+            # The shared last name ('GONZALES') must NOT carry the decision.
+            # Require the FIRST NAME token; a row matching only the last name
+            # is the wrong sibling and gets score 0 (excluded).
+            if first_name_token and first_name_token not in normalized_row_text:
+                self.log_action(
+                    f"PHIC candidate rejected: first name {first_name_token!r} "
+                    f"not in {row_text!r}"
+                )
+                scored.append((0, row_y, row_text))
+                continue
             score = sum(1 for token in name_tokens if token in normalized_row_text)
             scored.append((score, row_y, row_text))
 
@@ -946,6 +969,28 @@ class HbsysOperator:
         normalized = self.normalize_for_name_match(patient_name)
         tokens = [token for token in normalized.split() if len(token) >= 3]
         return tokens
+
+    @staticmethod
+    def name_parts(patient_name: str) -> dict[str, str | list[str]]:
+        """Split 'LAST, FIRST MIDDLE EXTRA' into role-tagged parts.
+
+        Used by the PHIC Beneficiaries disambiguator: when several rows share
+        the same confinement and the same last name, the FIRST NAME is the only
+        discriminating token. Matching only the shared last name ('GONZALES')
+        selected the wrong sibling (BALUNSAT, KATE ARIANE instead of AMARA
+        MARCELINE) -- Option: require the first-name token to be present.
+        """
+        normalized = re.sub(r"[^A-Z0-9]+", " ", (patient_name or "").upper()).strip()
+        if "," in normalized:
+            last, rest = normalized.split(",", 1)
+            last = last.strip()
+            rest_tokens = [t for t in rest.split() if len(t) >= 3]
+        else:
+            tokens = normalized.split()
+            last = tokens[0] if tokens else ""
+            rest_tokens = tokens[1:]
+        first = rest_tokens[0] if rest_tokens else ""
+        return {"last": last, "first": first, "rest": rest_tokens[1:]}
 
     def open_claim_form_2(self) -> None:
         self.click(P.CLAIM_FORM_2, "Claim Form 2")

@@ -273,5 +273,68 @@ class DuplicateConfinementNameTests(unittest.TestCase):
         self.assertAlmostEqual(result, 150.0)
 
 
+class FirstNameDisambiguationTests(unittest.TestCase):
+    """Same last name + same confinement: the FIRST NAME must decide.
+
+    Live case (2026-10-07): BALUNSAT, AMARA MARCELINE GONZALES (folder)
+    vs BALUNSAT, KATE ARIANE GONZALES (PHIC row) -- the script picked the
+    wrong sibling because the shared last name 'GONZALES' carried the match.
+    """
+
+    @staticmethod
+    def _row_items(y: float, name_texts: list[str]):
+        items = [
+            hdf.OcrItem("09/23/2026", 0.99, 60, y),
+            hdf.OcrItem("09/29/2026", 0.99, 160, y),
+        ]
+        x = 260.0
+        for text in name_texts:
+            items.append(hdf.OcrItem(text, 0.99, x, y))
+            x += 90
+        return items
+
+    def test_wrong_first_name_is_rejected(self):
+        op = _operator()
+        # Both rows share confinement AND last name; only the first name differs.
+        items = self._row_items(150, ["BALUNSAT", "KATE"]) + self._row_items(
+            170, ["BALUNSAT", "AMARA"]
+        )
+        result = op.find_phic_beneficiary_row_y(
+            items,
+            "09/23/2026",
+            "09/29/2026",
+            "BALUNSAT, AMARA MARCELINE GONZALES",
+        )
+        # The wrong sibling (KATE) must NOT be selected.
+        self.assertNotEqual(result, 150.0)
+
+    def test_first_name_disambiguates_two_same_last_name(self):
+        op = _operator()
+        items = self._row_items(150, ["BALUNSAT", "KATE"]) + self._row_items(
+            170, ["BALUNSAT", "AMARA"]
+        )
+        result = op.find_phic_beneficiary_row_y(
+            items,
+            "09/23/2026",
+            "09/29/2026",
+            "BALUNSAT, AMARA MARCELINE GONZALES",
+        )
+        self.assertAlmostEqual(result, 170.0)
+
+    def test_missing_first_name_stops_for_review(self):
+        op = _operator()
+        # OCR reads only the shared last name on both rows -- no first name.
+        items = self._row_items(150, ["BALUNSAT"]) + self._row_items(
+            170, ["BALUNSAT"]
+        )
+        result = op.find_phic_beneficiary_row_y(
+            items,
+            "09/23/2026",
+            "09/29/2026",
+            "BALUNSAT, AMARA MARCELINE GONZALES",
+        )
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
