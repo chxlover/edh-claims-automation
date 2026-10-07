@@ -7492,6 +7492,39 @@ Plan -- walang duplicate logic.
 - **Verification:** `py_compile -W error::SyntaxWarning` clean (4 files);
   `python -m unittest tests.test_date_fill_confinement -v` -> **16/16 OK**
   (was 13; +3 new, 0 regressions).
+
+### 2026-10-06 (follow-up 4) -- PHIC fallback paths also require first name
+
+- **Problem (live 2026-10-07, same BALUNSAT case):** the previous fix only
+  covered 2 of the 4 paths in `find_phic_beneficiary_row_y()`. When AMARA's
+  discharge OCR misreads 09/29/2026 as 09/26/2026, AMARA drops out of
+  `candidates` and the **fallback** fires. The `named_admission_candidates`
+  fallback matched on `any(token in row_text)` -- the shared last name
+  'BALUNSAT' matched KATE's row, so KATE was returned as the single fallback
+  pick. **The discharge dates ARE different (09/29 vs 09/26); the admission
+  dates are the same.** The wrong sibling won via the admission+name fallback,
+  not via a discharge match.
+- **Root cause:** the first-name requirement was applied to the `candidates`
+  path and the scoring path, but NOT to the two fallback paths:
+  `named_admission_candidates` (admission + name token) and
+  `dated_name_candidates` (any dates + name token).
+- **Fix (same guard, 2 more paths):**
+  * `dated_name_candidates` build loop -- skip rows whose text does not contain
+    the first-name token (`continue` instead of appending).
+  * `named_admission_candidates` build loop -- same `continue` guard.
+  * Applied to BOTH `hbsys_fill_dates_testing.py` and `hbsys_fill_dates.py`.
+- **Safety:** a row matching only the shared last name can no longer be a
+  fallback pick. If the correct patient's first name is genuinely unreadable,
+  the method returns `None` (stop for review) -- never guess the wrong sibling.
+- **Tests (NEW, 2 tests):**
+  * `test_fallback_does_not_select_wrong_sibling` -- AMARA discharge misread,
+    KATE's name readable -> KATE (y=150) must NOT be selected.
+  * `test_fallback_selects_correct_when_first_name_readable` -- same
+    misread-discharge, but AMARA's first name readable -> AMARA (y=170)
+    selected via the fallback.
+- **Verification:** `py_compile -W error::SyntaxWarning` clean (4 files);
+  `python -m unittest tests.test_date_fill_confinement -v` -> **18/18 OK**
+  (was 16; +2 new, 0 regressions).
     walang Excel-open**; stop reason ay stdout lang (ini-stream ng adapter).
   * Main dashboard / manual run (CLAIMS_HEADLESS unset) -> ui_enabled()=True
     -> **popup + Excel-open pa rin** (dating gawi, zero change).
