@@ -7423,6 +7423,41 @@ Plan -- walang duplicate logic.
   `extra_env` ng `date_fill_regular` / `date_fill_abtc` (via `build_env()`).
 - **Behavior:**
   * Workflow tab (CLAIMS_HEADLESS=1) -> ui_enabled()=False -> **walang popup,
+- `python -m unittest tests.test_date_fill_headless tests.test_workflow_final_bill_node
+  tests.test_agent_orchestrator` -> **121/121 OK** (walang regression).
+
+### 2026-10-06 (follow-up 2) -- PHIC Beneficiaries intermittent OCR row mismatch (Option A)
+
+- **Problem (live 2026-10-07):** `hbsys_fill_run_20261007_083216.csv` ->
+  ALAURIN, MARY ANN ESCOREL = `SKIPPED_SELECTED_ROW_MISMATCH` (admission_history_match
+  = MATCH, precheck = PROCESS, precheck_reason = "Incomplete or mismatched dates:
+  Professional Fee, Consent, Authorization/Certification.").
+- **Root cause (split):** `precheck_reason` is a **read-only DB precheck** and is
+  CORRECT -- the DB simply has no dates yet, Date Fill is what writes them. The
+  real failure is in `click_phic_and_select_claim()`: `find_phic_beneficiary_row_y_from_variants()`
+  requires `minimum_consensus=2` agreeing OCR passes, and the PHIC Beneficiaries
+  grid OCR is *intermittent* (flaky font / window refresh). Some patients pass,
+  some fail. The safety guard is correct (never guess), but not robust enough.
+- **Fix (Option A -- additive, no safety weakening):**
+  * `date_fill_hbsys/hbsys_read_admission_history_testing.py::build_ocr_variants()`
+    -- 2 new binary-threshold variants (v > 128, v > 160) -> 7 total OCR passes
+    (was 5). Higher chance of reaching consensus 2.
+  * `date_fill_hbsys/hbsys_fill_dates_testing.py::click_phic_and_select_claim()`
+    -- x-offsets `260, 390, 520` (was `260, 520`). 390 hits the row's text area.
+  * Same file -- **re-capture once** before declaring an offset a miss (blue
+    selection can lag one frame behind the click).
+  * `date_fill_hbsys/hbsys_fill_dates.py` -- same 3 changes (kapatid na tool,
+    same proven recipe).
+  * `minimum_consensus=2` and the **blue-highlight proof** are UNCHANGED.
+- **Behavior:** patients that previously failed intermittently now pass; patients
+  with genuinely unreadable PHIC grid still stop for review (correct).
+- **Verification:** `py_compile -W error::SyntaxWarning` clean (6 files);
+  `python -m unittest tests.test_date_fill_confinement tests.test_date_fill_headless
+  tests.test_workflow_final_bill_node tests.test_agent_orchestrator` -> **134/134 OK**
+  (updated `test_two_attempts_without_proof_stop` to 3 offsets).
+- **Note:** `hbsys_fill_dates.py` is the *production* Date Fill tool (the one the
+  main dashboard runs). Same fix applied there so the intermittent failure is
+  fixed in both entry points.
     walang Excel-open**; stop reason ay stdout lang (ini-stream ng adapter).
   * Main dashboard / manual run (CLAIMS_HEADLESS unset) -> ui_enabled()=True
     -> **popup + Excel-open pa rin** (dating gawi, zero change).
