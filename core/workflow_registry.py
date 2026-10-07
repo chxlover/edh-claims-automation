@@ -108,7 +108,7 @@ NODE_REGISTRY: dict[str, NodeSpec] = {
         ),
         NodeSpec(
             key="date_fill_regular",
-            extra_env={"PYTHONPATH": "date_fill_hbsys"},
+            extra_env={"PYTHONPATH": "date_fill_hbsys", "CLAIMS_HEADLESS": "1"},
             label="Date Fill (REGULAR, discharge date)",
             category="HBSys",
             module="date_fill_hbsys.hbsys_fill_dates_testing",
@@ -120,7 +120,7 @@ NODE_REGISTRY: dict[str, NodeSpec] = {
         ),
         NodeSpec(
             key="date_fill_abtc",
-            extra_env={"PYTHONPATH": "date_fill_hbsys"},
+            extra_env={"PYTHONPATH": "date_fill_hbsys", "CLAIMS_HEADLESS": "1"},
             label="Date Fill (ABTC, admission date)",
             category="HBSys",
             module="date_fill_hbsys.hbsys_fill_dates_testing",
@@ -346,8 +346,13 @@ if __name__ == "__main__":
         == ("--production-mode", "--claim-type", "REGULAR")
         and NODE_REGISTRY["date_fill_abtc"].args
         == ("--production-mode", "--claim-type", "ABTC", "--enable-abtc")
-        and NODE_REGISTRY["date_fill_regular"].module
+                and NODE_REGISTRY["date_fill_regular"].module
         == "date_fill_hbsys.hbsys_fill_dates_testing",
+    )
+    check(
+        "registry: date_fill nodes are headless in the Workflow engine",
+        NODE_REGISTRY["date_fill_regular"].extra_env["CLAIMS_HEADLESS"] == "1"
+        and NODE_REGISTRY["date_fill_abtc"].extra_env["CLAIMS_HEADLESS"] == "1",
     )
     check(
         "registry: categories cover all nodes",

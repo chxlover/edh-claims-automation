@@ -40,6 +40,7 @@ from hbsys_date_fill_verifier import (
     VerificationError,
 )
 from hbsys_window import find_hbsys_window
+from date_fill_headless import ui_enabled
 
 LOG_DIR = Path("logs") / "testing"
 RUN_LABEL = "Date Fill Testing"
@@ -1521,7 +1522,8 @@ def main() -> int:
     if args.claim_type == "ABTC" and not args.enable_abtc:
         message = "ABTC Date Fill is available only through Date Fill Testing."
         print(message)
-        show_popup(RUN_LABEL, message, error=True)
+        if ui_enabled():
+            show_popup(RUN_LABEL, message, error=True)
         return 2
 
     source_dir = args.ready_dir or DEFAULT_READY_DIR
@@ -1658,16 +1660,22 @@ def main() -> int:
             f"Discharge: {failed.get('discharge', '')}\n\n"
             f"Reason:\n{describe_stop_status(failed.get('status', ''))}\n\n"
             f"CSV log saved here:\n{log_path.resolve()}\n\n"
-            "Please review the current HBSys screen before running Date Fill again."
+                        "Please review the current HBSys screen before running Date Fill again."
         )
         print(
             "Date Fill stopped before completion. CSV was saved but not opened "
             "automatically so you can review HBSys first."
         )
-        show_popup(f"{RUN_LABEL} Stopped", stop_message, error=True)
+        # Headless Workflow engine: skip the modal popup (it would block the
+        # unattended batch). The stop reason is still streamed to the log.
+        if ui_enabled():
+            show_popup(f"{RUN_LABEL} Stopped", stop_message, error=True)
+        else:
+            print(stop_message, flush=True)
         return 1
 
-    open_run_log(log_path)
+    if ui_enabled():
+        open_run_log(log_path)
     if failed_rows:
         message = (
             "Date Fill finished, but some patients were safely skipped.\n\n"
@@ -1676,23 +1684,25 @@ def main() -> int:
             f"Skipped/failed: {len(failed_rows)}\n\n"
             f"CSV log:\n{log_path.resolve()}"
         )
-        show_popup(
-            f"{RUN_LABEL} Complete with Skipped Patients",
-            message,
-            error=True,
-        )
+        if ui_enabled():
+            show_popup(
+                f"{RUN_LABEL} Complete with Skipped Patients",
+                message,
+                error=True,
+            )
         return 1
 
-    show_popup(
-        f"{RUN_LABEL} Complete",
-        (
-            "Date Fill completed successfully.\n\n"
-            f"Processed & verified: {len(results) - len(skipped_complete_rows)}\n"
-            f"Skipped (dates already complete): {len(skipped_complete_rows)}\n\n"
-            f"CSV log:\n{log_path.resolve()}"
-        ),
-        error=False,
-    )
+    if ui_enabled():
+        show_popup(
+            f"{RUN_LABEL} Complete",
+            (
+                "Date Fill completed successfully.\n\n"
+                f"Processed & verified: {len(results) - len(skipped_complete_rows)}\n"
+                f"Skipped (dates already complete): {len(skipped_complete_rows)}\n\n"
+                f"CSV log:\n{log_path.resolve()}"
+            ),
+            error=False,
+        )
     return 0
 
 
