@@ -335,6 +335,48 @@ class FirstNameDisambiguationTests(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    def test_fallback_does_not_select_wrong_sibling(self):
+        """Admission+name fallback must not pick the wrong sibling.
+
+        Live case: AMARA's discharge OCR misreads 09/29/2026 as 09/26/2026,
+        so AMARA drops out of `candidates`. The fallback then sees KATE's row
+        (admission 09/23/2026 + shared last name 'BALUNSAT') and -- before this
+        fix -- returned KATE. The shared last name must NOT carry the fallback.
+        """
+        op = _operator()
+        # KATE row: correct admission, wrong discharge, shared last name only.
+        kate = self._row_items(150, ["BALUNSAT", "KATE"])
+        kate[1] = hdf.OcrItem("09/26/2026", 0.99, 160, 150)  # discharge differs
+        # AMARA row: correct admission, discharge MISREAD, first name readable.
+        amara = self._row_items(170, ["BALUNSAT", "AMARA"])
+        amara[1] = hdf.OcrItem("09/26/2026", 0.99, 160, 170)  # misread discharge
+        result = op.find_phic_beneficiary_row_y(
+            kate + amara,
+            "09/23/2026",
+            "09/29/2026",
+            "BALUNSAT, AMARA MARCELINE GONZALES",
+        )
+        # KATE (y=150) must NOT be selected -- the wrong sibling.
+        self.assertNotEqual(result, 150.0)
+
+    def test_fallback_selects_correct_when_first_name_readable(self):
+        """Same misread-discharge scenario, but AMARA's first name IS readable.
+
+        The admission+name fallback should then pick AMARA (y=170).
+        """
+        op = _operator()
+        kate = self._row_items(150, ["BALUNSAT", "KATE"])
+        kate[1] = hdf.OcrItem("09/26/2026", 0.99, 160, 150)
+        amara = self._row_items(170, ["BALUNSAT", "AMARA"])
+        amara[1] = hdf.OcrItem("09/26/2026", 0.99, 160, 170)
+        result = op.find_phic_beneficiary_row_y(
+            kate + amara,
+            "09/23/2026",
+            "09/29/2026",
+            "BALUNSAT, AMARA MARCELINE GONZALES",
+        )
+        self.assertAlmostEqual(result, 170.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

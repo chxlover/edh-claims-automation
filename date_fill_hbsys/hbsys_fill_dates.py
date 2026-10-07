@@ -657,6 +657,13 @@ class HbsysOperator:
                 token in self.normalize_for_name_match(row_text)
                 for token in name_tokens
             ):
+                # The shared last name ('BALUNSAT') must NOT carry the fallback
+                # decision either. Require the FIRST NAME token; otherwise this
+                # row is the wrong sibling and must not be a fallback pick.
+                if first_name_token and first_name_token not in self.normalize_for_name_match(
+                    row_text
+                ):
+                    continue
                 dated_name_candidates.append((row_y, row_text, row))
 
         if len(candidates) == 1:
@@ -684,6 +691,11 @@ class HbsysOperator:
                 if name_tokens and any(
                     token in normalized_row_text for token in name_tokens
                 ):
+                    # Same guard as the dated-name fallback: the shared last
+                    # name ('BALUNSAT') must not carry the admission+name
+                    # fallback decision. Require the FIRST NAME token.
+                    if first_name_token and first_name_token not in normalized_row_text:
+                        continue
                     named_admission_candidates.append((row_y, row_text, row))
             if len(named_admission_candidates) == 1:
                 row_y, row_text, _row = named_admission_candidates[0]
