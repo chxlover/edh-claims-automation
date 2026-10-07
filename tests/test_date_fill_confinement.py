@@ -145,10 +145,10 @@ class PhicProofSelectionTests(unittest.TestCase):
         op.hbsys_window = _Window(_Rect(left=10, top=20))
         op.dismiss_claim_form4_after_phic_if_visible = mock.Mock(return_value=True)
         op.capture_window = mock.Mock(
-            side_effect=[Path("select.png"), Path("proof1.png"), Path("proof2.png")]
+            side_effect=lambda *a, **k: Path(f"{a[-1]}.png")
         )
         op.find_phic_beneficiary_row_y_from_variants = mock.Mock(
-            side_effect=[200.0, None, 200.0]
+            side_effect=lambda *a, **k: 200.0
         )
         op.is_blue_highlighted_row = mock.Mock(return_value=False)
         with mock.patch.object(hdf, "read_ocr_item_variants", return_value=[[]]), \
@@ -161,6 +161,7 @@ class PhicProofSelectionTests(unittest.TestCase):
             [
                 (hdf.P.PHIC.x, hdf.P.PHIC.y),
                 (270, 220),  # left+260, top+200
+                (400, 220),  # left+390 middle (Option A, 2026-10-06)
                 (530, 220),  # left+520 retry
             ],
         )

@@ -512,37 +512,40 @@ class HbsysOperator:
 
         rect = self.hbsys_window.rectangle()
         click_y = rect.top + int(round(row_y))
-        for attempt, x_offset in enumerate((260, 520), start=1):
-            click_x = rect.left + x_offset
-            self.click(
-                Point(click_x, click_y),
-                f"PhilHealth Beneficiaries row {claim.admission_grid}-"
-                f"{claim.discharge_grid} attempt {attempt}",
-            )
-            sleep_short(0.6)
-            proof_path = self.capture_window(
-                self.hbsys_window,
-                f"phic_beneficiaries_selected_proof_{attempt}",
-            )
-            proof_y = self.find_phic_beneficiary_row_y_from_variants(
-                read_ocr_item_variants(proof_path),
-                claim.admission_grid,
-                claim.discharge_grid,
-                claim.patient_name,
-                minimum_consensus=2,
-            )
-            if proof_y is not None and self.is_blue_highlighted_row(
-                proof_path, proof_y
-            ):
-                self.log_action(
-                    "PhilHealth Beneficiaries row highlighted and verified "
-                    f"on attempt {attempt}"
+        # Middle x-offset (390) is the row's text area; the flanking offsets
+        # (260/520) cover the date columns. All three keep the blue-highlight
+        # proof requirement (Option A, 2026-10-06).
+        for attempt, x_offset in enumerate((260, 390, 520), start=1):
+                click_x = rect.left + x_offset
+                self.click(
+                    Point(click_x, click_y),
+                    f"PhilHealth Beneficiaries row {claim.admission_grid}-"
+                    f"{claim.discharge_grid} attempt {attempt}",
                 )
-                return True
-            self.log_action(
-                f"PhilHealth Beneficiaries attempt {attempt}: clicked row is "
-                "not the highlighted match"
-            )
+                sleep_short(0.6)
+                proof_path = self.capture_window(
+                    self.hbsys_window,
+                    f"phic_beneficiaries_selected_proof_{attempt}",
+                )
+                proof_y = self.find_phic_beneficiary_row_y_from_variants(
+                    read_ocr_item_variants(proof_path),
+                    claim.admission_grid,
+                    claim.discharge_grid,
+                    claim.patient_name,
+                    minimum_consensus=2,
+                )
+                if proof_y is not None and self.is_blue_highlighted_row(
+                    proof_path, proof_y
+                ):
+                    self.log_action(
+                        "PhilHealth Beneficiaries row highlighted and verified "
+                        f"on attempt {attempt}"
+                    )
+                    return True
+                self.log_action(
+                    f"PhilHealth Beneficiaries attempt {attempt}: clicked row is "
+                    "not the highlighted match"
+                )
         self.log_action(
             "PhilHealth Beneficiaries row never highlighted as selected; "
             "stopping for review"

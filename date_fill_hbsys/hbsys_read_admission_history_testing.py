@@ -207,10 +207,18 @@ def build_ocr_variants(image: Image.Image):
     contrast = ImageEnhance.Contrast(gray).enhance(2.5)
     sharp = ImageEnhance.Sharpness(contrast).enhance(2.0)
 
+    # Binary-threshold variants: PHIC Beneficiaries grid rows often read better
+    # on a binarized image than on the raw gray/sharp passes. Adding them
+    # increases the chance of reaching the required row-position consensus
+    # without weakening the blue-highlight proof (Option A, 2026-10-06).
+    threshold_128 = gray.point(lambda v: 255 if v > 128 else 0)
+    threshold_160 = gray.point(lambda v: 255 if v > 160 else 0)
     variants = [
         (image, 1.0, "--psm 6"),
         (gray, 1.0, "--psm 6"),
         (sharp, 1.0, "--psm 6"),
+        (threshold_128, 1.0, "--psm 6"),
+        (threshold_160, 1.0, "--psm 6"),
     ]
 
     for scale in (2.0, 3.0):

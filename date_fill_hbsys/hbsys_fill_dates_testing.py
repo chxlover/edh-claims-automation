@@ -489,7 +489,10 @@ class HbsysOperator:
 
         if row_y is not None:
             click_y = rect.top + int(round(row_y))
-            for attempt, x_offset in enumerate((260, 520), start=1):
+            # Middle x-offset (390) is the row's text area; the flanking offsets
+            # (260/520) cover the date columns. All three keep the blue-highlight
+            # proof requirement (Option A, 2026-10-06).
+            for attempt, x_offset in enumerate((260, 390, 520), start=1):
                 click_x = rect.left + x_offset
                 self.log_action(
                     "single-click PhilHealth Beneficiaries row "
@@ -518,6 +521,34 @@ class HbsysOperator:
                     proof_y is not None
                     and self.is_blue_highlighted_row(proof_path, proof_y)
                 )
+                # The blue selection can lag one frame behind the click.
+                # Re-capture once before declaring this offset a miss
+                # (Option A, 2026-10-06).
+                if not highlighted and proof_y is not None:
+                    sleep_short(0.6)
+                    retry_path = self.capture_window(
+                        self.hbsys_window,
+                        f"phic_beneficiaries_selected_proof_{attempt}_retry",
+                    )
+                    retry_y = self.find_phic_beneficiary_row_y_from_variants(
+                        read_ocr_item_variants(retry_path),
+                        claim.admission_grid,
+                        claim.discharge_grid,
+                        claim.patient_name,
+                        strict=abtc_mode,
+                        minimum_consensus=2,
+                        match_admission_only=abtc_mode,
+                        required_accreditation=(
+                            ABTC_ACCREDITATION_NO if abtc_mode else ""
+                        ),
+                    )
+                    if (
+                        retry_y is not None
+                        and self.is_blue_highlighted_row(retry_path, retry_y)
+                    ):
+                        proof_path = retry_path
+                        proof_y = retry_y
+                        highlighted = True
                 self.audit["phic_selected_admission"] = (
                     claim.admission_grid if proof_y else ""
                 )
