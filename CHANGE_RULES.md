@@ -7406,6 +7406,33 @@ Plan -- walang duplicate logic.
 ### Safety notes
 
 - **`workflow_config.json` ay HINDI ginalaw** -- naglo-load pa rin ang lumang
+### 2026-10-06 (follow-up) -- Date Fill headless popup/Excel guard (Workflow tab)
+
+- **Problem:** pagkatapos ng Date Fill sa Workflow tab, ang "Date Fill Complete"
+  popup at ang auto-open ng run-log CSV sa Excel ay nagpo-pop-up at nag-o-open
+  pa rin -- naghahadlang sa unattended Final Bill batch (ang HBSys window ay
+  nasa gitna, ang Excel ay nakadikit).
+- **Root cause:** `date_fill_hbsys/hbsys_fill_dates_testing.py` (at ang
+  kapatid na `hbsys_fill_dates.py`) ay may hardcoded `show_popup(...)` /
+  `open_run_log(...)` call sa bawat exit path, walang headless guard.
+- **Fix (pre-existing module, now wired in):** `date_fill_hbsys/date_fill_headless.py`
+  (`ui_enabled()` = `not headless()` = `CLAIMS_HEADLESS != "1"`). Lahat ng
+  6 call site sa `hbsys_fill_dates_testing.py` ay naka-`if ui_enabled():`
+  (ABTC guard, No-claims, Stopped, Complete-with-Skipped, Complete + open_run_log).
+  `core/workflow_registry.py` ay naglalagay ng `CLAIMS_HEADLESS=1` sa
+  `extra_env` ng `date_fill_regular` / `date_fill_abtc` (via `build_env()`).
+- **Behavior:**
+  * Workflow tab (CLAIMS_HEADLESS=1) -> ui_enabled()=False -> **walang popup,
+    walang Excel-open**; stop reason ay stdout lang (ini-stream ng adapter).
+  * Main dashboard / manual run (CLAIMS_HEADLESS unset) -> ui_enabled()=True
+    -> **popup + Excel-open pa rin** (dating gawi, zero change).
+- **Also fixed:** indentation bug sa 5 linya ng `hbsys_fill_dates_testing.py`
+  at 3 linya ng `workflow_registry.py` (doubled indentation from a bad
+  editor match -> IndentationError). All compile `-W error::SyntaxWarning` clean.
+- **Verification:** `py_compile` clean; `python -m core.workflow_registry`
+  PASSED; `python -m core.workflow_engine` PASSED;
+  `python -m unittest tests.test_date_fill_headless tests.test_workflow_final_bill_node
+  tests.test_agent_orchestrator` -> **121/121 OK** (walang regression).
   8-node config. Ang `gui/workflow_tab.py` self-test ay nag-o-overwrite +
   nag-delete nito (`save_config` + `finally: unlink`); PINATAKBO ito nang may
   backup/restore -- hash-verified na naibalik nang buo.
