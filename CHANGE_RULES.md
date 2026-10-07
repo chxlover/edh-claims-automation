@@ -7458,6 +7458,40 @@ Plan -- walang duplicate logic.
 - **Note:** `hbsys_fill_dates.py` is the *production* Date Fill tool (the one the
   main dashboard runs). Same fix applied there so the intermittent failure is
   fixed in both entry points.
+
+### 2026-10-06 (follow-up 3) -- PHIC Beneficiaries wrong-sibling selection (first-name required)
+
+- **Problem (live 2026-10-07):** BALUNSAT, AMARA MARCELINE GONZALES (folder,
+  000000000021855, ADM20260923_DIS20260929) -- the script selected
+  BALUNSAT, KATE ARIANE GONZALES in the PhilHealth Beneficiaries grid. Same
+  confinement period, same last name, different first name.
+- **Root cause:** `find_phic_beneficiary_row_y()` matched on `any(token in
+  row_text)`. The shared last name ('GONZALES') scored points for BOTH rows, so
+  the wrong sibling won. Two unguarded paths:
+  * `len(candidates) == 1` -- returned the single confinement match with NO name
+    check at all.
+  * scoring path -- first name was never required.
+- **Fix (additive, no safety weakening):**
+  * NEW `name_parts(patient_name)` -- splits 'LAST, FIRST MIDDLE EXTRA' into
+    `{'last', 'first', 'rest'}` (comma-aware; falls back to first-token-as-last
+    for uncommaised names).
+  * `len(candidates) == 1` path -- if a first-name token exists, it MUST be
+    present in the row text; otherwise the candidate is rejected and the method
+    returns `None` (stop for review, never guess).
+  * scoring path -- a row missing the first-name token gets score 0 (excluded);
+    the shared last name can no longer carry the decision.
+  * Applied to BOTH `hbsys_fill_dates_testing.py` and `hbsys_fill_dates.py`
+    (production tool).
+- **Safety:** rows with genuinely unreadable first names still stop for review
+  (correct). Patients whose first name is unique in the grid are unchanged.
+- **Tests (NEW `FirstNameDisambiguationTests`, 3 tests):**
+  * `test_wrong_first_name_is_rejected` -- KATE row must NOT be selected.
+  * `test_first_name_disambiguates_two_same_last_name` -- AMARA row selected.
+  * `test_missing_first_name_stops_for_review` -- OCR reads only the shared last
+    name on both rows -> `None`.
+- **Verification:** `py_compile -W error::SyntaxWarning` clean (4 files);
+  `python -m unittest tests.test_date_fill_confinement -v` -> **16/16 OK**
+  (was 13; +3 new, 0 regressions).
     walang Excel-open**; stop reason ay stdout lang (ini-stream ng adapter).
   * Main dashboard / manual run (CLAIMS_HEADLESS unset) -> ui_enabled()=True
     -> **popup + Excel-open pa rin** (dating gawi, zero change).
