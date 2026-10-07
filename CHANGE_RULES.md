@@ -39,6 +39,78 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-10-07 - Feature: mini robot run-status overlay sa lower-left screen corner
+
+Reason:
+
+Operator request: kailangan may maliit na nakasulat/indicator sa lower-left side
+ng screen malapit sa Windows icon para makita agad kung working/running ang
+Claims Bot script. Existing dashboard status text ay nasa loob ng main window,
+kaya hindi madaling makita kapag busy ang operator sa HBSys o ibang window.
+Kasunod na request: gawing parang robot ang status overlay para bagay sa
+automation theme (hindi lang dot/text).
+
+Files added / modified:
+
+- gui/run_status_overlay.py (BAGO)
+  - display-only always-on-top Tk mini window;
+  - lower-left screen position, near taskbar/start corner;
+  - mini robot mascot na **pure Tk Canvas** (walang image asset): antenna
+    status lamp, ears, rounded head na may eyes, mouth grille, body na may
+    dalawang chest LEDs; cyan accent (#38BDF8) sa dark panel — automation look;
+  - Idle = tulog na robot (closed eyes, gray lamp/LED, gray status text);
+  - Running = gising (blinking eyes bawat ~6 s, pulsing green lamp/LED,
+    green status text) + label hal. "Script running" / "Workflow running";
+  - public API: `set_idle()`, `set_running(label)`, `tick()`,
+    `refresh_visibility()`, `destroy()`, property `is_running`;
+  - `_alive()` guard — safe tawagin kahit destroyed na ang window;
+  - `if __name__ == "__main__":` standalone demo (AGENTS.md testing rule).
+- tests/test_run_status_overlay.py (BAGO)
+  - 13 unittest cases: state transitions, label default + truncation,
+    green/gray text colors, lamp pulse, asleep/awake eyes, lower-left
+    position math, hide-when-owner-withdrawn, double-destroy safety;
+  - tunay na widget na withdrawn owner (walang flash sa screen).
+- edh_claims_gui_XML_COPY_BUTTON.py
+  - imports and creates `RunStatusOverlay`;
+  - polls main subprocess + Workflow engine state every 750 ms;
+  - sets overlay to running when a normal script or Recheck INCOMPLETE starts;
+  - returns overlay to Idle after process cleanup — ang dalawang
+    `self.after(0, set_run_status_idle)` sa loob ng worker threads
+    (`_run_script_thread`, `run_recheck`) ay naka-try/except na
+    (RuntimeError/TclError) para hindi masira ang cleanup; ang 750 ms poll
+    loop ang backstop;
+  - destroys/cancels the overlay cleanly when the main GUI closes.
+
+Behavior:
+
+- Before: running state was visible only inside the main dashboard status/log area.
+- After: a small "EDH Claim Automation System" badge with a robot mascot
+  appears at the lower-left screen corner (itaas ng Start button). Robot ay
+  tulog (closed eyes, gray) kapag walang ginagawa; gising at nagba-blink na
+  may pulsing green lamp kapag may running script / Recheck / Workflow.
+
+Safety / compatibility:
+
+- Display-only UI; it does not control mouse, keyboard, OCR, HBSys, signing,
+  XML generation, Claims Checker, MySQL, or SQLite data.
+- Hindi ito kumukuha ng focus (`lift()` lang, walang `focus_force`) — hindi
+  nakaka-abala sa HBSys mouse/keyboard automation.
+- The overlay hides with a withdrawn main window and is cleaned up on GUI
+  destroy, so GUI tests and app shutdown do not leave an orphan window.
+- Walang image asset — purong Tk canvas primitives, walang bagong dependency.
+- No configuration/schema change and no change to processing behavior.
+
+Verification:
+
+- `python -W error::SyntaxWarning -m py_compile edh_claims_gui_XML_COPY_BUTTON.py gui\run_status_overlay.py tests\test_run_status_overlay.py`
+  -> OK.
+- `python -m unittest tests.test_run_status_overlay` -> 13/13 OK.
+- `python -m unittest tests.test_gui_no_xml_panel` -> 12/12 OK.
+- Visual check: PIL screenshot ng lower-left corner sa both states
+  (running = gising na robot + green lamp + "Script running";
+  idle = tulog + gray lamp + "Idle") — confirmed rendered sa itaas ng
+  Windows Start button.
+
 ### 2026-10-06 - Fix: Final Bill batch continues to next patient on ANY error (incl. SystemExit) + traceback logging
 
 Reason:

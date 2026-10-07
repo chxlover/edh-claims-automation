@@ -32,6 +32,7 @@ from gui.claim_attachments_tab import ClaimAttachmentsFrame
 from claims_checker import list_folders_without_xml, output_dir_has_xml
 from gui.workflow_tab import WorkflowFrame
 from gui.pdf_preview_panel import PdfPreviewPanel
+from gui.run_status_overlay import RunStatusOverlay
 from date_fill_hbsys.hbsys_window import find_hbsys_window
 
 BASE_DIR = r"C:\claims_bot"
@@ -1301,15 +1302,32 @@ class EDHClaimsGUI(tk.Tk):
         self.hbsys_status_job = None
         self.hbsys_status_poll_ms = 3000
         self.hbsys_warning_label = None
+        self.run_status_overlay = None
+        self.run_status_overlay_job = None
 
         self.setup_style()
         self.build_ui()
+        self.run_status_overlay = RunStatusOverlay(self)
         self.refresh_dashboard_counts()
         self.schedule_dashboard_auto_refresh()
         self.schedule_auto_process_watcher()
         self.schedule_auto_copy_xml_watcher()
+        self.refresh_run_status_overlay()
         self.check_hbsys_status_now()
         self.refresh_doctor_list()
+
+    def destroy(self):
+        if getattr(self, "run_status_overlay_job", None) is not None:
+            try:
+                self.after_cancel(self.run_status_overlay_job)
+            except Exception:
+                pass
+            self.run_status_overlay_job = None
+        overlay = getattr(self, "run_status_overlay", None)
+        if overlay is not None:
+            overlay.destroy()
+            self.run_status_overlay = None
+        super().destroy()
 
     def setup_style(self):
         style = ttk.Style(self)
@@ -1853,6 +1871,29 @@ class EDHClaimsGUI(tk.Tk):
         """True while the configurable workflow engine is executing."""
         frame = getattr(self, "workflow_frame", None)
         return bool(frame is not None and frame.engine is not None and frame.engine.running)
+
+    def refresh_run_status_overlay(self):
+        overlay = getattr(self, "run_status_overlay", None)
+        if overlay is not None:
+            if self.running_process is not None:
+                overlay.set_running("Script running")
+            elif self.workflow_running():
+                overlay.set_running("Workflow running")
+            else:
+                overlay.set_idle()
+            overlay.tick()
+            overlay.refresh_visibility()
+        self.run_status_overlay_job = self.after(750, self.refresh_run_status_overlay)
+
+    def set_run_status_running(self, label="Script running"):
+        overlay = getattr(self, "run_status_overlay", None)
+        if overlay is not None:
+            overlay.set_running(label)
+
+    def set_run_status_idle(self):
+        overlay = getattr(self, "run_status_overlay", None)
+        if overlay is not None:
+            overlay.set_idle()
 
 
     def build_doctor_tab(self):
@@ -3086,6 +3127,7 @@ class EDHClaimsGUI(tk.Tk):
         self.clear_logs()
         self.progress.start(10)
         self.status_var.set(f"Running: {script_name}")
+        self.set_run_status_running("Script running")
         self.start_time = None
         self.log("=" * 70)
         self.log(f"Running script: {script_path}")
@@ -3204,6 +3246,12 @@ class EDHClaimsGUI(tk.Tk):
 
             # IMPORTANT FIX
             self.running_process = None
+            try:
+                self.after(0, self.set_run_status_idle)
+            except (RuntimeError, tk.TclError):
+                # worker thread cannot queue right now — the 750 ms overlay
+                # poll loop (refresh_run_status_overlay) catches it instead.
+                pass
 
             # stop progress bar
             self.progress.stop()
@@ -3237,6 +3285,8 @@ class EDHClaimsGUI(tk.Tk):
         finally:
             self.progress.stop()
             self.refresh_dashboard_counts()
+            if self.running_process is None:
+                self.after(0, self.set_run_status_idle)
 
     def toggle_auto_process(self):
         enabled = bool(self.auto_process_var.get())
@@ -3953,6 +4003,7 @@ class EDHClaimsGUI(tk.Tk):
         self.clear_logs()
         self.progress.start(10)
         self.status_var.set("Running: Recheck INCOMPLETE")
+        self.set_run_status_running("Recheck running")
 
         def run_recheck():
             try:
@@ -3973,6 +4024,10 @@ class EDHClaimsGUI(tk.Tk):
                 self.log("[RECHECK] Complete.")
             finally:
                 self.running_process = None
+                try:
+                    self.after(0, self.set_run_status_idle)
+                except (RuntimeError, tk.TclError):
+                    pass  # overlay poll loop will catch it within 750 ms
                 self.progress.stop()
                 self.refresh_dashboard_counts()
 
