@@ -137,3 +137,6 @@ _*.png
 *_current.png
 *_proof.png
 debug_*.png
+
+# Office lock files (created when an xlsx is open)
+~\$*.xlsx
