@@ -39,6 +39,1275 @@ changes and must not be recorded individually.
 - Preserve backward compatibility with existing configuration files whenever possible.
 - Test changes in proportion to their risk and record the verification result below.
 
+### 2026-10-09 - Fix: Remaining-patient count gets its OWN overlay line under "Workflow running"
+
+Reason:
+
+Operator report 2026-10-09 (same day, shortly
+after the first version of this feature):
+"hindi nag appear sa overlay dapat sa taas nalang
+ng workflow running... or script running... please
+fix" — ang una mong bersyon ay PINALIT ang
+status text (naging "Date Fill 2 left" ang
+label) sa halip na ipakita ito KASAMA ng
+"Workflow running..." / "Script running...", kaya
+nawala ang dating ibig sabihin ng status line at
+maliwanag na hindi lumalabas ang count sa
+inakita niya.
+
+Root cause: `refresh_run_status_overlay()` ay
+nagpasa ng `tracker.label` bilang ang status text
+(`overlay.set_running(label or "Workflow running")`)
+— isang linya lang ang hawak ng overlay, kaya
+walang maipapakita nang sabay.
+
+Files added / modified:
+
+- `gui/run_status_overlay.py` — (a) bagong
+  `count_label` (row 2, sariling linya sa ilalim
+  ng status text, cyan `COL_TEXT_COUNT` at bold);
+  (b) bagong `set_count()` at `count` property;
+  (c) `set_idle()` ay nina-clear ang count;
+  (d) `_apply_state()` ay naka-update ang count
+  line; (e) `HEIGHT` 52 -> 70 at bagong
+  `COUNT_ROW_HEIGHT = 18` para may puwang ang
+  bagong linya; (f) ang robot canvas ay
+  `rowspan=3` na para sakong abot ang tatlong row;
+  (g) na-update ang module docstring.
+- `edh_claims_gui_XML_COPY_BUTTON.py` —
+  `refresh_run_status_overlay()`: ang status line
+  ay `set_running("Workflow running")` MULI (hindi
+  na ang bilang), at `set_count(tracker.label)` ang
+  nagpapasok ng bilang sa sariling linya. Kapag
+  `running_process` (dashboard script) ang aktibo,
+  `set_count("")` din (walang na-stale na count).
+- `tests/test_run_status_overlay.py` — ang 5
+  dating tests ng count ay REWRITE para sa
+  bagong layout (count line, hindi status line) +
+  4 bagong tests (hindi pinapalitan ang status,
+  survives ang dot animation, truncation, set_idle
+  clears it, may puwang para sa row).
+- `tests/test_gui_workflow_progress_overlay.py` —
+  na-update ang mga assertion (ngayon ay
+  status at count ay hiwalay na linya) at idinagdag
+  ang `_refresh_texts()` helper dahil kailangan
+  ng poll bago basahin ang labl.
+
+Behavior before and after:
+
+- Bago (v1, may bug): "Date Fill 2 left..."
+  lang — nawala ang "Workflow running...".
+- Bago (original): "Workflow running..." lang,
+  walang bilang.
+- Pagkatapos: dalawang linya —
+  itaas: `Workflow running...`
+  ibaba: `Date Fill 2 left` (cyan/bold).
+  Kapag walang bilang: ibaba ay blangko.
+  Kapag may dashboard script: itaas
+  `Script running...`, ibaba ay blangko.
+
+Safety or compatibility notes:
+
+- DISPLAY-ONLY pa rin — walang epekto sa
+  pagpili ng pasyente o sa safety checks.
+- Idinagdag ang `count` property para magkaroon ng
+  testable na accessor (ang GUI tests ay
+  gumagamit nito sa halip na mag-scrape ng
+  pribadong `_count`).
+- Walang pagbabago sa draggable / blink / shine
+  na behavior ng overlay; ang overlay ay 18px
+  lang na mas mataas para sa bagong row.
+- Ang datos ay galing pa rin sa
+  `core/workflow_progress.py` (hindi binago).
+
+Verification performed and its result:
+
+- `python -m unittest
+  tests.test_gui_workflow_progress_overlay
+  tests.test_run_status_overlay
+  tests.test_workflow_progress` — 63 tests, OK.
+- Full suite — 773 tests, OK.
+- Visual/demo check (temp script na
+  `_demo_overlay_count.py`, binura na): napatunayan
+  na ang status line ay nananatiling "Workflow
+  running." AT may hiwalay na count line na
+  nagdaan "Date Fill 3 left" -> "2 left" -> "1
+  left" -> `''` (pagkatapos ng Date Fill) ->
+  "Final Bill 2 left" -> "1 left".
+
+Files added / modified:
+
+### 2026-10-09 - Feature: Status overlay shows the remaining patients for Date Fill and Final Bill
+
+Reason:
+
+Operator request 2026-10-09: "ilagay sa status
+overlay kung ilang patient pa ang natitira na
+iproprocess? sa date fill and final bill" —
+nag-iisa lang ang overlay na "Workflow running..."
+na walang impormasyon kung mag-ilan pa ang
+batches na hindi pa napiproseso. Mahirap
+malaman kung gaano katagal pa bago matapos ang
+run.
+
+Files added / modified:
+
+- `core/workflow_progress.py` (BAGO) — pure,
+  Tk-free na remaining-patient counter na
+  pinapakain ng mga workflow log line at
+  nagbibigay ng maikling label. Kinakain ang
+  teksto na ipinaprinta na ng mga node:
+  Date Fill — `Claims: N` (batch size) at
+  `[LIVE] processing <NAME> | <hosp no>` (isang
+  pasyente); Final Bill — `N patient folder(s)
+  under ..., M pending (NO FINAL BILL)` (queue
+  size) at `[LIVE] (i/N) <FOLDER>` (isang
+  pasyente). Naglalabas ng `Date Fill N left` /
+  `Final Bill N left`; `''` kapag hindi pa alam
+  ang bilang.
+- `edh_claims_gui_XML_COPY_BUTTON.py` —
+  (a) `self.workflow_progress = WorkflowProgress()`
+  sa `__init__`; (b) `build_workflow_tab()` ang
+  mga workflow log line ay dumaan sa tracker
+  bago dumating sa `self.log`; (c)
+  `refresh_run_status_overlay()` ang overlay ay
+  gumagamit ng `tracker.label` at bumabalik sa
+  "Workflow running" kapag walang bilang.
+- `gui/run_status_overlay.py` — `MAX_STATUS_CHARS`
+  24 -> 28 para kasya ang "Date Fill 10 left"
+  at ang 1..3 dots nang hindi nicip-cut.
+- `tests/test_workflow_progress.py` (BAGO) —
+  22 tests.
+- `tests/test_gui_workflow_progress_overlay.py`
+  (BAGO) — 7 tests (real GUI, withdrawn).
+- `tests/test_run_status_overlay.py` — 5 tests
+  (`OverlayPatientCountTests`).
+
+Behavior before and after:
+
+- Bago: overlay ay "Workflow running..." lamang
+  habang tumatakbo ang workflow.
+- Pagkatapos: "Date Fill 8 left..." at
+  "Final Bill 2 left..." habang nag-o-run ang
+  bawat node; bumabalik sa "Workflow running"
+  kapag tapos na ang node (wala nang natitira)
+  at "Idle" kapag tapos na ang lahat.
+
+Safety or compatibility notes:
+
+- DISPLAY-ONLY: ang tracker ay hindi kailanman
+  nagdedesisyon kung kanong pasyenteng itut touch.
+  Kapag may hindi makilalang o sirang linya, maaari
+  lang itong mawalan ng bilang — hindi kailanman
+  mawawalang safety check (trial/dry runs at
+  restart ng node ay ligtas).
+- Naka-anchor sa teksto na umiiral na sa log ng
+  bawat node (hindi hula-hula ng mga bilang):
+  `node_kind()` ay tumutugma sa registry label
+  (`Date Fill ...` / `Final Bill ...`) at `''`
+  ang ibibigay sa kahit anong ibang node.
+- Walang pagbabago sa dating pag-andito: kapag
+  natatapos na ang isang node, nawawala ang
+  bilang para hindi na mag-show ng lumang bilang
+  sa susunod (patayin ang tracker sa `[DONE]` /
+  `[FAILED]` / `[STOPPED]` at sa bagong
+  `[RUNNING]`).
+- Hindi binabago ang overlay na draggable /
+  blink / shine na dating behavior.
+- Walang Excel popup: ang overlay ay display-only
+  lamang, walang bagong subprocess o UI.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_workflow_progress`
+  — 22 tests, OK.
+- `python -m unittest
+  tests.test_gui_workflow_progress_overlay` —
+  7 tests, OK.
+- `python -m unittest tests.test_run_status_overlay`
+  — 29 tests, OK.
+- Full suite — 768 tests, OK.
+- Standalone self-check ng tracker (`python
+  core/workflow_progress.py`) na may tunay na
+  log lines ng workflow run 2026-10-09
+  (Date Fill 3 -> 2 -> 1, pagkatapos ay Final
+  Bill 1 -> 0, at `''` pagkatapos ng `[DONE]`).
+
+### 2026-10-09 - Behavior: Final Bill ignores the generational suffix when matching the folder name to HBSys (III, JR, SR, II, IV, I)
+
+Reason:
+
+Live workflow run 2026-10-09 10:44 — si DAYAG ang
+na-BLOCK ng Final Bill: `Billing (DAYAG, VIC ERNESTO
+TAYABAN)` ang naka-open pero ang folder ay
+`DAYAG, VIC ERNESTO JR TAYABAN`. Parehong pasyente
+(same hospital no 000000000001450), pero may "JR"
+ang folder na wala sa HBSys record — kaya
+`final_bill_block_reason()` ang nag-block at
+`exit code 1` ang Final Bill node.
+
+Operator decision (Melvin, 2026-10-09): "ignore mo
+nalang yung suffix sa folder para magmatch sa
+HBSys, ang mga i-ignore mong suffixes ay ang mga
+sumusunod III, JR SR, II, IV, I".
+
+Files added / modified:
+
+- `core/agent/final_bill_actions.py` — dalawang
+  pure helper: `billing_title_key_loose()` (ang
+  `billing_title_key()` na hindi kasama ang
+  generational-suffix tokens) at
+  `billing_title_is_open(wanted, open_titles)`
+  (True kapag eksaktong bukas ang Billing form ng
+  pasyente; suffix-insensitive fallback TUNGKOL
+  kapag UNIQUE lang ang match). Ginawa ring
+  `_GENERATIONAL_SUFFIX_RE` (word-boundary regex,
+  case-insensitive, listang III|JR|SR|II|IV|I).
+  Na-update ang 2 call site sa loob ng
+  final_bill_actions: ang Close Form guard at ang
+  load relink verification.
+- `core/agent/orchestrator.py` — 3 call site ang
+  gumamit ngayon ng `billing_title_is_open()`:
+  `final_bill_block_reason()` (ang BLOCKED
+  check), ang `already_open` check, at ang
+  `forms_open_fn` na ipinapasa sa runner.
+- `tests/test_agent_final_bill.py` — 10 bagong
+  tests (`BillingTitleSuffixToleranceTests`).
+- `tests/test_agent_orchestrator.py` — 5 bagong
+  tests (`FinalBillSuffixToleranceTests`).
+
+Behavior before and after:
+
+- Bago: folder "... JR TAYABAN" vs HBSys
+  "... TAYABAN" → `BLOCKED | Billing form is
+  open for a different patient` → node exit 1.
+- Pagkatapos: parehong title ay match → tuloy ang
+  Final Bill para sa pasyenteng iyon.
+
+Safety or compatibility notes:
+
+- Ang suffix ay HINDI binabago sa folder name o
+  sa HBSys title — para lang sa COMPARISON key.
+  Nakalalabas pa rin sa logs/reports ang totoong
+  bytes.
+- Ambiguity guard (ang pinakamahalagang parte):
+  kapag DALAWANG Billing form ang bukas na
+  magkaiba lang ng suffix (hal. `Billing (SMITH,
+  JOHN SR)` at `Billing (SMITH, JOHN)`), ibig
+  sabihin ama't anak — `billing_title_is_open()`
+  ay nagbabalik ng **False** at BLOCK pa rin.
+  Hindi pinipili ang automation; manonood lamang
+  ang operator.
+- Word boundary lang ang tinatanggal: `MARIA`,
+  `IVAN`, `IRA`, `IRMA` ay buo pa rin
+  (napatunayan sa tests).
+- May exact match kahit may ambiguity: kapag
+  eksaktong nasa listahan ang titulo ng pasyenteng
+  mismong (`... JOHN JR`), matched ka — walang
+  kailangang mag-alala.
+- HBSys/MySQL: read-only pa rin; walang bagong
+  DB access. Pure string comparison lamang.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_agent_final_bill`
+  — 101 tests, OK.
+- `python -m unittest tests.test_agent_orchestrator`
+  — 98 tests, OK.
+- Full suite — 734 tests, OK.
+- Manual check ng pure helpers sa live case:
+  DAYAG (JR vs none) → True; father+son → False;
+  ibang pasyente → False; IRA/IVAN → True.
+
+Reason:
+
+Live workflow runs 2026-10-09 10:39 at 10:42 (Date
+Fill REGULAR, 3 folders) — ang Date Fill ay nag-stop
+ng walang dapat, sa 2 magkaibang dahilan:
+
+1. COLOBONG (000000000010920) — "Hospital No. not
+   visible on the base screen" TWICE (parehong
+   run), pero ang pasyente ay NAKA-LOAD naman:
+   ang probe screenshot
+   (`patient_load_probe_20261009_104223.png`,
+   `..._104232.png`) ay Billing form ang naka-open
+   na may "BILLING (COLOBONG, JOSEPH DAVE
+   GONZALES)". Ang OCR lamang ang nagsabi ng
+   "not visible" dahil binasa nito ang numero
+   bilang ...10820 samantalang ang totoong numero
+   ay ...10920 — isang digit na 9/8 lang ang
+   na-misread. Ito ay FALSE NEGATIVE: ang
+   pasyente ay nasa screen na pero inihinto pa
+   rin ng tool.
+2. DAYAG (000000000001450) — parehong "Hospital
+   No. not visible". Dito ang TOTONG dahilan ay
+   iba: ang probe
+   (`patient_load_probe_20261009_104349.png`)
+   ay PATIENT RECORD FORM ang naka-open (hindi
+   Billing form) at naka-load pa rin si CORMINAL
+   — walang Hospital No. field ang screen na iyon,
+   kaya ang double-click ay humawak sa label at
+   ang type ay napunta walang saan. Naabot lang
+   ng tool ang Patient Record Form dahil ang
+   flow ng CORMINAL (na VERIFIED) ay natapos sa
+   screen na iyon. Ang safe reset ay NAMATAY din
+   doon (kailangan ng proof ang "Hospital No."
+   marker), kaya na-stop ang buong batch at hindi
+   na natuloy sa susunod.
+
+Root cause: (1) ang load verification ay
+OCR-only, kaya ang isang digit na misread =
+maling "not loaded"; (2) walang nagsusuri kung
+may Hospital No. field ang current screen bago
+mag-search, kaya ang search ay pumapasok sa
+form na walang field (Patient Record Form) at
+ang typing ay nawawala.
+
+Files added / modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` —
+  (a) `P.HOSPITAL_NO_EDIT_ID = 1004` (verified
+  live control id) + `hospital_no_edit()` /
+  `hospital_no_edit_text()` — binabasa ang
+  EXACT na teksto ng field gamit ang pywinauto,
+  walang OCR; (b)
+  `_hospital_number_visible()` — ang Edit
+  control ang nagpapasya kapag readable, ang
+  proven OCR path ay nananatiling fallback;
+  (c) `ensure_hospital_number_screen()` — kung
+  walang Hospital No. field, isinasara ang
+  active form (ctrl+F4) hanggang 3 rounds para
+  mabalik ang Billing/hospital-search form;
+  (d) `search_hospital_number()` — TINYANGAN
+  mag-type kapag walang field (hindi na
+  anonymous na form ang tinatamaan), kaya
+  caller ang mag-stop ng pasyente nang safe;
+  (e) `reset_to_safe_start()` — isang restore
+  attempt bago maging "unsafe" (para hindi na
+  ma-stop ang batch dahil lang ng screen);
+  (f) `close_open_form_at_run_end()` — restore
+  muna ang base screen bago i-click ang
+  (434, 60) slot, dahil sa Patient Record Form
+  ay ibang button ang naka-roon doon (makakapag-
+  bukas pa lang ng ibang Claim Form).
+- `date_fill_hbsys/hbsys_fill_dates.py` —
+  kaparehong 6 na pagbabago sa production twin.
+- `tests/test_hbsys_fill_dates_testing.py` —
+  13 bagong tests (`HospitalNumberEditTests`).
+- `tests/test_date_fill_confinement.py` —
+  kaparehong 13 para sa production module.
+
+Behavior before and after:
+
+- Bago: ang isang OCR digit misread (COLOBONG)
+  o ang Patient Record Form (DAYAG) ay
+  naghihinto ng pasyente na naka-load na naman,
+  at sa DAYAG ay namatay pa ang safe reset =
+  naputol ang buong batch.
+- Pagkatapos: ang loaded na pasyente ay
+  VERIFIED (exact field text), at ang search ay
+  naka-restore muna ng base screen — tuloy ang
+  susunod na pasyente sa parehong sitwasyon.
+
+Safety or compatibility notes:
+
+- Ang stale-load guard (2026-10-09 CORTEZ/MENESES)
+  ay HINDI nagbabago: ang field ngdating
+  pasyente ay inihahati pa rin. Ang exact check
+  ay mas mahigpit pa sa dating OCR check.
+- Ang `search_hospital_number` ay HINDI na
+  nagta-type sa form na walang field — ang
+  pasyente ay safe-stop (exit-status
+  SKIPPED_...) hindi higit na isang pasyente.
+- Ang restore ay gumagamit ng ctrl+F4 lamang
+  (standard MDI close) at may limit na 3
+  rounds; walang blind toolbar click.
+- HBSys/MySQL: read-only pa rin — walang bagong
+  DB access, ang lang ang UI pre-check.
+- `CLAIMS_HEADLESS=1` sa registry: walang Excel
+  popup sa workflow (ito'y ginamit noon sa run,
+  kaya walang napansin na pagbukas — pero
+  nandiyan pa rin para sa dashboard/manual).
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_hbsys_fill_dates_
+  testing` — 47 tests, OK.
+- `python -m unittest tests.test_date_fill_
+  confinement` — 61 tests, OK.
+- Full suite — 719 tests, OK.
+- Live evidence (re-OCR ng probe screenshots):
+  `patient_load_probe_20261009_104223/104232.png`
+  = Billing form na may COLOBONG (number
+  ...10820 = 9→8 misread);
+  `patient_load_probe_20261009_104349/104359.png`
+  = Patient Record Form na naka-load pa si
+  CORMINAL (walang Hospital No. field);
+  `safe_reset_proof_20261009_104406/104412.png` =
+  Patient Record Form + PhilHealth Beneficiaries
+  pa ring bukas ( kaya hindi clear ang reset).
+
+### 2026-10-09 - Behavior: Final Bill follows Date Fill UNCONDITIONALLY (operator decision — Date Fill gate removed)
+
+Reason:
+
+Operator decision 2026-10-09 (Melvin): "kahit may
+error sa date fill ... idiretso mo padin sa final
+bill. kasi pwede naman i final bill kahit walang
+date fill" — ang Final Bill ay dapat tumakbo sa
+bawat patient folder kahit may pasyenteng hindi
+na-verify ng Date Fill (CORTEZ/MENESES); ang
+final billing ay hindi kailangan ng CF2 date fill.
+Ito ay nag-supersede ng Date Fill verification
+gate na idinagdag ng mas maaga ngayong araw
+(tingin ang entry na "Workflow continues to Final
+Bill after a Date Fill review stop" — ang gate
+portion nito ay tinanggal; ang continue_on_fail
+portion ay nananatili).
+
+Files added / modified:
+
+- `core/agent/final_bill_runner.py` — tinanggal
+  ang Date Fill gate: `date_fill_status_map()`,
+  `date_fill_gate_reason()`, `DATE_FILL_LOG_GLOB`,
+  `DATE_FILL_LOGS_ROOT`, `DATE_FILL_VERIFIED_
+  STATUSES`, `PROJECT_ROOT`, `import csv`, ang
+  gate block sa `main()`, at ang [SKIP] logging
+  para sa gated folders. Ang node ay hindi na
+  nababasa ang Date Fill run log — lahat ng
+  NO FINAL BILL folder (walang .final_bill_ok)
+  ay tumatawid sa Final Bill flow.
+- `tests/test_workflow_final_bill_node.py` —
+  tinanggal ang 7 DateFillGateTests; bagong
+  `DateFillPolicyTests.test_unverified_in_date_
+  fill_log_still_flows` na nagpi-pin ng policy:
+  isang folder na may SKIPPED_ADMISSION_HISTORY_
+  MISMATCH sa pinakabagong Date Fill log ay
+  dumadaloy pa rin sa Final Bill flow.
+
+Behavior before and after:
+
+- Bago (ngayong umaga): Date Fill review stop →
+  engine nagpatuloy (continue_on_fail) → Final Bill
+  ay [SKIP] ang hindi-verified folder na may reason.
+- Pagkatapos: Date Fill review stop → engine
+  nagpatuloy (continue_on_fail) → Final Bill ay
+  tumatakbo sa LAHAT ng NO FINAL BILL folder,
+  kabilang ang hindi-verified na folder.
+
+Safety or compatibility notes:
+
+- Ang safety boundary ay mananatili sa Final Bill
+  flow mismo: `select_confinement_row` (shared,
+  never-guess exact row matching sa Admission
+  History popup) at per-patient continue-on-error
+  (2026-10-06 rule) — ang ambigung confinement ay
+  safe-stop lang sa patient na iyon, hindi buong
+  batch.
+- Ang Date Fill node ay lilitaw pa rin na FAILED
+  sa workflow report kapag may review patient —
+  hindi nawawala ang visibility.
+- Ang fees status gate (NO FINAL BILL only,
+  2026-10-08) ay hindi nabago.
+- HBSys/MySQL ay read-only pa rin; ang Final Bill
+  live flow ay walang bagong HBSys access.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_workflow_final_
+  bill_node` — 34 tests, OK.
+- Project-wide grep: walang natitirang reference
+  sa mga tinanggal na gate names.
+
+### 2026-10-09 - Behavior: Workflow continues to Final Bill after a Date Fill review stop
+
+Reason:
+
+User report 2026-10-09: "yung sa final bill
+hindi nya isinusunod after ng date fill dapat
+isunod na nya kung ano yung nasa workflow" —
+ang Final Bill node ay hindi tumatakbo dahil
+ang Date Fill node ay exit 1 (safe review stop
+para kay CORTEZ/MENESES) at ang engine ay
+pinutol ang chain sa exit-1 node ("Final Bill
+... skipped after failure").
+
+Files added / modified:
+
+- `core/workflow_engine.py` — bagong
+  `DEFAULT_NODE_PARAMS` (`date_fill_regular`
+  at `date_fill_abtc` → `{"continue_on_fail":
+  True}`); `default_workflow()` ay nagpapasa
+  ng params sa bawat NodeInstance.
+- `workflow_config.json` — ang saved workflow
+  ay may `"params": {"continue_on_fail": true}`
+  na rin sa n2 (date_fill_regular).
+- `core/agent/final_bill_runner.py` — bagong
+  Date Fill verification gate: `date_fill_
+  status_map()` ay babasa ng pinakabagong
+  `logs/hbsys_fill_run_*.csv`; ang node ay
+  HINDI na final-bill ang folder na hindi
+  VERIFIED / SKIPPED_DATES_COMPLETE sa Date
+  Fill (ang CF2 date fields nito ay hindi pa
+  nai-fill o na-check — pag-bill nito ay
+  magkukomit ng claim na may incomplete dates).
+  Ang gated folder ay [SKIP] na lang na may
+  reason (paralang resume marker: deliberate
+  skip, hindi node failure, hindi nagbabago
+  ng exit code). Folder na wala sa log (hal.
+  opposite claim type) ay hindi kailanman
+  na-gate; corrupt/missing log ay empty map.
+- `tests/test_workflow_final_bill_node.py` —
+  8 bagong tests (1 continue_on_fail params +
+  7 DateFillGateTests).
+
+Behavior before and after:
+
+- Bago: Date Fill exit 1 → node FAILED →
+  ang Final Bill ay SKIPPED for the whole run.
+- Pagkatapos: Date Fill exit 1 → node FAILED
+  pa rin (visible signal na may review patient)
+  → engine nagpapatuloy → Final Bill tumatakbo
+  sa mga VERIFIED patient at [SKIP] lang ang
+  hindi-na-verify na folder na may malinaw
+  na reason ("Date Fill status '...' — hindi
+  na-verify ng Date Fill ang pasyenteng ito.
+  I-fix ang folder data at i-re-run ang Date
+  Fill muna bago ang Final Bill.").
+
+Safety or compatibility notes:
+
+- Ang Date Fill exit-code contract ay HINDI
+  nagbago (exit 1 pa rin sa hindi-VERIFIED
+  patient) — ang chain continuation ay sa
+  engine level (continue_on_fail), hindi sa
+  pagtatago ng failure.
+- Ang Final Bill gate ay nagpapanatili ng
+  never-guess rule: walang patient na
+  final-billed na hindi na-verify ng Date Fill.
+- Ang --force ay hindi nag-override ng Date
+  Fill gate (gaya ng fees status gate — ang
+  --force ay para lang sa resume marker).
+- Backward compatible: `load_workflow` ay
+  `item.get("params") or {}` — lumang config
+  na walang params ay okay; node na walang
+  continue_on_fail ay default pa rin (stop
+  the chain on failure).
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_workflow_
+  final_bill_node` — 40 tests, OK.
+- Full suite — 695 tests, OK.
+- `workflow_config.json` validated as JSON;
+  n2 params = {"continue_on_fail": true}.
+
+### 2026-10-09 - Behavior: Date Fill reload now verifies the patient actually switched (CORTEZ/MENESES fix)
+
+Reason:
+
+Live workflow run 2026-10-09 08:41: ang 2026-10-08
+reload-retry ay nag-fire para kay CORTEZ at MENESES pero
+hindi nag-heal — ang pangalawang popup pass ay nagbasa
+pa rin ng mga rows ng NAKARAAANG pasyente. Ang
+safe-reset proof screenshots ay nagpakita ng totoong
+sagot: sa CORTEZ's stop ay ang HBSys base screen ay
+naka-load pa rin ng BULAN (Hospital No. 000000000022197),
+at sa MENESES's stop ay naka-load pa rin ng IVANETA
+(000000000022157). Ibig sabihin: ang re-typed hospital
+number ay hindi kailanman nag-switch ng loaded patient —
+ang popup ay tama na nagpapakita ng rows, pero ng mali
+ng pasyente. Dahil sa hindi-VERIFIED na pasyente, exit
+code 1 ang Date Fill at SKIP pa rin ang Final Bill.
+
+Root cause: (1) ang reload ay hindi nag-verify na ang
+Admission History popup ay nasara — kung bukas pa ito,
+ang double-click sa Hospital No. field (166,174) ay
+nagjatay sa loob ng popup at ang typing ay napunta
+sa popup (hindi sa HBSys); (2) ang reload ay hindi
+nag-refocus ng HBSys bago mag-type; (3) walang
+pamantayan na ang searched patient ay load talaga
+bago pagtuunin ang alinman na popup row.
+
+Files added / modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` —
+  `_close_admission_history_popup()` ay nag-verify na
+  ang popup ay nasara (2 rounds, bumabalik ng bool);
+  bagong `_hospital_number_visible(claim)` (OCR ng
+  base screen, kailangan ang searched hospital number,
+  may OCR digit tolerance O/D/Q→0, L/I→1, Z→2, S→5,
+  B→8); ang reload ay nag-close+verify, nag-focus,
+  nag-re-search, tapos nag-verify ng load — at ang
+  unang pass ay nag-re-search din kung hindi visible
+  ang Hospital No. bago magbukas ng popup.
+- `date_fill_hbsys/hbsys_fill_dates.py` — kaparehong
+  changes sa production twin.
+- `tests/test_hbsys_fill_dates_testing.py` —
+  8 bagong tests (popup-will-not-close, patient-never-
+  loads, first-pass re-search, hospital-number-visible
+  helpers, close-helper verification).
+- `tests/test_date_fill_confinement.py` — kaparehong
+  8 bagong tests para sa production module.
+
+Behavior before and after:
+
+- Bago: reload na hindi nag-verify → typing sa popup →
+  patient hindi nag-switch → maling rows → stop.
+- Pagkatapos: ang reload ay kailanganang patunayan na
+  (a) nasara ang popup, (b) visible ang searched
+  Hospital No. sa base screen — kung hindi, safe stop
+  for review na may malinaw na mensahe. Ang
+  first-pass load race ay nag-self-heal din sa pamamagitan
+  ng isang re-search.
+
+Safety or compatibility notes:
+
+- Ang verification ay read-only (capture + OCR ng
+  base screen) — walang klik o keyboard input.
+- Ang never-guess rule ay hindi nababago: hindi
+  nagpapalit ng match ang code; tanging nag-verify
+  lang ng load at nag-retry ng search.
+- Ang Final Bill agent (shared `select_confinement_row`)
+  ay hindi nabago.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_hbsys_fill_dates_testing
+  tests.test_date_fill_confinement` — 78 tests, OK.
+- Full suite — 687 tests, OK.
+- Live evidence (2026-10-09): safe-reset proofs
+  `logs\safe_reset_proof_20261009_084212.png` (BULAN
+  loaded at CORTEZ's stop) at
+  `logs\safe_reset_proof_20261009_084536.png` (IVANETA
+  loaded at MENESES's stop) ang nagsagot sa root cause.
+
+### 2026-10-08 - Behavior: Date Fill self-heals a stale Admit History popup (reload + retry once)
+
+Reason:
+
+Live workflow run 2026-10-08 16:15 (run 1): ang Admit History popup
+nagbukas laban sa KALAHATIN pasyente habang hindi pa tapos ang
+hospital-number load — ang OCR rows ay nasa confinement ng nakaraang
+pasyente (FLORES nakita ang 10/01-10/04 ni DOÑA; GANNABAN ang 10/01-10/04
+ni GAFFUD; TAGUBA ang 10/02-10/04 ni PASCUA; MENESES ang 10/03-10/04 at
+09/20/2022-09/25/2022 ni LIBAN). Walang tumugma sa folder, kaya
+"stopping for review" ang bawat pasyente. Dahil may mga hindi VERIFIED na
+pasyente, exit code 1 ang Date Fill → SKIP ang Final Bill node
+("skipped after failure") — ito ang dahilan kung bakit hindi nagpatuloy
+ang workflow. Ang run 2 (16:23) ang patunay na race condition lang:
+tumugma ang FLORES/GANNABAN/TAGUBA pagkatapos mag-settle ang load.
+Si MENESES ay TOTOONG data mismatch (folder ADM 09-27 DIS 10-02 vs
+HBSys 09-30→10-03) — hindi ito inayos ng code; kailangan itama ng
+operator ang folder/claim data.
+
+Files added / modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` —
+  `select_admission_history_row` ay may dalawang load pass na:
+  kapag walang tumugmang row sa unang pass, isinasara ang
+  leftover Admission History popup (bagong
+  `HbsysOperator._close_admission_history_popup()`), muling
+  i-se-search ang hospital number, +1.0s settle, at muling
+  ino-open ang popup. Pagkatapos ng pangalawang pagkabigo,
+  safe stop for review pa rin (hindi kailanman hinuhulaan).
+  Ang "popup did not open" case ay muling sinusubukan din
+  (hindi na agad nag-a-abort).
+- `date_fill_hbsys/hbsys_fill_dates.py` — kaparehong retry sa
+  production twin (naka-wrap sa `select_confinement_row` call;
+  ang `RuntimeError` ng shared reader — popup never opened — ay
+  hinahawakan na safe per-patient skip na, hindi na
+  nag-crash ng buong batch).
+- `tests/test_hbsys_fill_dates_testing.py` — bagong
+  `AdmissionHistoryReloadTests` (5 tests).
+- `tests/test_date_fill_confinement.py` — bagong
+  `AdmissionHistoryReloadTests` (5 tests).
+
+Behavior before and after:
+
+- Bago: isang stale popup (rows ng nakaraang pasyente) →
+  "stopping for review" → exit 1 → SKIP ang Final Bill.
+- Pagkatapos: ang stale popup ay na-self-heal sa isang reload
+  (tumugma ang run 2); ang TOTOONG mismatch (MENESES) ay
+  safe stop pa rin — hindi pinapalitan ang never-guess rule.
+
+Safety or compatibility notes:
+
+- Ang reload ay read-only (double-click Hospital No., ctrl+A,
+  type, enter) — walang date/form na binabago.
+- Ang popup-close helper ay best-effort (window.close() →
+  fallback focus+esc); kung hindi magsara, ang pangalawang
+  pass ay magkakaron din ng mismatch → safe stop.
+- Walin nabago sa Final Bill agent o sa shared
+  `select_confinement_row` — ang retry ay nasa Date Fill
+  operator level lang.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_hbsys_fill_dates_testing
+  tests.test_date_fill_confinement` — 62 tests, OK.
+- Live evidence: run 2 (2026-10-08 16:23) — tumugma ang
+  FLORES/GANNABAN/TAGUBA pagkatapos mag-reload; si MENESES
+  ay tumigil pa rin (totoong data mismatch).
+
+### 2026-10-08 - Behavior: Date Fill end-of-run Close Form cleanup (X:434 Y:60)
+
+Reason:
+
+Operator request (2026-10-08): pag natapos lahat
+ng pasyente sa Date Fill, i-click ang Close Form
+coordinates X:434 Y:60 para — in case nakaenable
+ang Final Bill (susunod na node) — maging ready
+ang screen para sa pag-enter ng hospital no. Isang
+form na naiwan bukas pagkatapos ng huling pasyente
+(halimbawa: Beneficiaries window na nakaligtas sa
+close slot, tulad ng 2026-10-08 TUTAAN failure)
+ay maaaring harangan ang susunod na node.
+
+Files added / modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` —
+  bagong `P.CLOSE_FORM_END_OF_RUN = Point(434, 60)`;
+  bagong `HbsysOperator.close_open_form_at_run_end()`;
+  tawag sa `main()` pagkatapos ng batch loop, bago
+  ang `write_run_log`.
+- `date_fill_hbsys/hbsys_fill_dates.py` — parehong
+  tatlong pagkakalagay (production twin).
+- `tests/test_hbsys_fill_dates_testing.py` — bagong
+  EndOfRunCloseFormTests (4 tests).
+
+Behavior before and after:
+
+- Bago: ang Date Fill run ay nagtatapos agad pagkatapos
+  ng huling pasyente — walang end-of-run cleanup.
+- Pagkatapos: pagkatapos ng huling pasyente (LIVE
+  lang), kinukuha ng node ang screen OCR. Kung ang
+  screen ay nasa hospital-number base state na,
+  WALANG click — yung slot (434, 60) ay ang Admit
+  History toolbar button sa bare screen, kaya ang
+  pindot ay magbubukas ng popup kundi mag-close ng
+  form. Kung may form na bukas pa (hindi safe base
+  state), i-click ang Close Form slot (434, 60)
+  para isara ito at handa ang screen para sa
+  susunod na node. DRY run: walang click.
+
+Safety / compatibility notes:
+
+- Ang click ay CONDITIONAL sa OCR proof — hindi
+  blind. Hindi kailanman nagbubukas ng Admit History
+  popup sa malinis na screen.
+- Walang bagong dependency; pareho sa testing at
+  production file.
+
+Verification performed:
+
+- `python -m py_compile` sa parehong module: OK.
+- `python -m unittest tests.test_hbsys_fill_dates_testing
+  tests.test_date_fill_confinement` -> 52/52 OK
+  (kabilang ang 4 bagong EndOfRunCloseFormTests).
+- Buong suite (lahat ng tests/test_*.py): tingnan
+  sa entry sa ibaba — 661 tests, OK.
+
+### 2026-10-08 - Fix: Workflow Final Bill node — fees-check gate (NO FINAL BILL only)
+
+Reason:
+
+Operator report (2026-10-08): ang Workflow Tab Final Bill
+node ay "finafinal bill lahat kahit nafinal bill na" —
+ito ay tumatakbo sa BAWAT folder na walang .final_bill_ok
+marker (needs_final_bill) at hindi kailanman tumitingin
+sa fees check status. Kaya ang mga pasyenteng MATCH na
+(final bill na sa HBSys) at MISMATCH ay ini-final bill
+muli. Operator requirement: bago mag-final bill, tumakbo
+muna ng Fees Check — pero SILENT lang (walang CSV/XLSX —
+ang CSV/XLSX ay mula lang sa main dashboard Fees Check) —
+at ang status na NO FINAL BILL lang ang puwedeng i-final
+bill. (Ang Agent Plan path ay na-gate na noong 2026-10-07
+sa pamamagitan ng decide_action; ang Workflow node ang
+nagtitira.)
+
+Files added / modified:
+
+- `core/agent/final_bill_runner.py` — bagong
+  `run_fees_check(output_root)` (tumatakbo ng
+  `fees_checker.run_check(write_reports=False)` laban
+  sa node's own --output-root, temporary na pinapunta
+  ang fees_checker.OUTPUT_DIR at ibinibalik),
+  `fees_status_map(rows)` (pure), `final_bill_skip_reason(status)`
+  at `select_final_bill_folders(candidates, status_map)`.
+  `main()` ay nagpapalitim muna ng Fees Check (silent,
+  read-only), pagkatapos ay HINDI na papasukin ang Final
+  Bill flow kundi ang mga folder na Status = NO FINAL
+  BILL; ang MATCH / MISMATCH / NO RECORD / ERROR / walang
+  row ay na-[SKIP] kasama ang reason. Ang failed Fees
+  Check ay nagbabalik ng EXIT_NOT_OK (hindi kailanman
+  hinihinala ang status). Ang --force ay nag-o-override
+  lang ng marker, HINDI ng status gate.
+- `tests/test_workflow_final_bill_node.py` — bagong
+  FeesGateTests (8 tests: status map, NO-FINAL-BILL-only
+  selection, walang-row skip, force-vs-gate, DRY at LIVE
+  main() filtering, failed-check stop, silent preflight na
+  nascans ang node root); ang mga umiiral na main() tests
+  ay na-update na may `run_fees_check` mock.
+
+Behavior before and after:
+
+- Bago: Final Bill node = BAWAT unmarked folder ->
+  final bill (KAHIT na-final bill na / MISMATCH / NO
+  RECORD).
+- Pagkatapos: Final Bill node = Fees Check muna (silent,
+  walang CSV/XLSX) -> ang NO FINAL BILL lang ang
+  puwedeng i-final bill; ang iba ay [SKIP] sa workflow
+  log kasama ang fees status at reason. Ang dashboard
+  Fees Check button ay nag-generate pa rin ng
+  fees_checker_report.csv/.xlsx (write_reports=True,
+  hindi nagbago).
+
+Safety / compatibility notes:
+
+- Ang preflight ay read-only sa HBSys (kapareho ng Agent
+  Plan preflight); walang CSV/XLSX mula sa node na ito.
+- Hindi kailanman hinihinala: ang folder na walang fees
+  row ay skip + manual review, at ang failed check ay
+  humihinto sa node (exit 1) kung saan ang engine
+  titigilin ang chain.
+- Ang resume-marker contract ay hindi nagbago; ang
+  --force ay nanginginig lamang sa marker.
+- Ang Agent Plan Final Bill step ay na-gate na
+  (decide_action, 2026-10-07) — pareho ng path ng
+  Workflow node ngayon.
+
+Verification performed:
+
+- `python -m py_compile core/agent/final_bill_runner.py`: OK.
+- `python -m unittest tests.test_workflow_final_bill_node`
+  -> 32/32 OK (24 dati + 8 bagong FeesGateTests).
+- Buong suite (lahat ng tests/test_*.py) ->
+  **657 tests, OK**.
+
+### 2026-10-08 - Fix: Date Fill stale PhilHealth Beneficiaries window (TUTAAN live failure)
+
+Reason:
+
+Live run 2026-10-08 (workflow "Date Fill (REGULAR, discharge date)",
+patient TUTAAN, ZENAIDA CASIMINA, 000000000011453): ang
+PhilHealth Beneficiaries window ng PREVIOUS patient
+(SIBALON, MYRNA DULAY) ay hindi nataposong-isara — ang
+Close Form slot click ay hindi kumilos, pero ang close
+verification OCR ay nabasa ang title bilang spaced na
+"PHIL HEALTH BENEFICIARIES" at ang exact-token check
+("PHILHEALTH BENEFICIARIES") ay hindi ito nakita, kaya
+ang window ay pumasok na "closed" habang bukas pa.
+Ang PHIC toolbar click ng next patient ay refocus lang
+ng stale window (kasama na ang identical confinement
+dates 09/22-09/26/2026 ni SIBALON at TUTAAN), at ang
+first-name row guard lang ang humadlang sa wrong pick.
+Pagkatapos ay ang safe reset ay nabigo sa parehong
+paraan (proof still shows the open window) at ang buong
+batch ay natapos — labag sa Golden Rule 9 (isang
+patient ay hindi kailangang i-terminate ang batch).
+
+Files added / modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` —
+  `is_phic_beneficiaries_text` at `is_safe_reset_text`
+  ay space-tolerant na (squashed text: "PHILHEALTH-
+  BENEFICIARIES" o "PHIL" + "BENEFICIARIES"); bagong
+  `beneficiaries_window_shows_other_patient()` na
+  nagtu-turn sa window title patient name; PHIC step
+  ay may self-heal (stale window -> close -> re-click
+  PHIC -> re-capture, isang beses lamang); safe reset
+  ay may pangalawang close round kapag ang proof ay
+  nagpapakita pa ng open window.
+- `date_fill_hbsys/hbsys_fill_dates.py` — parehong
+  limang pagkukwento (production twin).
+- `tests/test_date_fill_confinement.py` — bagong
+  BeneficiariesWindowTextTests, SafeResetTextTests,
+  StaleBeneficiariesWindowTests, StaleWindowSelfHealTests;
+  ang dalawang PHIC proof test ay na-update na may
+  `read_ocr_items` mock (stale check), at ang
+  `test_first_highlighted_attempt_wins` expectation ay
+  naayos sa 1 click (ang 2026-10-07 "already highlighted
+  -> huwag mag-click" behavior ang tamang dati, ang test
+  ang luma).
+- `tests/test_hbsys_fill_dates_testing.py` (bagong
+  file) — 15 tests para sa agent-run module: spaced
+  title detection, stale window detection, self-heal
+  flow, at ang dalawang close round ng safe reset.
+
+Behavior before and after:
+
+- Bago: spaced OCR title "PHIL HEALTH BENEFICIARIES"
+  ay hindi nakikilala bilang open window -> close
+  verification at safe-reset proof ay false negative ->
+  stale window ng previous patient ay natitira sa screen
+  -> next patient PHIC step ay tumatakbo sa stale grid
+  (first-name guard lang ang hadlang) -> failed reset
+  ay terminates ang buong batch.
+- Pagkatapos: ang spaced/misread title ay kinikilala
+  agad -> close slot ay tutuloy sa legacy slot hanggang
+  sa matiyak ang sarado; ang PHIC step ay awtomatikong
+  sasara at magbabukas ng fresh window para sa current
+  patient (isang beses) bago ang row selection; ang safe
+  reset ay nag-uumpisa ng pangalawang close round bago
+  mag-declare ng failure. Ang stale window na hindi pa
+  rin matatanggal ay lalabas pa rin sa safe stop for
+  review (hindi kailanman guess).
+
+Safety / compatibility notes:
+
+- Ang mga pagbabago ay DETECTION lamang at recovery —
+  walang paglongsa sa never-guess rule: ang first-name
+  row guard at ang date consensus ay hindi nagbago, at
+  ang stale window na hindi na-refresh ay laging safe
+  stop for review.
+- Ang extra close slot click sa false-positive case ay
+  harmless (toolbar slot lang).
+- Walang bagong dependency; pareho nitong estruktura sa
+  testing at production file.
+
+Verification performed:
+
+- `python -m py_compile` sa parehong module: OK.
+- `python -m unittest tests.test_date_fill_confinement`
+  -> 33/33 OK (kabilang ang naayos na pre-existing
+  failure).
+- `python -m unittest tests.test_hbsys_fill_dates_testing`
+  -> 15/15 OK.
+- Buong suite (lahat ng tests/test_*.py) ->
+  **649 tests, OK** (dati 619 na may 1 pre-existing
+  failure; ngayon 0 failure).
+- Evidence mula sa live run: `logs\phic_beneficiaries_
+  close_probe_20261008_102024.png` at
+  `logs\phic_beneficiaries_select_20261008_102049.png`
+  ay parehong nagpapakita ng "PHIL HEALTH BENEFICIARIES
+  OF SBALON, MYRNA DULAY" — ang stale window na hindi
+  natagpuan ng lumang check.
+
+### 2026-10-07 - Behavior: Final Bill workflow — in-memory Fees Check (no CSV) + NO FINAL BILL only
+
+Reason:
+
+Operator request (2026-10-07): sa Final Bill workflow,
+tumatakbo ang Fees Check pero HINDI mag-generate ng
+CSV/XLSX — iyon lang sa Final Bill workflow; ang GUI
+Fees Check (dashboard) ay mag-generate parin ng CSV.
+At ang Final Bill automation ay hindi na sana
+mag-final-bill ng lahat: ang status na "NO FINAL BILL"
+lang ang rurun, hindi na ang MISMATCH (para hindi
+lahat finafinal bill).
+
+Files added / modified:
+
+- fees_checker.py
+  - `run_check(write_reports=True)`: bagong parameter.
+    `write_reports=False` ay read-only + in-memory —
+    hindi sumusulat ng fees_checker_report CSV/XLSX,
+    binabalik ang (rows, None, None). Default True:
+    ang GUI Fees Check (dashboard quick action at
+    workflow node — pareho ay subprocess `python
+    fees_checker.py` → main()) ay hindi nagbabago.
+- core/agent/fees_actions.py
+  - MISMATCH ay hindi na nau-route sa FINAL_BILL —
+    ngayon ay ACTION_MANUAL_REVIEW na may
+    review_code=REVIEW_MISMATCH (baliktarin ang
+    2026-09-26 decision). Ang Final Bill automation
+    ay HINDI na magsagawa ng MISMATCH totals —
+    operator decision na iyon. Priority list (docstring):
+    step 2 = NO FINAL BILL lang.
+  - `hbsys_screens.expected_prompt_screen` ay hindi
+    binago — ang lumang MISMATCH final-bill rows mula
+    sa nakaraang na-save na plan (logs/agent_plan_*.json)
+    ay tumatakbo pa rin nang maayos.
+- core/agent/agent_plan_store.py
+  - bagong `build_plan_from_rows(rows, ...)` — ang
+    routing core ng build_plan_from_csv, pero tumatanggap
+    ng in-memory rows (may source_label para sa
+    empty-plan note). build_plan_from_csv ay nag-delegate
+    na dito.
+- gui/agent_plan_tab.py
+  - Preflight ("Run Fees Check first") ay gumagamit na
+    ng `run_check(write_reports=False)` — read-only,
+    in-memory, walang CSV/XLSX; ang fees_csv_var ay
+    hindi na na-overwrite.
+  - `load_plan(rows=None)`: may rows argument → plan
+    mula sa in-memory rows; walang argument → CSV base
+    (dating behavior, hal. Browse/typed path).
+  - `_live_rows` / `_plan_from_live` cache: ang
+    after-run reload ay gumagamit ng pre-run in-memory
+    snapshot + completion ledger — parehong semantics
+    ng dating CSV base, walang pangalawang HBSys trip.
+- tests/test_agent_fees_actions.py — MISMATCH tests →
+  manual review; order test na-update.
+- tests/test_agent_plan_steps.py — MISMATCH ay
+  single-step manual review na (hindi na mag-fan-out).
+- tests/test_agent_plan_store.py — bagong
+  BuildPlanFromRowsTests (routing, empty note,
+  MISMATCH→review).
+- tests/test_gui_agent_plan.py — preflight tests ay
+  nagbabalik ng in-memory rows; bagong test:
+  _default_fees_check ay tumatawag ng
+  run_check(write_reports=False); after-run reload
+  test ay gumagamit ng cached rows.
+- CHANGE_RULES.md — record na ito.
+
+Behavior:
+
+- Before: bawat Load Plan preflight ay sumusulat ng
+  bagong fees_checker_report CSV/XLSX; MISMATCH rows
+  ay auto-final-bill kasama ang NO FINAL BILL.
+- After: preflight ay read-only + in-memory (walang
+  report files); ang Final Bill automation ay
+  NO FINAL BILL rows lang; MISMATCH ay manual review
+  (operator ang magdedecide).
+
+Safety / compatibility:
+
+- HBSys ay read-only pa rin sa parehong path.
+- Dashboard Fees Check at workflow fees_checker node
+  (subprocess) ay hindi nagbabago — nag-generate pa
+  rin ng CSV/XLSX.
+- After-run reload semantics ay pareho lang ng dating
+  CSV base (pre-run snapshot + ledger).
+- Walang OCR/signing/XML/Claims Checker logic na
+  binago.
+
+Verification performed:
+
+- `python -m unittest tests.test_agent_fees_actions
+  tests.test_agent_plan_steps tests.test_agent_plan_store
+  tests.test_gui_agent_plan tests.test_agent_orchestrator
+  tests.test_agent_hbsys_screens tests.test_agent_final_bill`
+  → **312/312 OK**.
+- Hotfix after live run: ang `run_check(write_reports=...)`
+  parameter ay nag-shadow sa module-level
+  `write_reports()` function → `TypeError: 'bool' object
+  is not callable` sa GUI Fees Check. Naayos sa
+  pag-rename ng writer function to `write_report_files`
+  (walang external caller — `claims_checker.py` ay may
+  sariling `write_reports`); `py_compile` OK at
+  80/80 OK sa gui_agent_plan + fees_actions +
+  plan_store suites.
+- Buong suite (27 modules): 619 tests — 1 failure,
+  test_date_fill_confinement.PhicProofSelectionTests.
+  test_first_highlighted_attempt_wins — PRE-EXISTING
+  sa HEAD (c486176, PHIC already-highlighted
+  short-circuit); verified via `git stash` na hindi
+  ito caused sa change na ito.
+- `python -m py_compile` sa lahat ng binagong file → OK.
+
+### 2026-10-07 - Behavior: blinking lamp + shining text + "on process" dots
+
+Reason:
+
+Operator request: blinking ang bilog na green lamp,
+nagshi-shine ang status text, at may tatlong dot
+na nag-aappear sunod-sunod (1 -> 2 -> 3) habang
+may script na tumatakbo — parang "on process"
+na indicator.
+
+Files added / modified:
+
+- gui/run_status_overlay.py
+  - lamp: BLINKING green habang running
+    (`COL_LAMP_RUN_A` / `COL_LAMP_RUN_B` alternation
+    sa bawat tick); gray habang idle.
+  - status text: nagshi-SHINE — alternates between
+    `COL_TEXT_RUN` at `COL_TEXT_SHINE` (near-white
+    green) sa bawat tick.
+  - "on process" dots: ang label ay may trailing dots
+    na nag-ccycle 1 -> 2 -> 3 -> 1 (`self._phase`
+    0/1/2, `dots = "." * (phase + 1)`), inside ang
+    24-char truncation. Ang animation ay re-restart
+    lang sa idle->running transition (hindi sa bawat
+    poll — kaya hindi na-reset ng GUI's 750 ms poll
+    at tuloy-tuloy ang cycle).
+  - tick() = animation advancement; _apply_state() =
+    full render (text+dots, shine color, lamp blink,
+    eye glow). Removed `_apply_lamp`.
+- tests/test_run_status_overlay.py
+  - steady-lamp test -> blinking-lamp test; bagong
+    shine test, dots-cycle test (1->2->3->1), at
+    idle-no-dots test; label tests ay startswith na
+    (dahil may trailing dot).
+- CHANGE_RULES.md — record na ito.
+
+Behavior:
+
+- Before: steady green lamp; static text; no dots.
+- After: blinking green lamp, shining text, at
+  "Label." -> "Label.." -> "Label..." cycling habang
+  running; gray/steady habang idle. Eye glow at drag
+  behavior ay walang change.
+
+Safety / compatibility:
+
+- Animation tick (750 ms) ay display-only — walang
+  focus change, walang mouse/keyboard control.
+- Public API at drag/click behavior ay walang change;
+  edh_claims_gui_XML_COPY_BUTTON.py ay hindi na
+  binago (ang poll loop ay nag-carry na ng tick()).
+- Walang production tool, OCR, signing, XML, o Claims
+  Checker logic na binago.
+
+Verification performed:
+
+- `python -m unittest tests.test_run_status_overlay` ->
+  **24/24 OK** (walang na-regress).
+- `python -W error::SyntaxWarning -m py_compile
+  gui\run_status_overlay.py tests\test_run_status_overlay.py
+  edh_claims_gui_XML_COPY_BUTTON.py` -> OK.
+- Traced ang GUI poll loop (set_running + tick each
+  750 ms): ang dots ay tuloy-tuloy na nag-ccycle
+  1->2->3->1 (hindi na-reset sa bawat poll).
+- LIVE look-check ay para sa operator: buksan ang GUI,
+  i-run ang script — kakibling green lamp,
+  kakishing text, at dadaloy ang dots.
+
+### 2026-10-07 - Behavior: steady status lamp + glowing robot eyes (no blinking)
+
+Reason:
+
+Operator feedback: nagba-blink mismo ang overlay dati
+(pulsing lamp) at hindi tama ang signal — ang ilaw
+laman ay luntian, kundi ang **mata ng robot** ang
+dapat maging nagliliwanag (glow) habang running.
+
+Files added / modified:
+
+- gui/run_status_overlay.py
+  - lamp ay STEADY na (solid green habang running,
+    gray habang idle) — tinanggal ang pulse toggle
+    (`_pulse_on`, `COL_LAMP_RUN_B`); `tick()` ay
+    idempotent na re-apply ng state, hindi blink.
+  - bagong **glowing eyes**: dalawang halo + core
+    oval na inu-over sa icon sa EXACT na eye position
+    (measured: eye centers (180.0,164.4) at
+    (271.3,164.4) sa 450x450 image via
+    connected-component clustering → slot coords
+    (17.6,16.1) at (26.5,16.1); eye r≈1.6px, halo
+    r≈3.4px). Hidden habang idle (natural white eyes
+    ng icon ang nagpapakita), green glow habang
+    running. Constants: `EYE_CENTERS_450`,
+    `EYE_RADIUS_450`, `EYE_HALO_FACTOR`,
+    `COL_EYE_RUN`, `COL_EYE_HALO_RUN`.
+  - eye glow ay created lang kung na-load ang icon
+    (placeholder fallback ay walang glow).
+- tests/test_run_status_overlay.py
+  - pulse test → steady-lamp test (dalawang tick,
+    parehong green); bagong eye tests (both eyes
+    present, glow while running, hidden while idle,
+    tick keeps eyes in sync).
+- CHANGE_RULES.md — record na ito.
+
+Behavior:
+
+- Before: pulsing/blinking green lamp dot; static icon.
+- After: solid green lamp + green glowing robot eyes
+  habang running; gray lamp, hidden glow habang idle.
+  Walang blinking element.
+
+Safety / compatibility:
+
+- Public API at drag/click behavior ay walang change.
+- Walang production tool, OCR, signing, XML, o Claims
+  Checker logic na binago.
+- Eye positions ay measured sa actual icon asset — kung
+  palitan ang icon file, i-measure muli at i-update ang
+  `EYE_CENTERS_450`.
+
+Verification performed:
+
+- `python -m unittest tests.test_run_status_overlay` ->
+  **21/21 OK** (walang na-regress).
+- `python -W error::SyntaxWarning -m py_compile
+  gui\run_status_overlay.py tests\test_run_status_overlay.py
+  edh_claims_gui_XML_COPY_BUTTON.py` -> OK.
+- Offscreen composite simulation (icon + glow sa 44px
+  slot) — ang glow ay centered sa measured eye
+  centroids.
+- LIVE look-check ay para sa operator: buksan ang GUI,
+  i-run ang script — matagal na green ang lamp at
+  nagliliwanag ang mata ng robot.
+
+### 2026-10-07 - Feature: robot icon + draggable run-status overlay
+
+Reason:
+
+Operator request: gamitin ang
+`images/robot-coding-3d-icon.png` bilang mascot ng
+run-status overlay (dati pure-Tk canvas drawing), at
+dapag ma-drag ang overlay sa kahit saan sa screen
+— dati ay fixed sa lower-left corner at hindi
+mapipindot.
+
+Files added / modified:
+
+- gui/run_status_overlay.py
+  - robot slot = `images/robot-coding-3d-icon.png`
+    (450x450 RGBA, fully transparent corners) loaded via
+    Pillow, resized 44x44 (LANCZOS) at runtime, rendered
+    on the existing robot canvas via `create_image`;
+    graceful "EDH" placeholder if the asset is
+    missing/unloadable (GUI never crashes on a bad asset).
+  - status lamp: bagong 12x12 dot sa kanang dulo —
+    pulsing green habang running, gray habang idle (ang
+    static icon ay hindi kakabitin/kumikitid, kaya ang
+    lamp + green/gray status text ang nagbabago ng state).
+  - DRAGGABLE: `<ButtonPress-1>` / `<B1-Motion>` /
+    `<ButtonRelease-1>` bound sa window at lahat ng
+    children; 4 px threshold; matapos ang tunay na drag,
+    ang bagong position ay STICK (`_user_moved` flag —
+    ang 750 ms poll loop ay hindi na na-snap back sa
+    corner); plain click (walang drag) ay
+    deiconify pa rin ng main GUI; double-click ay lift
+    pa rin. Position source ay ang geometry string
+    (tama para sa mapped at withdrawn window; `winfo_x()`
+    ay nagbabalik ng stale value kapag withdrawn).
+  - public API walang change (set_idle / set_running /
+    tick / refresh_visibility / destroy / is_running) —
+    walang kinailangang baguhin sa
+    edh_claims_gui_XML_COPY_BUTTON.py.
+- tests/test_run_status_overlay.py
+  - lamp tests ay tinarget na ang bagong `lamp_canvas`;
+    tinanggal ang canvas-eyes tests (static icon, walang
+    eyes); dinagdagan ng icon-render tests at drag tests
+    (move + stick, jiggle = click, click focuses owner,
+    drag does not focus owner).
+- CHANGE_RULES.md — record na ito.
+
+Behavior:
+
+- Before: hand-drawn canvas robot (blinking eyes, pulsing
+  antenna lamp + chest LEDs), fixed lower-left corner.
+- After: 3D robot-coding icon, pulsing status lamp dot,
+  draggable anywhere — nararaman ang pinagdropped na
+  position habang bukas ang app.
+
+Safety / compatibility:
+
+- Overlay ay display-only pa rin at hindi kumakaw ng
+  focus (walang focus_force); HBSys mouse/keyboard
+  automation ay hindi naapektuhan.
+- Pillow (PIL/ImageTk) ay naka-pin na production
+  dependency na (requirements.txt) — walang bagong
+  dependency.
+- Walang production tool, OCR, signing, XML, o Claims
+  Checker logic na binago.
+
+Verification performed:
+
+- `python -m unittest tests.test_run_status_overlay` ->
+  **17/17 OK** (13 umiiral + 4 bago, walang na-regress).
+- `python -W error::SyntaxWarning -m py_compile
+  gui\run_status_overlay.py tests\test_run_status_overlay.py
+  edh_claims_gui_XML_COPY_BUTTON.py` -> OK.
+- Icon confirmed 450x450 RGBA, fully transparent corners
+  (malinis na nakaupo sa dark panel).
+- LIVE drag check ay para sa operator: buksan ang GUI,
+  pindutin ang robot overlay, ilipat — naroon pa rin
+  kung saan mo na-drop.
+
 ### 2026-10-07 - Fix: PHIC row consensus elects the wrong confinement row (wrong-row click)
 
 Reason:

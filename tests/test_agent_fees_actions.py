@@ -98,17 +98,20 @@ class DecideActionTests(unittest.TestCase):
         decision = actions.decide_action(row)
         self.assertEqual(decision.action, actions.ACTION_FINAL_BILL)
 
-    def test_mismatch_goes_to_final_bill(self):
-        # User decision 2026-09-26: mismatched totals are fixed by the
-        # Final Bill flow, not manual review.
+    def test_mismatch_goes_to_manual_review(self):
+        # Operator decision 2026-10-07: the Final Bill automation
+        # only touches bills that were never finalized. MISMATCH
+        # totals need an operator decision -> manual review.
         row = make_row(Status="MISMATCH", **{"Ready to Generate XML": "NO"})
         decision = actions.decide_action(row)
-        self.assertEqual(decision.action, actions.ACTION_FINAL_BILL)
-        self.assertEqual(decision.review_code, "")
-        self.assertIn("final bill", decision.reason.lower())
+        self.assertEqual(decision.action, actions.ACTION_MANUAL_REVIEW)
+        self.assertEqual(decision.review_code, actions.REVIEW_MISMATCH)
+        self.assertIn("MISMATCH", decision.reason)
+        self.assertIn("manual review", decision.reason)
 
     def test_mismatch_beats_date_fill(self):
-        # Bill must be right before dates: MISMATCH outranks DATE_FILL.
+        # MISMATCH outranks DATE_FILL: totals are an operator
+        # decision, not an automation target (2026-10-07).
         row = make_row(
             Status="MISMATCH",
             **{"Consent Date (hpatcon1.consentdate)": "",
@@ -116,7 +119,8 @@ class DecideActionTests(unittest.TestCase):
                "Ready to Generate XML": "NO"},
         )
         decision = actions.decide_action(row)
-        self.assertEqual(decision.action, actions.ACTION_FINAL_BILL)
+        self.assertEqual(decision.action, actions.ACTION_MANUAL_REVIEW)
+        self.assertEqual(decision.review_code, actions.REVIEW_MISMATCH)
 
     def test_adm_mismatch_goes_to_manual_review(self):
         row = make_row(**{"ADM Match": "NO", "Ready to Generate XML": "NO"})
@@ -164,7 +168,7 @@ class PlanBatchTests(unittest.TestCase):
                 actions.ACTION_XML_CLICKER,
                 actions.ACTION_FINAL_BILL,
                 actions.ACTION_DATE_FILL,
-                actions.ACTION_FINAL_BILL,  # MISMATCH -> Final Bill (2026-09-26)
+                actions.ACTION_MANUAL_REVIEW,  # MISMATCH -> review (2026-10-07)
             ],
         )
 

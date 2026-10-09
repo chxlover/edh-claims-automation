@@ -67,11 +67,13 @@ class DecideRowsTests(unittest.TestCase):
         )
         self.assertIn("Prof Fee Sign Date BLANK", result[1].reason)
 
-    def test_mismatch_also_fans_out(self):
+    def test_mismatch_is_manual_review_only(self):
+        # 2026-10-07: MISMATCH no longer fans out — it is an
+        # operator decision (manual review), never auto-final-billed.
         result = steps.decide_rows(no_dates(Status="MISMATCH"))
         self.assertEqual(
             [step.action for step in result],
-            [actions.ACTION_FINAL_BILL, actions.ACTION_DATE_FILL],
+            [actions.ACTION_MANUAL_REVIEW],
         )
 
     def test_final_bill_without_missing_dates_stays_one_step(self):

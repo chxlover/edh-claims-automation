@@ -128,6 +128,19 @@ class NodeRunResult:
 # -- default workflow -------------------------------------------------------
 
 
+# Default per-node params. Date Fill may safely stop for
+# per-patient review (never-guess rule) while the rest of the
+# batch verified fine: continue_on_fail lets the chain proceed
+# to the next node — the Final Bill node's own Date Fill gate
+# (operator rule 2026-10-09) then keeps folders Date Fill did
+# NOT verify out of the billing flow, so an unverified patient
+# is never final-billed with unfilled CF2 date fields.
+DEFAULT_NODE_PARAMS = {
+    "date_fill_regular": {"continue_on_fail": True},
+    "date_fill_abtc": {"continue_on_fail": True},
+}
+
+
 def default_workflow() -> WorkflowConfig:
     """The DEFAULT WORKFLOW — the current manual pipeline order.
 
@@ -153,6 +166,7 @@ def default_workflow() -> WorkflowConfig:
             enabled=True,
             order=index,
             position={"x": 40 + (index - 1) * 180, "y": 60},
+            params=DEFAULT_NODE_PARAMS.get(key, {}),
         )
         for index, key in enumerate(keys, start=1)
     ]

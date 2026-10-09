@@ -385,7 +385,7 @@ def iter_patient_folders():
             yield child.name
 
 
-def write_reports(rows: list[dict]) -> tuple[Path, Path]:
+def write_report_files(rows: list[dict]) -> tuple[Path, Path]:
     """Write the CSV report and the XLSX report with red mismatch rows."""
     # Decide XML readiness for every row (single source of truth) and
     # append a consolidated "XML READY CHECK" remark when not ready.
@@ -520,8 +520,17 @@ def write_xlsx(rows: list[dict], path: Path) -> Path:
     return path
 
 
-def run_check() -> tuple[list[dict], Path, Path]:
-    """Run the full check against HBSys (read-only) and write reports."""
+def run_check(
+    write_reports: bool = True,
+) -> tuple[list[dict], Path | None, Path | None]:
+    """Run the full check against HBSys (read-only).
+
+    ``write_reports=False`` skips writing fees_checker_report.csv/.xlsx
+    — the Agent Plan preflight (the Final Bill workflow) uses the
+    rows in memory only (operator rule 2026-10-07: the plan's Fees
+    Check never writes reports; the GUI Fees Check keeps writing
+    them, which is the default ``True``).
+    """
     logger.info("Fees Checker started")
     folders = list(iter_patient_folders())
     logger.info(f"Found {len(folders)} patient folders in {OUTPUT_DIR}")
@@ -562,7 +571,11 @@ def run_check() -> tuple[list[dict], Path, Path]:
     finally:
         conn.close()
 
-    csv_path, xlsx_path = write_reports(rows)
+    if write_reports:
+        csv_path, xlsx_path = write_report_files(rows)
+    else:
+        csv_path = None
+        xlsx_path = None
 
     summary = {
         "total": len(rows),

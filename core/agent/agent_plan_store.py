@@ -185,17 +185,23 @@ def to_plan_items(decisions: list) -> list[dict]:
     return items
 
 
-def build_plan_from_csv(
-    csv_path: str | Path,
+def build_plan_from_rows(
+    rows: list[dict],
     output_root=None,
     completed=None,
     fan_out: bool = True,
+    source_label: str = "in-memory Fees Check",
 ) -> tuple:
-    """Read CSV -> route rows -> panel items + summary + source note.
+    """Route in-memory Fees Check rows -> panel items + summary + note.
 
-    Returns (items, summary_dict, note). `note` explains an empty plan
-    (missing file vs no rows) so the panel can show WHY it is empty, and
-    rows dropped by the Slice F gates (XML output / completed runs).
+    Same routing core as build_plan_from_csv() — used by the Agent
+    Plan preflight, which runs the Fees Check WITHOUT writing a
+    report (operator rule 2026-10-07: the Final Bill workflow
+    never litters fees_checker_report CSV/XLSX files).
+
+    Returns (items, summary_dict, note). `note` explains an empty
+    plan so the panel can show WHY it is empty; rows dropped by the
+    Slice F gates (XML output / completed runs) are named too.
 
     `output_root=None` resolves CLAIMS_OUTPUT_FOLDER (default
     C:\\claims_bot\\output) — the project-wide convention.
@@ -211,17 +217,11 @@ def build_plan_from_csv(
     (folder, action), so a Final Bill finished in an earlier run leaves only
     the DATE FILL row. Set fan_out=False for the old one-row-per-fees-row plan.
     """
-    path = Path(csv_path)
-    if not path.is_file():
-        return [], actions.summarize_plan([]).as_dict(), (
-            f"Fees Check CSV not found: {path}. "
-            "Click Fees Check first, then reopen this tab."
-        )
-    rows = read_fees_rows(path)
     if not rows:
         return [], actions.summarize_plan([]).as_dict(), (
-            f"No patient rows in {path}. "
-            "Click Fees Check first, then reopen this tab."
+            f"No patient rows from the {source_label}. "
+            "Check the HBSys connection and the output folder, "
+            "then load the plan again."
         )
     if output_root is None:
         output_root = actions.default_output_root()
@@ -248,6 +248,39 @@ def build_plan_from_csv(
             f"{run_done} row tapos na sa nakaraang run — hindi na inuulit."
         )
     return to_plan_items(decisions), summary.as_dict(), " | ".join(note_parts)
+
+
+def build_plan_from_csv(
+    csv_path: str | Path,
+    output_root=None,
+    completed=None,
+    fan_out: bool = True,
+) -> tuple:
+    """Read CSV -> route rows -> panel items + summary + source note.
+
+    Returns (items, summary_dict, note). `note` explains an empty plan
+    (missing file vs no rows) so the panel can show WHY it is empty, and
+    rows dropped by the Slice F gates (XML output / completed runs).
+    """
+    path = Path(csv_path)
+    if not path.is_file():
+        return [], actions.summarize_plan([]).as_dict(), (
+            f"Fees Check CSV not found: {path}. "
+            "Click Fees Check first, then reopen this tab."
+        )
+    rows = read_fees_rows(path)
+    if not rows:
+        return [], actions.summarize_plan([]).as_dict(), (
+            f"No patient rows in {path}. "
+            "Click Fees Check first, then reopen this tab."
+        )
+    return build_plan_from_rows(
+        rows,
+        output_root=output_root,
+        completed=completed,
+        fan_out=fan_out,
+        source_label=str(path),
+    )
 
 
 

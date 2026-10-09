@@ -1425,8 +1425,7 @@ def close_billing_form(
         return False
     if patient_name:
         wanted = billing_form_for_patient(patient_name)
-        open_keys = {billing_title_key(title) for title in open_forms}
-        if billing_title_key(wanted) not in open_keys:
+        if not billing_title_is_open(wanted, open_forms):
             log(
                 f"Close Form: refusing — the open form is not this patient's "
                 f"(open: {', '.join(open_forms)}, wanted: {wanted})"
@@ -1536,6 +1535,52 @@ def billing_title_key(title) -> str:
     title is kept for logs and for window lookups.
     """
     return normalize_billing_title(title).casefold()
+
+
+# Generational suffixes (operator rule 2026-10-09). HBSys records often omit
+# the suffix that the claim folder carries: live failure 2026-10-09 — folder
+# "DAYAG, VIC ERNESTO JR TAYABAN" against the HBSys Billing form
+# "Billing (DAYAG, VIC ERNESTO TAYABAN)", so a correctly loaded patient was
+# BLOCKED for a name difference that is not a different person. WHOLE tokens
+# only, so MARIA, IVAN and IRA keep every letter.
+_GENERATIONAL_SUFFIX_RE = re.compile(r"\b(?:III|JR|SR|II|IV|I)\b", re.IGNORECASE)
+
+
+def billing_title_key_loose(title) -> str:
+    """Pure: billing_title_key() that also ignores generational suffixes.
+
+    The suffix list is the operator's (III, JR, SR, II, IV, I) and it is only
+    ever compared against another title — the folder name and the HBSys title
+    are never rewritten, so logs and reports keep the real bytes.
+    """
+    return billing_title_key(
+        _GENERATIONAL_SUFFIX_RE.sub(" ", normalize_billing_title(title))
+    )
+
+
+def billing_title_is_open(wanted, open_titles) -> bool:
+    """Pure: True when EXACTLY the wanted patient's Billing form is open.
+
+    An exact (suffix-including) match always wins. Failing that, a
+    generational-suffix-insensitive match is accepted ONLY when it is unique:
+    two open forms that differ by nothing but the suffix (a father and a son
+    both titled "Billing (SMITH, JOHN ...)") stay ambiguous, so this returns
+    False instead of guessing which one is the patient.
+    """
+    if not wanted:
+        return False
+    titles = [str(title) for title in (open_titles or [])]
+    wanted_exact = billing_title_key(wanted)
+    if any(billing_title_key(title) == wanted_exact for title in titles):
+        return True
+    wanted_loose = billing_title_key_loose(wanted)
+    if not wanted_loose:
+        return False
+    matches = [
+        title for title in titles
+        if billing_title_key_loose(title) == wanted_loose
+    ]
+    return len(matches) == 1
 
 
 def is_billing_title(title) -> bool:
@@ -1934,9 +1979,12 @@ def load_patient_by_hospital_no(
             # Same patient's window is open AND nothing else took its place:
             # re-entering the same Hospital No. can refresh that window instead
             # of opening a second one. Compared by normalized key, never
-            # byte-for-byte (HBSys titles can carry an empty middle name).
-            keys = {billing_title_key(title) for title in opened}
-            if want_key in keys and (not keys - {want_key}):
+            # byte-for-byte (HBSys titles can carry an empty middle name, and
+            # omit the generational suffix the folder carries).
+            if billing_title_is_open(expect_title, opened) and not (
+                {billing_title_key_loose(title) for title in opened}
+                - {billing_title_key_loose(expect_title)}
+            ):
                 log(
                     "load: verified after "
                     f"{round(time.time() - started, 1)}s — "

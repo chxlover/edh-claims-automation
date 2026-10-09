@@ -943,6 +943,134 @@ class ConfinementRowMergeTests(unittest.TestCase):
             self.assertEqual(fb._merge_parsed_rows([[]]), [])
 
 
+class BillingTitleSuffixToleranceTests(unittest.TestCase):
+    """Operator rule 2026-10-09: a generational suffix on the claim folder
+    (III, JR, SR, II, IV, I) must not read as a different patient.
+
+    Live failure 2026-10-09: folder "DAYAG, VIC ERNESTO JR TAYABAN" against
+    the loaded HBSys form "Billing (DAYAG, VIC ERNESTO TAYABAN)" BLOCKED a
+    correctly loaded patient. The suffix is ignored for the COMPARISON only,
+    and only when the match is unique — a father and a son whose names differ
+    by nothing but the suffix stay ambiguous and are never guessed.
+    """
+
+    def _wanted(self, name):
+        return fb.billing_form_for_patient(name)
+
+    def test_live_case_folder_suffix_vs_hbsys_without_it(self):
+        wanted = self._wanted("DAYAG, VIC ERNESTO JR TAYABAN")
+        # The exact key still differs (bytes are never rewritten) ...
+        self.assertNotEqual(
+            fb.billing_title_key(wanted),
+            fb.billing_title_key("Billing (DAYAG, VIC ERNESTO TAYABAN)"),
+        )
+        # ... but the patient matches.
+        self.assertTrue(
+            fb.billing_title_is_open(wanted, ["Billing (DAYAG, VIC ERNESTO TAYABAN)"])
+        )
+
+    def test_every_operator_suffix_is_ignored(self):
+        for suffix in ("III", "JR", "SR", "II", "IV", "I"):
+            with self.subTest(suffix=suffix):
+                wanted = self._wanted(f"SMITH, JOHN {suffix}")
+                self.assertTrue(
+                    fb.billing_title_is_open(wanted, ["Billing (SMITH, JOHN)"])
+                )
+
+    def test_a_truly_different_patient_never_matches(self):
+        wanted = self._wanted("DAYAG, VIC ERNESTO JR TAYABAN")
+        self.assertFalse(
+            fb.billing_title_is_open(wanted, ["Billing (SANTOS, MARIA)"])
+        )
+
+    def test_two_forms_differing_only_by_suffix_stay_ambiguous(self):
+        # Father and son both open: picking one would be a guess.
+        wanted = self._wanted("SMITH, JOHN JR")
+        self.assertFalse(
+            fb.billing_title_is_open(
+                wanted,
+                ["Billing (SMITH, JOHN SR)", "Billing (SMITH, JOHN)"],
+            )
+        )
+
+    def test_suffix_inside_a_name_is_never_stripped(self):
+        # MARIA, IVAN and IRA keep every letter - only WHOLE tokens go.
+        for name in ("CRUZ, MARIA IRA", "DELA CRUZ, IVAN", "SANTOS, IRMA"):
+            with self.subTest(name=name):
+                self.assertTrue(
+                    fb.billing_title_is_open(
+                        self._wanted(name), [f"Billing ({name})"]
+                    )
+                )
+        # ... and a name that differs by a non-suffix letter stays out.
+        self.assertFalse(
+            fb.billing_title_is_open(
+                self._wanted("CRUZ, MARIA"), ["Billing (CRUZ, MARIA IRA)"]
+            )
+        )
+
+    def test_exact_match_wins_even_when_ambiguity_exists(self):
+        # The patient's OWN title is present verbatim -> no ambiguity.
+        wanted = self._wanted("SMITH, JOHN JR")
+        self.assertTrue(
+            fb.billing_title_is_open(
+                wanted,
+                ["Billing (SMITH, JOHN SR)", "Billing (SMITH, JOHN JR)"],
+            )
+        )
+
+    def test_case_and_spacing_still_tolerated_with_a_suffix(self):
+        self.assertTrue(
+            fb.billing_title_is_open(
+                self._wanted("VALENTINO, NIKKI JR"),
+                ["Billing (VALENTINO, NIKKI )"],
+            )
+        )
+
+    def test_no_wanted_title_never_matches(self):
+        self.assertFalse(fb.billing_title_is_open("", ["Billing (SANTOS, MARIA)"]))
+        self.assertFalse(
+            fb.billing_title_is_open(None, ["Billing (SANTOS, MARIA)"])
+        )
+        self.assertFalse(fb.billing_title_is_open("Billing (A, B)", []))
+
+    def test_close_form_accepts_the_suffix_mismatch_form(self):
+        # The Close Form guard uses the same comparison, so it must not
+        # refuse to close the patient's own form over a suffix.
+        responses = [
+            ["Billing (DAYAG, VIC ERNESTO TAYABAN)", "User Menu"],
+            [],
+        ]
+        calls = {"n": 0}
+
+        def fake_open():
+            index = min(calls["n"], len(responses) - 1)
+            calls["n"] += 1
+            return responses[index]
+
+        with mock.patch.object(fb, "list_open_forms", side_effect=fake_open), \
+                mock.patch.object(fb, "click_close_form",
+                                  return_value="Close Form"):
+            self.assertTrue(
+                fb.close_billing_form(
+                    "DAYAG, VIC ERNESTO JR TAYABAN",
+                    log_fn=lambda message: None,
+                )
+            )
+
+    def test_close_form_still_refuses_a_different_patient(self):
+        with mock.patch.object(
+            fb, "list_open_forms", return_value=["Billing (SANTOS, MARIA)"]
+        ), mock.patch.object(fb, "click_close_form") as click:
+            self.assertFalse(
+                fb.close_billing_form(
+                    "DAYAG, VIC ERNESTO JR TAYABAN",
+                    log_fn=lambda message: None,
+                )
+            )
+        click.assert_not_called()
+
+
 class PatientLookupTests(unittest.TestCase):
     """Multi-patient transition helpers (Hospital No. lookup + guarded close)."""
 

@@ -82,6 +82,24 @@ class P:
     # that have no Details button.
     CLOSE_FORM_BENEFICIARIES = Point(485, 58)
     CLOSE_FORM_BENEFICIARIES_ALT = Point(435, 58)
+    # End-of-run cleanup slot (operator rule 2026-10-08): the
+    # Close Form toolbar slot read from the live HBSys toolbar
+    # (X:434 Y:60). Same context rule as the alt slot — it is
+    # the open form's Close Form button while a form window is
+    # up, and the Admit History toolbar button on the bare
+    # hospital-search screen (hence the not-already-safe guard
+    # in close_open_form_at_run_end).
+    CLOSE_FORM_END_OF_RUN = Point(434, 60)
+    # Control id of the Hospital No. Edit on the Billing / hospital-search
+    # form, recorded live by the Final Bill probe (final_bill_actions.py:
+    # "Hospital No. currently loaded (Edit 1004 on the Billing form)") and
+    # reused by the Date Fill load check (live failure 2026-10-09,
+    # COLOBONG: OCR read the loaded number ...10920 as ...10820 and the
+    # flow stopped for review on a patient that had actually loaded).
+    HOSPITAL_NO_EDIT_ID = 1004
+    # How many times the screen-restore routine may close the active form
+    # while looking for the Hospital No. field (operator rule 2026-10-09).
+    SCREEN_RESTORE_ROUNDS = 3
     TAB_PROF_FEES = Point(619, 132)
     TAB_CONSENT = Point(872, 132)
     PROF_DATE_SIGNED_CELL = Point(940, 179)
@@ -283,6 +301,19 @@ class HbsysOperator:
             )
 
     def search_hospital_number(self, claim: ReadyClaim) -> None:
+        # Only a form that actually has the Hospital No. field can load a
+        # patient (live failure 2026-10-09, DAYAG: the search ran while the
+        # Patient Record Form was still up, the double-click hit a label, the
+        # typed number went nowhere and the probe kept showing the previous
+        # patient). Restore the Billing / hospital-search form first; if it
+        # cannot be restored, do NOT type into an unknown form — the caller's
+        # load verification stops this patient safely for review instead.
+        if not self.ensure_hospital_number_screen("before the patient search"):
+            self.log_action(
+                "no screen with a Hospital No. field — not typing the hospital "
+                "number into an unknown form"
+            )
+            return
         self.double_click(P.HOSPITAL_NO, "Hospital No.")
         self.hotkey("ctrl", "a")
         self.write(claim.hospital_no)
@@ -298,23 +329,86 @@ class HbsysOperator:
         mismatch stops for review. The grid dates stay in MM/DD/YYYY shape
         after comparing raw values still OCR-misread (``O1/0l/2026`` etc.),
         so dates are compared by canonical key, not raw string equality.
+
+        Live failure 2026-10-08 (workflow run 1: FLORES, GANNABAN,
+        MENESES, TAGUBA): the popup can open against the PREVIOUS
+        patient while the hospital-number load is still settling, so
+        every OCR pass reads the wrong patient's confinements and the
+        folder match fails. One automatic reload + reopen heals it (the
+        follow-up run matched the same patients); a patient whose real
+        history still does not match the folder (MENESES) stays a safe
+        stop for review — never guessed.
+
+        Live failure 2026-10-09 (CORTEZ, MENESES): the reload's
+        re-typed hospital number never switched the loaded patient
+        (the safe-reset proof still showed the PREVIOUS patient's
+        record), so the second popup pass read the same wrong rows.
+        The reload now closes the popup with verification, re-focuses
+        HBSys, and requires the searched Hospital No. on the base
+        screen before any popup row is trusted.
         """
         self._expected_admission_grid = claim.admission_grid
         self._expected_discharge_grid = claim.discharge_grid
-        picked = select_confinement_row(
-            open_popup_fn=self._open_admission_history,
-            live=self.live,
-            log_fn=self.log_action,
-            wait_fn=sleep_short,
-            read_rows_fn=self._read_confinement_rows,
-            double_click_fn=self._double_click_row,
-            rate_dialog_fn=self.dismiss_rate_validation_message,
-            expected_admission=claim.admission_grid,
-            expected_discharge=claim.discharge_grid,
-            fuzzy_rows_fn=self._read_fuzzy_confinement_row,
-            on_selected_row_fn=self._set_form_stage_base,
-            context="Date Fill",
-        )
+        picked = False
+        for load_attempt in (1, 2):
+            if load_attempt == 2:
+                self.log_action(
+                    "Admission History did not match the folder on the "
+                    "first pass; reloading the patient and retrying"
+                )
+                if not self._close_admission_history_popup():
+                    self.log_action(
+                        "Admission History popup did not close after "
+                        "the folder mismatch; stopping for review"
+                    )
+                    return False
+                self.focus_hbsys()
+                self.search_hospital_number(claim)
+                sleep_short(1.0)
+            if not self._hospital_number_visible(claim):
+                if load_attempt == 1:
+                    self.log_action(
+                        "Hospital No. not visible on the base "
+                        "screen; re-searching the patient"
+                    )
+                    self.focus_hbsys()
+                    self.search_hospital_number(claim)
+                    sleep_short(1.0)
+                else:
+                    self.log_action(
+                        f"Hospital No. {claim.hospital_no} not "
+                        "visible after the patient reload; "
+                        "stopping for review"
+                    )
+                    return False
+                if not self._hospital_number_visible(claim):
+                    self.log_action(
+                        f"Hospital No. {claim.hospital_no} still "
+                        "not visible; stopping for review"
+                    )
+                    return False
+            try:
+                picked = select_confinement_row(
+                    open_popup_fn=self._open_admission_history,
+                    live=self.live,
+                    log_fn=self.log_action,
+                    wait_fn=sleep_short,
+                    read_rows_fn=self._read_confinement_rows,
+                    double_click_fn=self._double_click_row,
+                    rate_dialog_fn=self.dismiss_rate_validation_message,
+                    expected_admission=claim.admission_grid,
+                    expected_discharge=claim.discharge_grid,
+                    fuzzy_rows_fn=self._read_fuzzy_confinement_row,
+                    on_selected_row_fn=self._set_form_stage_base,
+                    context="Date Fill",
+                )
+            except RuntimeError:
+                # The shared reader raises when the popup never opens
+                # (HBSys still settling); the reload pass below retries
+                # instead of aborting the batch.
+                picked = False
+            if picked:
+                break
         if not picked:
             return False
         if not self._wait_admission_history_closed():
@@ -324,6 +418,148 @@ class HbsysOperator:
             )
             return False
         return True
+
+    def _close_admission_history_popup(self) -> bool:
+        """Close a leftover Admission History popup, verified.
+
+        The popup covers the Hospital No. field, so it must
+        be gone before a patient reload can re-type the
+        hospital number (live failure 2026-10-09: the reload
+        typed into the still-open popup and the patient
+        never switched).
+        """
+        for _close_round in (1, 2):
+            window = find_admission_history_window()
+            if window is None:
+                return True
+            try:
+                window.close()
+            except Exception:  # noqa: BLE001 - best-effort cleanup.
+                try:
+                    window.set_focus()
+                    pyautogui.press("esc")
+                except Exception:  # noqa: BLE001 - best-effort.
+                    pass
+            sleep_short(0.5)
+        return find_admission_history_window() is None
+
+    def hospital_no_edit(self):
+        """The visible Hospital No. Edit control, or None when it is not on screen.
+
+        pywinauto reads the control's OWN text, so the check never depends on
+        OCR: live failure 2026-10-09 (COLOBONG) — the patient HAD loaded into
+        the Billing form, but the whole-window OCR read the number 10920 as
+        10820, so the flow reported "not visible" and stopped for review on a
+        patient that was already loaded. None whenever the field is absent (a
+        Patient Record Form has no Hospital No. field), which is what the
+        screen-restore routine below keys off.
+        """
+        if self.hbsys_window is None:
+            return None
+        try:
+            for child in self.hbsys_window.children():
+                try:
+                    if child.class_name() != "Edit":
+                        continue
+                    if child.control_id() != P.HOSPITAL_NO_EDIT_ID:
+                        continue
+                    if not child.is_visible():
+                        continue
+                    return child
+                except Exception:
+                    continue
+        except Exception:
+            return None
+        return None
+
+    def hospital_no_edit_text(self) -> str:
+        """Exact text of the Hospital No. Edit control ('' when not readable)."""
+        edit = self.hospital_no_edit()
+        if edit is None:
+            return ""
+        try:
+            return (edit.window_text() or "").strip()
+        except Exception:
+            return ""
+
+    def ensure_hospital_number_screen(self, context: str) -> bool:
+        """True when a form with the Hospital No. field is the current screen.
+
+        Live failure 2026-10-09 (DAYAG): a Date Fill flow can end on the
+        Patient Record Form, which has NO Hospital No. field, so the next
+        search double-clicked a label, the typed number went nowhere, the
+        probe still showed the PREVIOUS patient's record, and the safe reset
+        failed on the same screen (its proof needs the Hospital No. marker)
+        — which then stopped the whole batch. When the field is missing the
+        active form is closed (ctrl+F4 = standard MDI child close) until the
+        Billing / hospital-search form is back; nothing is typed and no
+        patient is guessed. False means the caller must stop that patient
+        safely for review.
+        """
+        if not self.live:
+            return True
+        for round_no in range(1, P.SCREEN_RESTORE_ROUNDS + 1):
+            if self.hospital_no_edit() is not None:
+                return True
+            if round_no > 1:
+                self.log_action(
+                    f"{context}: no Hospital No. field on screen; closing "
+                    f"the active form (round {round_no}/"
+                    f"{P.SCREEN_RESTORE_ROUNDS})"
+                )
+                try:
+                    self.focus_hbsys()
+                    pyautogui.hotkey("ctrl", "f4")
+                except Exception as exc:  # noqa: BLE001 - best-effort restore.
+                    self.log_action(f"{context}: close attempt failed: {exc}")
+                sleep_short(0.8)
+        if self.hospital_no_edit() is None:
+            self.log_action(
+                f"{context}: no screen with a Hospital No. field after "
+                f"{P.SCREEN_RESTORE_ROUNDS} close attempts"
+            )
+            return False
+        return True
+
+    def _hospital_number_visible(self, claim) -> bool:
+        """Require the searched hospital number on the base screen.
+
+        The Patient Record Form header shows the loaded
+        patient's hospital number. A popup that still shows
+        the previous patient means the search never switched
+        the patient (live failure 2026-10-09, CORTEZ/MENESES).
+        """
+        if self.hbsys_window is None:
+            return False
+        wanted = re.sub(r"\D+", "", str(claim.hospital_no))
+        # Live failure 2026-10-09 (COLOBONG, workflow runs 1 and 2):
+        # the patient loaded into the Billing form, but the whole-window
+        # OCR read the loaded number 000000000010920 as ...10820, so the
+        # exact check failed and the patient stopped for review while
+        # already on screen. The Edit control's own text decides when it
+        # is readable — OCR can never misread a digit it does not parse.
+        edit = self.hospital_no_edit()
+        if edit is not None:
+            shown = re.sub(r"\D+", "", self.hospital_no_edit_text())
+            return bool(shown) and shown == wanted
+        text = self.current_hbsys_text("patient_load_probe")
+        squashed = re.sub(r"[^A-Z0-9]+", "", text)
+        wanted_text = re.sub(r"[^A-Z0-9]+", "", str(claim.hospital_no).upper())
+        if wanted_text in squashed:
+            return True
+        # OCR digit tolerances: O/D/Q read as 0, L/I as 1,
+        # Z as 2, S as 5, B as 8.
+        normalized = (
+            squashed.replace("O", "0")
+            .replace("D", "0")
+            .replace("Q", "0")
+            .replace("L", "1")
+            .replace("I", "1")
+            .replace("Z", "2")
+            .replace("S", "5")
+            .replace("B", "8")
+        )
+        return wanted_text in normalized
 
     def _wait_admission_history_closed(self) -> bool:
         """The popup must consume the pick before the next step may run.
@@ -497,6 +733,29 @@ class HbsysOperator:
             raise RuntimeError("HBSys window is not focused.")
 
         image_path = self.capture_window(self.hbsys_window, "phic_beneficiaries_select")
+        if self.beneficiaries_window_shows_other_patient(image_path, claim):
+            # Stale window from the previous patient (live failure
+            # 2026-10-08, TUTAAN): HBSys refocused SIBALON's still-open
+            # Beneficiaries window instead of loading this claim's rows.
+            # Close it and reopen a fresh window for the current patient
+            # before any row is trusted. A window that is STILL stale
+            # after the reopen falls through to the row scan, whose
+            # first-name guard remains the final never-guess gate.
+            self.close_phic_beneficiaries(
+                "Close stale PhilHealth Beneficiaries window"
+            )
+            self.click(
+                P.PHIC,
+                "PHIC (reopen after stale Beneficiaries window)",
+            )
+            self.screen_stage = "beneficiary"
+            sleep_short(1.0)
+            if not self.dismiss_claim_form4_after_phic_if_visible():
+                return False
+            image_path = self.capture_window(
+                self.hbsys_window,
+                "phic_beneficiaries_select_retry",
+            )
         ocr_variants = read_ocr_item_variants(image_path)
         row_y = self.find_phic_beneficiary_row_y_from_variants(
             ocr_variants,
@@ -967,6 +1226,39 @@ class HbsysOperator:
         sleep_short(0.8)
         self.screen_stage = "base"
 
+    def close_open_form_at_run_end(self) -> None:
+        """End-of-run Close Form cleanup (operator rule 2026-10-08).
+
+        After the LAST patient, click the Close Form slot
+        (X:434 Y:60) — but ONLY when the screen is not already
+        at the hospital-number base state — so a form left open
+        after the final patient (e.g. a Beneficiaries window
+        that survived its close slot) cannot block the next
+        workflow node. Final Bill follows Date Fill, and its
+        first HBSys step needs a clean screen ready for
+        hospital-number entry. On an already-clean screen the
+        same slot is the Admit History toolbar button, so the
+        click must NOT happen there (it would open the popup
+        instead of closing a form).
+        """
+        if not self.live or self.hbsys_window is None:
+            return
+        # A form with no Hospital No. field (the Patient Record Form,
+        # live failure 2026-10-09 DAYAG) puts the slot at (434, 60) on a
+        # DIFFERENT button — it would open another Claim Form instead of
+        # closing one, leaving the next workflow node a worse screen than
+        # it found. Restore the Billing / hospital-search form first; the
+        # slot is only needed once that screen is back and a form is up.
+        self.ensure_hospital_number_screen("at the end of the Date Fill run")
+        end_text = self.current_hbsys_text("date_fill_end_probe")
+        if self.is_safe_reset_text(end_text):
+            return
+        self.click(
+            P.CLOSE_FORM_END_OF_RUN,
+            "Close Form (end of Date Fill run)",
+        )
+        sleep_short(0.6)
+
     def current_hbsys_text(self, prefix: str) -> str:
         if self.hbsys_window is None:
             return ""
@@ -975,8 +1267,19 @@ class HbsysOperator:
 
     @staticmethod
     def is_phic_beneficiaries_text(text: str) -> bool:
-        normalized = re.sub(r"[^A-Z0-9]+", " ", text.upper())
-        return "PHILHEALTH BENEFICIARIES" in normalized
+        squashed = re.sub(r"[^A-Z0-9]+", "", text.upper())
+        if "PHILHEALTHBENEFICIARIES" in squashed:
+            return True
+        # OCR often splits the title into "PHIL HEALTH
+        # BENEFICIARIES" (space instead of the joined token)
+        # or misreads the first word (PHILAEALTH / HEAITH).
+        # The old exact-token check let a still-open
+        # Beneficiaries window pass for closed (live failure
+        # 2026-10-08: SIBALON's window survived the close
+        # slot and poisoned the next patient's PHIC step),
+        # so the squashed text only needs PHIL +
+        # BENEFICIARIES to count as the window being open.
+        return "BENEFICIARIES" in squashed and "PHIL" in squashed
 
     @staticmethod
     def is_beneficiary_cancel_visible_text(text: str) -> bool:
@@ -1020,6 +1323,44 @@ class HbsysOperator:
             return False
         return self.is_phic_beneficiaries_text(
             self.current_hbsys_text("phic_beneficiaries_close_probe")
+        )
+
+    def beneficiaries_window_shows_other_patient(
+        self,
+        image_path: Path,
+        claim: ReadyClaim,
+    ) -> bool:
+        """True when the open Beneficiaries window belongs to another patient.
+
+        HBSys sometimes leaves the previous patient's Beneficiaries
+        window open; the PHIC toolbar click then only refocuses that
+        window instead of loading the current patient (live failure
+        2026-10-08, TUTAAN: the grid still showed SIBALON, MYRNA
+        DULAY, whose confinement dates were identical to the claim's,
+        so the date-based row scan nearly picked the wrong row and
+        only the first-name guard stopped it). The window title
+        carries its own patient name, so a capture that shows a
+        Beneficiaries window without the claim's first name -- and
+        without any other name token -- is stale and must be closed
+        and reopened before row selection.
+        """
+        text = " ".join(
+            item.text.upper() for item in read_ocr_items(image_path)
+        )
+        squashed = re.sub(r"[^A-Z0-9]+", "", text)
+        if "BENEFICIARIES" not in squashed:
+            # No Beneficiaries window detected; the row scan
+            # handles a missing / empty grid as a safe stop.
+            return False
+        parts = self.name_parts(claim.patient_name)
+        first = re.sub(
+            r"[^A-Z0-9]+", "", (parts.get("first") or "").upper()
+        )
+        if first and first in squashed:
+            return False
+        return not any(
+            token in squashed
+            for token in self.name_match_tokens(claim.patient_name)
         )
 
     def cancel_pending_beneficiary_edit_if_visible(self) -> bool:
@@ -1146,18 +1487,53 @@ class HbsysOperator:
             if self.screen_stage == "cf2":
                 self.click(P.CLOSE_FORM_CF2, "Close Claim Form 2 after failure")
                 self.screen_stage = "beneficiary"
-            if self.screen_stage == "beneficiary" or self.is_phic_beneficiaries_current_screen():
-                self.close_phic_beneficiaries(
-                    "Close PhilHealth Beneficiaries after failure"
+            # Two close rounds: a Beneficiaries window that
+            # survived both Close Form slots must not terminate
+            # the batch (Golden Rule 9) when another round can
+            # still clear it (live failure 2026-10-08: the
+            # failed reset stopped the whole run at TUTAAN).
+            safe = False
+            for close_round in (1, 2):
+                if (
+                    self.screen_stage == "beneficiary"
+                    or self.is_phic_beneficiaries_current_screen()
+                ):
+                    self.close_phic_beneficiaries(
+                        "Close PhilHealth Beneficiaries after failure"
+                        if close_round == 1
+                        else "Second Close PhilHealth Beneficiaries attempt"
+                    )
+                sleep_short(0.5)
+                if self.hbsys_window is None:
+                    return False
+                proof_text = self.current_hbsys_text("safe_reset_proof")
+                safe = (
+                    find_admission_history_window() is None
+                    and self.is_safe_reset_text(proof_text)
                 )
-            sleep_short(0.5)
-            if self.hbsys_window is None:
-                return False
-            proof_text = self.current_hbsys_text("safe_reset_proof")
-            safe = (
-                find_admission_history_window() is None
-                and self.is_safe_reset_text(proof_text)
-            )
+                if safe:
+                    break
+                if close_round == 1:
+                    self.log_action(
+                        "safe reset proof still shows an open "
+                        "window; retrying the close"
+                    )
+            if not safe and self.ensure_hospital_number_screen(
+                "during the safe reset"
+            ):
+                # A form with no Hospital No. field (the Patient Record
+                # Form) used to fail this proof and stop the WHOLE batch
+                # (live failure 2026-10-09, DAYAG: the previous patient's
+                # form was still up, the proof read no hospital marker and
+                # the run ended on a patient that merely needed the screen
+                # restored). Closing it brings the Billing form back, so
+                # prove the base state again.
+                sleep_short(0.5)
+                proof_text = self.current_hbsys_text("safe_reset_proof")
+                safe = (
+                    find_admission_history_window() is None
+                    and self.is_safe_reset_text(proof_text)
+                )
             self.screen_stage = "base" if safe else self.screen_stage
             return safe
         except Exception as exc:  # noqa: BLE001 - reset must be conservative.
@@ -1166,12 +1542,20 @@ class HbsysOperator:
 
     @staticmethod
     def is_safe_reset_text(proof_text: str) -> bool:
-        normalized = re.sub(r"[^A-Z0-9]+", " ", proof_text.upper())
+        squashed = re.sub(r"[^A-Z0-9]+", "", proof_text.upper())
         hospital_search_visible = any(
-            marker in normalized
-            for marker in ("HOSPITAL NO", "HOSPITAL N0", "HOSPITAL NUMBER")
+            marker in squashed
+            for marker in ("HOSPITALNO", "HOSPITALN0", "HOSPITALNUMBER")
         )
-        beneficiary_still_open = "PHILHEALTH BENEFICIARIES" in normalized
+        # Same OCR tolerance as is_phic_beneficiaries_text: a
+        # spaced "PHIL HEALTH BENEFICIARIES" title must still
+        # count as the window being open, otherwise the reset
+        # reports success while the previous patient's window
+        # is still on screen (live failure 2026-10-08).
+        beneficiary_still_open = (
+            "PHILHEALTHBENEFICIARIES" in squashed
+            or ("BENEFICIARIES" in squashed and "PHIL" in squashed)
+        )
         return hospital_search_visible and not beneficiary_still_open
 
     def process_claim(self, claim: ReadyClaim) -> str:
@@ -1435,6 +1819,12 @@ def main() -> int:
             if not safe_reset:
                 break
             continue
+
+    # End-of-run cleanup (operator rule 2026-10-08): make sure
+    # no form is left open after the last patient, so the next
+    # workflow node (Final Bill follows Date Fill) starts from a
+    # screen ready for hospital-number entry.
+    operator.close_open_form_at_run_end()
 
     log_path = write_run_log(results)
     print(f"Run log: {log_path.resolve()}")

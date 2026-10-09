@@ -492,11 +492,19 @@ def final_bill_block_reason(folder: str, open_forms) -> str:
     wanted = final_bill.billing_form_for_patient(name)
     wanted_key = final_bill.billing_title_key(wanted)
     if wanted_key not in {final_bill.billing_title_key(title) for title in billing}:
-        return (
-            "Billing form is open for a different patient: "
-            + ", ".join(billing)
-            + f" — plan needs {wanted}"
-        )
+        # Operator rule 2026-10-09: HBSys records often omit the generational
+        # suffix the claim folder carries ("DAYAG, VIC ERNESTO JR TAYABAN" vs
+        # the loaded "Billing (DAYAG, VIC ERNESTO TAYABAN)") — live failure
+        # 2026-10-09 BLOCKED a correctly loaded patient for that reason. The
+        # suffix-insensitive fallback is used only when it is UNIQUE (see
+        # billing_title_is_open), so a father and a son whose names differ by
+        # nothing but the suffix still BLOCK instead of being guessed.
+        if not final_bill.billing_title_is_open(wanted, billing):
+            return (
+                "Billing form is open for a different patient: "
+                + ", ".join(billing)
+                + f" — plan needs {wanted}"
+            )
     return ""
 
 
@@ -590,9 +598,12 @@ def _default_final_bill(
     current_forms = [str(title).strip() for title in (forms_fn() or [])]
     # Titles are matched by normalized key, never byte-for-byte: HBSys can title
     # this same patient's form "Billing (VALENTINO, NIKKI )" (an empty middle
-    # name leaves a space before ")") while the folder name carries none.
-    current_keys = {final_bill.billing_title_key(title) for title in current_forms}
-    already_open = bool(wanted) and final_bill.billing_title_key(wanted) in current_keys
+    # name leaves a space before ")") while the folder name carries none, and it
+    # can omit the generational suffix the folder carries (operator rule
+    # 2026-10-09 — the suffix-insensitive fallback applies only when unique).
+    already_open = bool(wanted) and final_bill.billing_title_is_open(
+        wanted, current_forms
+    )
     load_attempted = False
     load_ok = True
     if wanted and (always_reload or not already_open):
@@ -655,9 +666,11 @@ def _default_final_bill(
     result = runner_fn(
         # Keyed comparison, never byte-for-byte: HBSys titles this same
         # patient's form "Billing (VALENTINO, NIKKI )" when the middle name is
-        # empty, and a raw "in" test would read that as "form not open".
-        forms_open_fn=lambda: final_bill.billing_title_key(wanted)
-        in {final_bill.billing_title_key(title) for title in forms_fn()},
+        # empty, and a raw "in" test would read that as "form not open". The
+        # generational suffix of the folder name is tolerated the same way
+        # (operator rule 2026-10-09), and only when the match is unique.
+        forms_open_fn=lambda: bool(wanted)
+        and final_bill.billing_title_is_open(wanted, forms_fn()),
         expected_screen=expected_screen,
         log_fn=log_fn,
     )

@@ -105,6 +105,53 @@ class BuildPlanFromCsvTests(unittest.TestCase):
         self.assertEqual(summary["final_bill"], 1)
 
 
+class BuildPlanFromRowsTests(unittest.TestCase):
+    """In-memory Fees Check rows (the no-write plan preflight)."""
+
+    def test_routes_in_memory_rows_like_the_csv(self):
+        rows = [
+            ready_row("READY PATIENT"),
+            dict(ready_row("FILL PATIENT"),
+                 **{"Consent Date (hpatcon1.consentdate)": "",
+                    "Auth Sign Date (hpatcon1.authsigndate)": "",
+                    "Ready to Generate XML": "NO"}),
+            dict(ready_row("BILL PATIENT"),
+                 **{"Status": "NO FINAL BILL",
+                    "Ready to Generate XML": "NO"}),
+        ]
+        items, summary, note = store.build_plan_from_rows(rows)
+        self.assertEqual(note, "")
+        self.assertEqual(
+            [item["action"] for item in items],
+            [
+                actions.ACTION_XML_CLICKER,
+                actions.ACTION_DATE_FILL,
+                actions.ACTION_FINAL_BILL,
+            ],
+        )
+        self.assertEqual(summary["final_bill"], 1)
+
+    def test_empty_rows_explain_why_empty(self):
+        items, summary, note = store.build_plan_from_rows([])
+        self.assertEqual(items, [])
+        self.assertEqual(summary["final_bill"], 0)
+        self.assertIn("No patient rows", note)
+
+    def test_mismatch_rows_are_manual_review_not_final_bill(self):
+        # 2026-10-07: only NO FINAL BILL is auto-final-billed.
+        items, summary, note = store.build_plan_from_rows([
+            dict(ready_row("MISMATCH PATIENT"),
+                 **{"Status": "MISMATCH",
+                    "Ready to Generate XML": "NO"}),
+        ])
+        self.assertEqual(
+            [item["action"] for item in items],
+            [actions.ACTION_MANUAL_REVIEW],
+        )
+        self.assertEqual(summary["manual_review"], 1)
+        self.assertEqual(summary["final_bill"], 0)
+
+
 class FanOutTests(unittest.TestCase):
     """Slice H: a fees row needing Final Bill AND dates becomes two rows."""
 

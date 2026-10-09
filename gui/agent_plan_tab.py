@@ -88,6 +88,15 @@ class AgentPlanFrame(ttk.Frame):
         self._run_thread = None
         self._loading = False
         self.items: list[dict] = []
+        # No-write preflight state (2026-10-07): the Agent Plan
+        # runs the Fees Check IN MEMORY (never writes the
+        # fees_checker_report CSV/XLSX). `_live_rows` caches the
+        # last in-memory rows so the after-run reload drops
+        # completed rows without a second HBSys trip; the CSV
+        # field stays the fallback base when the plan was loaded
+        # from a written report.
+        self._live_rows: list | None = None
+        self._plan_from_live = False
         self.summary_var = tk.StringVar(value="No plan loaded yet.")
         self.note_var = tk.StringVar(value="")
         self.build_ui()
@@ -265,12 +274,13 @@ class AgentPlanFrame(ttk.Frame):
     def on_load_plan(self) -> None:
         """Button entry: optionally run a fresh Fees Check, then load.
 
-        With the "Run Fees Check first" checkbox ON (default) the plan
-        base is always the report THIS click just wrote — fees check is
-        read-only against HBSys and runs on a background thread so the
-        UI never freezes. Unchecked (or driven programmatically through
-        load_plan(), e.g. the after-run reload) loads the existing CSV
-        without touching HBSys.
+        With the "Run Fees Check first" checkbox ON (default) the
+        Fees Check runs READ-ONLY and IN MEMORY on a background
+        thread (no CSV/XLSX is written — the Final Bill workflow
+        rule, 2026-10-07) and the plan is built from those rows.
+        Unchecked (or driven programmatically through
+        load_plan(), e.g. the after-run reload) loads the existing
+        CSV without touching HBSys.
         """
         if self._loading:
             self.log("Fees Check paperatakbo pa — hintayin ang tapos.")
@@ -286,11 +296,11 @@ class AgentPlanFrame(ttk.Frame):
         def worker():
             try:
                 check_fn = self.fees_check_fn or self._default_fees_check
-                _rows, csv_path, _xlsx = check_fn()
+                rows, _csv_path, _xlsx_path = check_fn()
             except Exception as exc:  # noqa: BLE001 - surface, never crash Tk
                 self._ui(lambda: self._preflight_failed(exc))
                 return
-            self._ui(lambda: self._preflight_finished(str(csv_path)))
+            self._ui(lambda: self._preflight_finished(rows))
 
         if self.background:
             threading.Thread(target=worker, daemon=True).start()
@@ -299,17 +309,25 @@ class AgentPlanFrame(ttk.Frame):
 
     @staticmethod
     def _default_fees_check():
-        """Run the full Fees Check (import lazy: keeps GUI start light)."""
+        """Run the Fees Check WITHOUT writing reports (in-memory only).
+
+        Operator rule 2026-10-07: this preflight feeds the Final
+        Bill workflow and must not litter fees_checker_report
+        CSV/XLSX files — the dashboard Fees Check keeps writing
+        those (fees_checker.run_check default write_reports=True).
+        """
         import fees_checker
 
-        return fees_checker.run_check()
+        return fees_checker.run_check(write_reports=False)
 
-    def _preflight_finished(self, csv_path: str) -> None:
+    def _preflight_finished(self, rows: list) -> None:
         self._loading = False
         self.load_btn.configure(state="normal")
-        self.log(f"Fees Check tapos — bagong report: {csv_path}")
-        self.fees_csv_var.set(csv_path)
-        self.load_plan()
+        self.log(
+            "Fees Check tapos (read-only sa HBSys, in-memory — "
+            f"walang CSV/XLSX) — {len(rows)} row(s)"
+        )
+        self.load_plan(rows=rows)
 
     def _preflight_failed(self, exc: Exception) -> None:
         self._loading = False
@@ -323,26 +341,39 @@ class AgentPlanFrame(ttk.Frame):
             parent=self,
         )
 
-    def load_plan(self) -> None:
-        """Read the LATEST Fees Check CSV and render one row per patient.
+    def load_plan(self, rows: list | None = None) -> None:
+        """Build the plan from in-memory rows or the Fees Check CSV.
 
-        Pure load (no Fees Check run) — used directly by the after-run
-        auto-reload; the Load Plan button goes through on_load_plan().
-        Read-only: the base is always the newest fees_checker_report*.csv
-        (blank/canonical field), while an explicit Browse/typed path is
-        respected as-is; rows recorded completed by a previous run drop
-        out so finished work is never repeated.
+        ``rows`` (the no-write preflight's in-memory Fees Check
+        rows) routes directly to the plan without touching a CSV
+        file — the operator's 2026-10-07 rule for the Final Bill
+        workflow. ``rows=None`` reads the Fees Check CSV named in
+        the entry field (Browse/typed path, or the after-run
+        reload when the plan was built from a written report).
+
+        Read-only: an explicit path is respected as-is; rows
+        recorded completed by a previous run drop out so finished
+        work is never repeated.
         """
-        raw_path = self.fees_csv_var.get().strip()
-        csv_path = str(plan_store.resolve_fees_csv(raw_path))
-        if csv_path != raw_path:
-            self.fees_csv_var.set(csv_path)
-        # Slice H: with the switch on, one patient can contribute TWO rows
-        # (FINAL BILL, then DATE FILL), so the counts below are STEPS.
         fan_out = bool(self.fan_out_var.get())
-        items, summary, note = plan_store.build_plan_from_csv(
-            csv_path, fan_out=fan_out
-        )
+        if rows is None:
+            raw_path = self.fees_csv_var.get().strip()
+            csv_path = str(plan_store.resolve_fees_csv(raw_path))
+            if csv_path != raw_path:
+                self.fees_csv_var.set(csv_path)
+            items, summary, note = plan_store.build_plan_from_csv(
+                csv_path, fan_out=fan_out
+            )
+            self._live_rows = None
+            self._plan_from_live = False
+            source = csv_path
+        else:
+            items, summary, note = plan_store.build_plan_from_rows(
+                rows, fan_out=fan_out
+            )
+            self._live_rows = list(rows)
+            self._plan_from_live = True
+            source = "in-memory Fees Check"
         self.items = items
         self._render_items()
 
@@ -366,7 +397,7 @@ class AgentPlanFrame(ttk.Frame):
         self.note_var.set(note)
         self.approve_btn.configure(state="normal" if items else "disabled")
         self.log(
-            f"Loaded plan from {csv_path}: {total} {noun} "
+            f"Loaded plan from {source}: {total} {noun} "
             f"({patients} patient(s)). "
             + ("| ".join(parts) if items else note)
         )
@@ -567,9 +598,16 @@ class AgentPlanFrame(ttk.Frame):
         used = run_notifier.notify_run_finished(self, message=message, title=title)
         self.log(f"Run-finished notification: {used}")
         # Reload so rows the orchestrator recorded as completed drop out
-        # of the plan (finished work is never repeated).
+        # of the plan (finished work is never repeated). A plan built
+        # from the no-write preflight reloads from its cached in-memory
+        # rows (the pre-run snapshot + the completion ledger — the same
+        # semantics the CSV base always had); a CSV-based plan re-reads
+        # the report file.
         if getattr(report, "outcomes", None):
-            self.load_plan()
+            if self._plan_from_live and self._live_rows is not None:
+                self.load_plan(rows=self._live_rows)
+            else:
+                self.load_plan()
         if problems:
             listed = "\n".join(
                 f"  {index}. {outcome.hospital_no or outcome.patient_folder} "

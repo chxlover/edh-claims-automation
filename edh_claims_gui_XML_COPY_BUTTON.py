@@ -33,6 +33,7 @@ from claims_checker import list_folders_without_xml, output_dir_has_xml
 from gui.workflow_tab import WorkflowFrame
 from gui.pdf_preview_panel import PdfPreviewPanel
 from gui.run_status_overlay import RunStatusOverlay
+from core.workflow_progress import WorkflowProgress
 from date_fill_hbsys.hbsys_window import find_hbsys_window
 
 BASE_DIR = r"C:\claims_bot"
@@ -1304,6 +1305,9 @@ class EDHClaimsGUI(tk.Tk):
         self.hbsys_warning_label = None
         self.run_status_overlay = None
         self.run_status_overlay_job = None
+        # Remaining-patient counter for the Date Fill / Final Bill nodes,
+        # shown on the run-status overlay. Built in build_workflow_tab().
+        self.workflow_progress = WorkflowProgress()
 
         self.setup_style()
         self.build_ui()
@@ -1858,10 +1862,22 @@ class EDHClaimsGUI(tk.Tk):
         PdfPreviewPanel(self.pdf_preview_tab)
 
     def build_workflow_tab(self):
+        # Every workflow log line also feeds the remaining-patient counter that
+        # the run-status overlay shows ("Date Fill 2 left" / "Final Bill 1 left").
+        # Display-only: the tracker never influences which patient is touched.
+        self.workflow_progress = WorkflowProgress()
+
+        def _log_with_progress(line):
+            try:
+                self.workflow_progress.feed(line)
+            except Exception:
+                self.workflow_progress.reset()
+            self.log(line)
+
         frame = WorkflowFrame(
             self.workflow_tab_frame,
             settings_getter=lambda: self.settings,
-            log_callback=self.log,
+            log_callback=_log_with_progress,
         )
         self.workflow_frame = frame
         frame.pack(fill="both", expand=True)
@@ -1877,8 +1893,16 @@ class EDHClaimsGUI(tk.Tk):
         if overlay is not None:
             if self.running_process is not None:
                 overlay.set_running("Script running")
+                # A dashboard script owns the mouse; clear any leftover node
+                # count so a stale "Date Fill 2 left" cannot linger.
+                overlay.set_count("")
             elif self.workflow_running():
+                # The status line keeps saying "Workflow running"; the
+                # remaining patients of the active node (Date Fill /
+                # Final Bill) get their OWN line right below it.
                 overlay.set_running("Workflow running")
+                tracker = getattr(self, "workflow_progress", None)
+                overlay.set_count(tracker.label if tracker is not None else "")
             else:
                 overlay.set_idle()
             overlay.tick()

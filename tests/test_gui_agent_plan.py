@@ -479,31 +479,25 @@ class AgentPlanPanelTests(unittest.TestCase):
         self.assertIn("patient(s)", body)
         self.assertIn("FINAL BILL ang muna", body)
 
-    # -- Load Plan preflight: Fees Check first (user request 2026-09-26) ---
-
-    def _write_extra_csv(self, name, folders):
-        path = self.root / name
-        with open(path, "w", newline="", encoding="utf-8-sig") as handle:
-            writer = csv.DictWriter(handle, fieldnames=HEADERS)
-            writer.writeheader()
-            for folder in folders:
-                writer.writerow(ready_row(folder))
-        return path
+    # -- Load Plan preflight: Fees Check first, in memory -------
 
     def test_on_load_plan_preflight_runs_fees_check_first(self):
         calls = []
-        fresh = self._write_extra_csv("fresh_report.csv", ["FRESH PATIENT"])
 
         def fake_check():
             calls.append(1)
-            return [], fresh, Path("fresh.xlsx")
+            # No-write preflight: rows in memory, no report paths.
+            return [ready_row("FRESH PATIENT")], None, None
 
         self.frame.fees_check_fn = fake_check
         self.frame.fees_csv_var.set(str(self.csv_path))
         self.frame.on_load_plan()  # background=False -> synchronous
 
         self.assertEqual(len(calls), 1)
-        self.assertEqual(self.frame.fees_csv_var.get(), str(fresh))
+        # The plan came from the in-memory rows — the CSV field
+        # is NOT rewritten (the preflight never writes a report).
+        self.assertEqual(self.frame.fees_csv_var.get(), str(self.csv_path))
+        self.assertTrue(self.frame._plan_from_live)
         self.assertEqual(len(self.frame.items), 1)
         self.assertEqual(
             self.frame.items[0]["patient_folder"], "FRESH PATIENT"
@@ -511,6 +505,17 @@ class AgentPlanPanelTests(unittest.TestCase):
         self.assertEqual(
             str(self.frame.load_btn.cget("state")), "normal"
         )
+
+    def test_default_fees_check_never_writes_reports(self):
+        # The plan preflight runs the Fees Check in memory only —
+        # the dashboard Fees Check keeps writing the reports.
+        with mock.patch("fees_checker.run_check") as run_check:
+            run_check.return_value = ([], None, None)
+            rows, csv_path, xlsx_path = self.frame._default_fees_check()
+        run_check.assert_called_once_with(write_reports=False)
+        self.assertEqual(rows, [])
+        self.assertIsNone(csv_path)
+        self.assertIsNone(xlsx_path)
 
     def test_on_load_plan_preflight_unchecked_skips_fees_check(self):
         calls = []
@@ -542,10 +547,21 @@ class AgentPlanPanelTests(unittest.TestCase):
         self.assertEqual(str(self.frame.load_btn.cget("state")), "normal")
 
     def test_run_finished_reload_skips_fees_check(self):
-        # The after-run reload uses load_plan() directly — no second
-        # Fees Check per run.
+        # The after-run reload uses the cached in-memory rows — no
+        # second Fees Check per run.
         calls = []
-        self.frame.fees_check_fn = lambda: calls.append(1) or ([], self.csv_path, None)
+        fixture_rows = [
+            ready_row("READY PATIENT"),
+            dict(
+                ready_row("FILL PATIENT"),
+                **{"Consent Date (hpatcon1.consentdate)": "",
+                   "Auth Sign Date (hpatcon1.authsigndate)": "",
+                   "Ready to Generate XML": "NO"},
+            ),
+        ]
+        self.frame.fees_check_fn = lambda: calls.append(1) or (
+            fixture_rows, None, None
+        )
         agent_plan_tab.messagebox.askyesno = lambda *args, **kwargs: True
 
         def fake_run(rows, *, log_fn=None, **kwargs):

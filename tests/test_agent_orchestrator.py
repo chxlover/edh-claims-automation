@@ -165,6 +165,69 @@ class FinalBillPreconditionTests(unittest.TestCase):
         self.assertIn("no patient name", reason)
 
 
+class FinalBillSuffixToleranceTests(unittest.TestCase):
+    """Operator rule 2026-10-09 — the live DAYAG case.
+
+    Folder "DAYAG, VIC ERNESTO JR TAYABAN" against the loaded HBSys form
+    "Billing (DAYAG, VIC ERNESTO TAYABAN)" used to BLOCK a correctly loaded
+    patient ("Billing form is open for a different patient"). The
+    generational suffix (III, JR, SR, II, IV, I) is now ignored for the
+    comparison — but only when the match is UNIQUE, so a father and a son
+    whose names differ by nothing but the suffix still BLOCK.
+    """
+
+    FOLDER = (
+        "DAYAG, VIC ERNESTO JR TAYABAN - 000000000001450 - "
+        "ADM20261004_DIS20261008"
+    )
+
+    def test_live_dayag_case_no_longer_blocks(self):
+        reason = orchestrator.final_bill_block_reason(
+            self.FOLDER, ["Billing (DAYAG, VIC ERNESTO TAYABAN)", "User Menu"]
+        )
+        self.assertEqual(reason, "")
+
+    def test_each_operator_suffix_matches(self):
+        for suffix in ("III", "JR", "SR", "II", "IV", "I"):
+            with self.subTest(suffix=suffix):
+                folder = (
+                    f"SMITH, JOHN {suffix} - 000000000001450 - "
+                    "ADM20261004_DIS20261008"
+                )
+                self.assertEqual(
+                    orchestrator.final_bill_block_reason(
+                        folder, ["Billing (SMITH, JOHN)", "User Menu"]
+                    ),
+                    "",
+                )
+
+    def test_ambiguous_suffix_forms_still_block(self):
+        reason = orchestrator.final_bill_block_reason(
+            self.FOLDER,
+            [
+                "Billing (DAYAG, VIC ERNESTO SR TAYABAN)",
+                "Billing (DAYAG, VIC ERNESTO TAYABAN)",
+            ],
+        )
+        self.assertIn("different patient", reason)
+
+    def test_a_truly_different_patient_still_blocks(self):
+        reason = orchestrator.final_bill_block_reason(
+            self.FOLDER, ["Billing (SANTOS, MARIA)", "User Menu"]
+        )
+        self.assertIn("different patient", reason)
+        self.assertIn("Billing (DAYAG, VIC ERNESTO JR TAYABAN)", reason)
+
+    def test_suffix_inside_a_name_is_not_stripped(self):
+        folder = "CRUZ, MARIA - 000000000001450 - ADM20261004_DIS20261008"
+        self.assertIn(
+            "different patient",
+            orchestrator.final_bill_block_reason(
+                folder, ["Billing (CRUZ, MARIA IRA)", "User Menu"]
+            ),
+        )
+
+
 
 class DispatchTests(unittest.TestCase):
     """run_approved_plan() over injected executors — order + guarantees."""
