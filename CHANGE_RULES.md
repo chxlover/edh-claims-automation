@@ -37,7 +37,293 @@ changes and must not be recorded individually.
 - Background services must not freeze Tkinter's main thread.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
-- Test changes in proportion to their risk and record the verification result below.
+### 2026-10-09 - Improvement: Claim Processor heartbeat + no-prompt hang protection
+
+Reason:
+
+Operator log 2026-10-09 (batch `oc1`): ang engine output ay dumadaloy
+nang maayos (OCR + PDF/A conversion) pero humihinto ang nakikitang
+progress nang matagal sa conversion loop — hindi malaman kung mabagal
+lang o stuck. Dalawang proteksyon ang idinagdag.
+
+Files modified:
+
+- `core/agent/pipeline_adapters.py` — (a) `stdin=DEVNULL` sa engine
+  Popen: anumang `input()` prompt sa loob ay mabilis mag-fail imbes na
+  mag-hang forever ang batch; (b) watchdog daemon thread: kapag walang
+  engine output nang 120s+, mag-log ng `... still running (no engine
+  output for Ns — likely slow OCR/PDF work)` o `POSSIBLY STUCK: check
+  CPU` kapag lagpas 10 min; humihinto pagtapos ng run.
+- `gui/claims_agent_tab.py` — Agent Log box cap 500 -> 2000 lines
+  (thousands ng OCR lines kada pasyente).
+
+Behavior before and after:
+
+- Before: katahimikan habang nagtatrabaho ang engine; walang paraan
+  malaman kung stuck.
+- After: heartbeat kada 2 min ng katahimikan + gabay (CPU check);
+  prompt-hang imposible na.
+
+Safety or compatibility notes:
+
+- Same engine invocation (module, cwd, env, 60-min timeout); watchdog
+  ay daemon at hindi humahadlang sa exit.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_claims_agent
+  tests.test_gui_claims_agent`: 34 tests, OK.
+
+### 2026-10-09 - Fix: Claims Agent shows live progress (streamed engine output + stage start lines)
+
+Reason:
+
+Operator report 2026-10-09 (live naka-check): pagkatapos ng
+"batch start (resume=True)" + "resumed from open batch", walang
+nangyayari sa log. Root cause: `run_claim_processor_once` ay
+`subprocess.run(capture_output=True)` — hinihintay munang matapos ang
+totoong engine (OCR ng scans, maraming minuto) bago mag-log ng kahit
+ano, kaya patay tingnan ang batch habang nagtatrabaho ang engine.
+
+Files modified:
+
+- `core/agent/pipeline_adapters.py` — processor ngayon ay `Popen` +
+  line-by-line streaming (`claim processor | <engine line>`) + start
+  line (module, scans, timeout) + `done (exit=0)` line; pipe
+  isinasara; timeout/kill behavior preserved.
+- `core/agent/claims_agent.py` — bagong progress lines: engine start
+  (tracked + waiting PDFs), `processing claim i/N` kada claim,
+  `snapshot: N row(s)` kada fees refresh, `starting (up to N
+  attempt(s))` sa HBSys/XML stages.
+- `tests/test_claims_agent.py` — bagong test 31 (fake engine script:
+  start/streamed/done lines asserted).
+
+Behavior before and after:
+
+- Before: katahimikan mula "batch start" hanggang matapos ang engine
+  (minu-minuto).
+- After: dumadaloy ang engine output + per-claim/per-stage lines sa
+  Agent Log box habang tumatakbo.
+
+Safety or compatibility notes:
+
+- Walang binago sa engine invocation (same module, cwd, env,
+  timeout); streaming lang ang nadagdag.
+- Log box capped pa rin sa 500 lines.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_claims_agent
+  tests.test_gui_claims_agent`: 34 tests, OK (29 + 5 tab + streaming).
+
+### 2026-10-09 - Fix: Claims Agent tab was stuck on "running" with no logs (Tk thread violation) + stage log contract
+
+Reason:
+
+Operator report 2026-10-09 ("ayaw gumana ng agent"): pag pindot ng
+Start, walang nangyayari sa tab pero "Claims Agent running" ang overlay.
+Root cause (2 bugs, both thread/contract violations):
+1. Ang worker thread ay direktang tumatawag ng Tk methods —
+   `after()` sa `_thread_log`/`_run_batch` at `batch_var.get()` /
+   `retries_var.get()` / `live_var.get()` sa `_build_config` — mula sa
+   maling thread. Hindi thread-safe ang Tkinter: tahimik na
+   nalalaglag ang bawat log at ang finish signal ("main thread is not
+   in main loop"), kaya naka-ON magpakailanman ang `is_running`.
+2. Ang `ClaimsAgent._log(batch, claim, stage, msg)` ay 4-argument
+   pero ang adapters ay `log_fn(message)` ang tawag — sa totoong run
+   mag-TypeError ang bawat stage na naglo-log.
+
+Files modified:
+
+- `gui/claims_agent_tab.py` — (a) bagong `queue.Queue` bridge: worker
+  ay `put_nowait(("log"/"done"))` lang; main thread nag-drain via
+  250ms `_poll_queue`; (b) `batch_id` + `config` kinukuha sa main
+  thread sa `on_start`, ipinapasa bilang plain data sa worker;
+  (c) bagong "Agent Log" box (read-only Text, last 500 lines) sa tab
+  mismo + parehong lines sa main GUI log; (d) running summary text
+  habang tumatakbo.
+- `core/agent/claims_agent.py` — bagong `_stage_log()` single-arg
+  adapter; ginamit sa processor/finalize/hbsys/xml call sites.
+- `tests/test_gui_claims_agent.py` — bagong regression test na
+  tumatakbo sa TUNAY na background thread (dating bug ay hindi
+  nahuhuli ng `background=False` tests).
+- `tests/test_claims_agent.py` — bagong test 30 (log contract).
+
+Behavior before and after:
+
+- Before: Start → overlay "Claims Agent running" forever, walang log,
+  walang summary; Start button naka-disable.
+- After: bawat stage line ay dumadating sa Agent Log box + main log
+  (hal. `[agent][B1][FOLDER][DATE_FILL] ...`), pagtapos ay summary +
+  table + Start button bumabalik; totoong stage logs hindi na
+  nag-TypeError.
+
+Safety or compatibility notes:
+
+- Worker thread: queue `put_nowait` lang + plain-data args — walang
+  Tk call mula sa ibang thread kahit isa.
+- Poll loop humihinto kapag tapos (`_running=False` → no reschedule);
+  destroy-safe (try/except sa schedule at drain).
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_claims_agent
+  tests.test_gui_claims_agent`: 34 tests, OK (28 + 6, kasama ang
+  bagong threaded regression test at log-contract test).
+
+### 2026-10-09 - Feature: Claims Agent GUI tab ("Claims Agent" notebook tab)
+
+Reason:
+
+Operator request 2026-10-09 ("idagdag mo nalang sa GUI"): running the
+pipeline via `python -c` is inconvenient — the agent needs a first-class
+tab with Start/Resume, live-mode switch, retry setting, per-claim table,
+and report-folder access, matching the Agent Plan tab conventions.
+
+Files added / modified:
+
+- `gui/claims_agent_tab.py` (BAGO) — `ClaimsAgentFrame` following the
+  `AgentPlanFrame` pattern (settings_getter/log_callback, background
+  thread + `after()` callbacks, injectable `agent_factory`): Batch ID
+  entry (empty = new/resume), fee-retries spinbox, "Live HBSys"
+  checkbutton default OFF with safe-mode warning, Start/Resume (with
+  explicit confirmation like Agent Plan), Refresh Status (reads
+  `claims_pipeline.db` without running anything), Open Reports Folder,
+  and a claims table (claim / last stage / outcome / reason+action).
+- `edh_claims_gui_XML_COPY_BUTTON.py` — 5 minimal edits only: import,
+  "Claims Agent" notebook tab + `build_claims_agent_tab()`
+  (keeps `self.claims_agent_frame`), new `claims_agent_running()`
+  predicate, and one overlay branch: while the agent batch runs the
+  overlay says "Claims Agent running" with a blank count line.
+  (`build_agent_plan_tab` also keeps its frame ref symmetrically.)
+- `tests/test_gui_claims_agent.py` (BAGO) — 5 headless tests (withdrawn
+  Tk, fake agent factory, stubbed messagebox): start shows summary,
+  live defaults OFF, decline runs nothing, refresh reads the store,
+  config problems reported without running, double-start refused.
+- `tests/test_gui_workflow_progress_overlay.py` — 1 new test: the
+  "Claims Agent running" overlay branch with blank count line.
+
+Behavior before and after:
+
+- Before: pipeline runnable only via `python -c`.
+- After: "Claims Agent" tab next to "Agent Plan"; Start asks for
+  confirmation stating live vs safe mode; table + summary update on
+  finish; overlay reflects the running batch.
+
+Safety or compatibility notes:
+
+- Live HBSys defaults OFF in the tab (same safe default as the
+  pipeline); no new GUI-driven HBSys input — the tab never clicks
+  HBSys itself.
+- Main-thread safety: batch runs on a daemon thread; UI updates only
+  via `after()`.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_gui_claims_agent`: 5 tests, OK.
+- `python -m unittest tests.test_gui_workflow_progress_overlay
+  tests.test_gui_claims_agent tests.test_claims_agent`: 41 tests, OK.
+- `py_compile` on the edited GUI module: OK; overlay/agent-plan
+  regression suites: OK (68 tests with the sibling suites).
+
+### 2026-10-09 - Feature: Claims Agent full automated pipeline (deterministic orchestrator)
+
+Reason:
+
+Task "Implement the EDH Claims Agent": coordinate the existing working
+modules (Claim Processor, Fees Checker x2 with conditional loop, Date
+Fill, Final Bill, XML Clicker, Claims Checker + 3-XML validation, HBSys
+Add Claims / upload / attachments, Attachment Verification) through one
+recoverable per-claim pipeline with bounded retries, SQLite checkpoints,
+resume, and a consolidated Excel final report. No completed orchestrator
+existed; the closest reusable pieces were the Slice E dispatcher
+(`core/agent/orchestrator.py`), the JSON plan ledger
+(`agent_plan_store.py`), and the uploader batch states.
+
+Files added (all new, additive only — no production module rewritten):
+
+- `core/agent/pipeline_config.py` — loads `claims_gui_config.json` +
+  env overrides + defaults; validates. Documents retry semantics:
+  `max_fee_cycle_retries` (default 2) = EXTRA date_fill->final_bill->
+  fees cycles after the first second-pass NO (evaluations = 1+retries);
+  `xml_max_retries` (default 1); `hbsys_max_retries` (default 0: failed
+  or uncertain HBSys ops are HELD, never blindly repeated).
+- `core/agent/pipeline_state.py` — minimal stdlib-SQLite checkpoint
+  store (`claims_pipeline.db`, separate from `claims.db`): batches +
+  per-claim rows (stage, last-completed, per-stage map, attempts, XML
+  JSON, checker status, HBSys JSON, verification JSON, error, outcome,
+  hold reason, manual action, retries, timestamps).
+- `core/agent/xml_validation.py` — per-kind validation reusing
+  `claims_checker.has_xml` + `extract_claim_series` + the
+  CLAIM NO. MATCH rule and `REQUIRED_XML_KINDS` (CF4/CF5/eSOA):
+  exists, non-empty, series-from-filename, parse attempt,
+  cross-kind match. Content element checks are recorded
+  `content_not_readable` because generated XMLs are encrypted eClaims
+  envelopes (per claims_checker docstring) — never invented, never the
+  sole failure reason.
+- `core/agent/pipeline_adapters.py` — thin adapters with lazy imports
+  (real entry points, injectable): processor subprocess
+  (CLAIMS_PROCESS_MODE=multiple, per registry), `run_check` +
+  `ready_to_generate_xml` (exact YES/NO), `HbsysOperator.process_claim`
+  (VERIFIED), `default_final_bill`, `XmlGeneratorOperator.process_claim`
+  ("done"), read-only `check_patient_folder` (never
+  `organize_claim_folders`, which moves folders), per-patient Add
+  Claims / Attachments operator methods + batch finalize, and the
+  existing `audit_claim_series` read path for verification.
+- `core/agent/claims_agent.py` — `ClaimsAgent.run_batch()`: batch
+  processor once (skipped on resume when tracked + no new scans),
+  per-claim stages with checkpoint after each, fees-2 bounded loop,
+  eligibility gate (exact `READY` + 3 valid XMLs only;
+  `READY WITH REVIEW` (spaces) held for review, `INCOMPLETE` held —
+  never converted), `live_hbsys=false` default holds HBSys stages as
+  SKIPPED (never dry-runs GUI work), per-claim isolation, batch Add
+  finalize once, report failure never erases state.
+- `core/agent/claims_report.py` — openpyxl workbook
+  (`reports/claims_agent_report_<batch>_<stamp>.xlsx`, never
+  overwritten): Claims detail (all required fields, real CF4/CF5/eSOA
+  labels, NOT_RUN for skipped stages) + Summary (each claim counted
+  once); styling after `fees_checker.write_xlsx`.
+- `tests/test_claims_agent.py` — 27 headless tests (fakes + tmp dirs;
+  real on-disk validation for XML scenarios) covering all 29 required
+  scenarios including retry-limit semantics, resume/non-repeat of
+  non-idempotent HBSys work, mixed-batch report contents, and
+  report-failure state preservation.
+
+Behavior before and after:
+
+- Before: no end-to-end deterministic pipeline; modules ran
+  individually via GUI workflow nodes.
+- After: `ClaimsAgent(...).run_batch()` runs the full sequence with
+  checkpoints in `claims_pipeline.db` and an Excel report in
+  `reports/`; reruns resume without repeating completed (including
+  non-idempotent HBSys) work. Default config performs no live HBSys
+  input — set `CLAIMS_LIVE_HBSYS=1` for production runs.
+
+Safety or compatibility notes:
+
+- Attachment Verification (`audit_claim_series`), Claims Checker,
+  Fees Checker, uploaders, and the claim processor are NOT modified
+  (verify via `git status`: none of those files touched).
+- No LLM/cloud dependency; no database writes to HBSys (fees stays
+  read-only); no PhilHealth transmission (pipeline ends at verified
+  attachments + report).
+- Checker status strings preserved exactly (`READY WITH REVIEW` with
+  spaces); existing validation rules kept, only added to.
+
+Verification performed and its result:
+
+- Standalone `__main__` checks for all six new modules: passed.
+- `python -m unittest tests.test_claims_agent`: 27 tests, OK (covers
+  all 29 required scenarios; scenario 5 also asserts the
+  evaluations = 1 + retries semantics; scenarios 14/15 share the
+  series-mismatch test; scenario 29 covers the live-off hold).
+- Full suite `python -m unittest discover -s tests`: 800 tests, OK
+  (773 pre-existing + 27 new; the `callback boom` / ResourceWarning
+  lines are pre-existing intentional test noise).
+- `git status`: only `CHANGE_RULES.md` modified; the 7 other paths
+  are new files. Attachment Verification
+  (`core/claim_attachments_doctype_audit.py`), Claims Checker,
+  Fees Checker, uploaders, and the claim processor are unmodified.
 
 ### 2026-10-09 - Fix: Remaining-patient count gets its OWN overlay line under "Workflow running"
 

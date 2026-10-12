@@ -203,6 +203,19 @@ class OverlayRemainingPatientsTests(unittest.TestCase):
         self.assertTrue(status.startswith("Script running"), status)
         self.assertEqual(count, "")
 
+    def test_claims_agent_running_shows_its_own_status(self):
+        # The Claims Agent batch owns HBSys while live: the overlay must say
+        # "Claims Agent running" with a blank count line (no node tracker).
+        self.app.workflow_frame = None
+        self.app.claims_agent_frame = type(
+            "_Agent", (), {"is_running": True})()
+        try:
+            status, count = self._refresh_texts()
+        finally:
+            self.app.claims_agent_frame = None
+        self.assertTrue(status.startswith("Claims Agent running"), status)
+        self.assertEqual(count, "")
+
     def test_workflow_tab_feeds_the_tracker(self):
         # The workflow log callback must reach the tracker (that is the only
         # wiring under test: build_workflow_tab routes every log line through

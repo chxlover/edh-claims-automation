@@ -28,6 +28,7 @@ from gui.pdf_compressor_tab import PDFCompressorFrame
 from gui.pdf_splitter_gui import PdfSplitterFrame
 from gui.add_claims_upload_tab import AddClaimsUploadFrame
 from gui.agent_plan_tab import AgentPlanFrame
+from gui.claims_agent_tab import ClaimsAgentFrame
 from gui.claim_attachments_tab import ClaimAttachmentsFrame
 from claims_checker import list_folders_without_xml, output_dir_has_xml
 from gui.workflow_tab import WorkflowFrame
@@ -1445,6 +1446,8 @@ class EDHClaimsGUI(tk.Tk):
         self.notebook.add(self.add_claims_upload_tab, text="Add Claims Upload")
         self.agent_plan_tab = ttk.Frame(self.notebook, padding=4)
         self.notebook.add(self.agent_plan_tab, text="Agent Plan")
+        self.claims_agent_tab = ttk.Frame(self.notebook, padding=4)
+        self.notebook.add(self.claims_agent_tab, text="Claims Agent")
         self.claim_attachments_tab = ttk.Frame(self.notebook, padding=4)
         self.notebook.add(self.claim_attachments_tab, text="Claim Attachments")
         self.workflow_tab_frame = ttk.Frame(self.notebook, padding=4)
@@ -1463,6 +1466,7 @@ class EDHClaimsGUI(tk.Tk):
         self.build_pdf_splitter_tab()
         self.build_add_claims_upload_tab()
         self.build_agent_plan_tab()
+        self.build_claims_agent_tab()
         self.build_claim_attachments_tab()
         self.build_workflow_tab()
         self.build_pdf_preview_tab()
@@ -1847,6 +1851,21 @@ class EDHClaimsGUI(tk.Tk):
             log_callback=self.log,
         )
         frame.pack(fill="both", expand=True)
+        self.agent_plan_frame = frame
+
+    def build_claims_agent_tab(self):
+        frame = ClaimsAgentFrame(
+            self.claims_agent_tab,
+            settings_getter=lambda: self.settings,
+            log_callback=self.log,
+        )
+        frame.pack(fill="both", expand=True)
+        self.claims_agent_frame = frame
+
+    def claims_agent_running(self):
+        """True while the Claims Agent tab batch is executing."""
+        frame = getattr(self, "claims_agent_frame", None)
+        return bool(frame is not None and frame.is_running)
 
     def build_claim_attachments_tab(self):
         frame = ClaimAttachmentsFrame(
@@ -1903,6 +1922,10 @@ class EDHClaimsGUI(tk.Tk):
                 overlay.set_running("Workflow running")
                 tracker = getattr(self, "workflow_progress", None)
                 overlay.set_count(tracker.label if tracker is not None else "")
+            elif self.claims_agent_running():
+                # Full-pipeline batch owns HBSys while live; no count line.
+                overlay.set_running("Claims Agent running")
+                overlay.set_count("")
             else:
                 overlay.set_idle()
             overlay.tick()
