@@ -103,6 +103,20 @@ def evaluate_requirements(
     if "CF2" in found:
         classifications.append("NEWBORN")
         notes.append("CF2 present - Newborn claim")
+        # Operator rule 2026-10-13: a newborn claim does not require
+        # DTR, so a CF2 folder is never held back for a missing DTR.
+        for document in list(required):
+            if _canonical_document(document) == "DTR":
+                required.remove(document)
+        notes.append("CF2 present - DTR not required for Newborn claim")
+
+    # Operator rule 2026-10-15: a CF3 (NSD/nanganak) claim generates
+    # only CF5 + eSOA — CF4 XML is not required for it.
+    if "CF3" in found:
+        for document in list(required):
+            if _canonical_document(document) == "CF4 XML":
+                required.remove(document)
+        notes.append("CF3 present - CF4 XML not required (NSD: CF5 + eSOA only)")
 
     if "ANR" in found:
         classifications.append("CS/ANR")

@@ -84,27 +84,58 @@ class NoXmlPanelTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def make_patient(self, name: str, with_xml: bool) -> Path:
+        """Legacy helper: with_xml=True writes ONLY CF4 (1 of the 3)."""
+        kinds = ["CF4"] if with_xml else []
+        return self.make_patient_with(name, kinds)
+
+    def make_patient_with(self, name: str, kinds) -> Path:
         folder = self.output_dir / name
-        folder.mkdir(parents=True)
-        if with_xml:
-            (folder / f"{name}-260924150960_CF4.xml").write_text(
+        folder.mkdir(parents=True, exist_ok=True)
+        for kind in kinds:
+            (folder / f"{name}-260924150960_{kind}.xml").write_text(
                 "{}", encoding="utf-8"
             )
         return folder
 
-    def test_panel_lists_only_folders_without_xml(self):
-        self.make_patient("ALPHA, JANE", with_xml=False)
-        self.make_patient("BRAVO, JOHN", with_xml=True)
+    def test_panel_lists_folder_with_zero_of_three_xml(self):
+        self.make_patient_with("ALPHA, JANE", [])
 
         self.app.populate_no_xml_list()
 
-        self.assertEqual(list(self.app.no_xml_list.get(0, "end")), ["ALPHA, JANE"])
+        self.assertEqual(
+            list(self.app.no_xml_list.get(0, "end")), ["ALPHA, JANE  (0/3)"]
+        )
         self.assertEqual(
             self.app.no_xml_card.cget("text"), "Patients Without XML (1)"
         )
 
+    def test_panel_keeps_folder_with_one_or_two_xml_and_shows_the_count(self):
+        # Operator rule 2026-10-12: only 3/3 removes a patient.
+        self.make_patient_with("ONE, PATIENT", ["CF4"])
+        self.make_patient_with("TWO, PATIENTS", ["CF4", "CF5"])
+
+        self.app.populate_no_xml_list()
+
+        self.assertEqual(
+            sorted(self.app.no_xml_list.get(0, "end")),
+            ["ONE, PATIENT  (1/3)", "TWO, PATIENTS  (2/3)"],
+        )
+        self.assertEqual(
+            self.app.no_xml_card.cget("text"), "Patients Without XML (2)"
+        )
+
+    def test_folder_with_all_three_xml_is_removed_from_the_panel(self):
+        self.make_patient_with("COMPLETE, PATIENT", ["CF4", "CF5", "ESOA"])
+
+        self.app.populate_no_xml_list()
+
+        self.assertEqual(list(self.app.no_xml_list.get(0, "end")), ["(none)"])
+        self.assertEqual(
+            self.app.no_xml_card.cget("text"), "Patients Without XML (0)"
+        )
+
     def test_panel_shows_none_placeholder_when_all_have_xml(self):
-        self.make_patient("BRAVO, JOHN", with_xml=True)
+        self.make_patient_with("BRAVO, JOHN", ["CF4", "CF5", "ESOA"])
 
         self.app.populate_no_xml_list()
 
@@ -150,11 +181,13 @@ class NoXmlPanelTests(unittest.TestCase):
         self.assertEqual(button_state(self.app.check_missing_button), "normal")
 
     def test_refresh_folder_lists_drives_panel_and_button(self):
-        self.make_patient("ALPHA, JANE", with_xml=False)
+        self.make_patient_with("ALPHA, JANE", [])
 
         self.app.refresh_folder_lists()
 
-        self.assertEqual(list(self.app.no_xml_list.get(0, "end")), ["ALPHA, JANE"])
+        self.assertEqual(
+            list(self.app.no_xml_list.get(0, "end")), ["ALPHA, JANE  (0/3)"]
+        )
         self.assertEqual(button_state(self.app.check_missing_button), "disabled")
 
     def test_dashboard_auto_refresh_interval_is_two_seconds(self):

@@ -37,6 +37,881 @@ changes and must not be recorded individually.
 - Background services must not freeze Tkinter's main thread.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
+
+### 2026-10-15 - Feature: one-click button opens both TRANSMITTED backups
+
+Reason:
+
+Operator request 2026-10-15: beside Archived, add the two
+backup folders
+(`C:\Shared Folder\FTPURL\TRANSMITTED\scan via bot` and
+`\\192.168.1.193\...\TRANSMITTED\MELVIN\scan via bot` —
+the same folders Archive Transmitted Claims writes to).
+Operator choice: **isang click, bubuksan pareho**.
+
+Files modified:
+
+- `edh_claims_gui_XML_COPY_BUTTON.py` — new
+  `TRANSMITTED_BACKUP_FOLDERS` constant; new "Open
+  TRANSMITTED Backups" button in the Folders tab below
+  Archived; new `open_transmitted_backups()` — opens
+  each folder independently (an unreachable share never
+  blocks the other; missing ones are reported once at
+  the end, with NO create-prompt since the archives are
+  created by Archive Transmitted Claims itself).
+- `tests/test_gui_transmitted_backups.py` (BAGO) — 5
+  tests: button exists; paths are the archive
+  destinations; one click opens both; an unreachable
+  network folder does not block the local one (and is
+  reported); the button invokes the opener.
+
+Behavior before and after:
+
+- Before: no shortcut — both archives had to be opened
+  by hand in Explorer.
+- After: one click opens both; if the network share is
+  offline the local folder still opens and the missing
+  one is shown in a single info dialog.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_gui_transmitted_backups`:
+  5 tests, OK.
+- Full suite `python -m unittest discover -s tests`:
+  see the result recorded at the end of this session.
+
+### 2026-10-15 - Rule: CF3 (NSD/nanganak) claims need CF5 + eSOA only — CF4 waived
+
+Reason:
+
+Operator request 2026-10-15: "sa claim checker kung may
+cf3 pdf dapat dalawang XML lang ... may CF3 NSD01 yan
+(nanganak) pag walang cf3 pdf dapat tatlong XML."
+Operator answer on which XML is waived: **CF4**.
+
+Files modified:
+
+- `core/claims_requirement_rules.py` — `evaluate_requirements()`
+  removes "CF4 XML" from required when "CF3" is in found,
+  with the note "CF3 present - CF4 XML not required (NSD:
+  CF5 + eSOA only)". Respects the Claim Attachment Profile
+  (CF4 already unchecked -> removal no-ops; CF3 unchecked
+  -> invisible, no waiver — never guessed). CF5/eSOA still
+  block when missing; without CF3, a missing CF4 still
+  blocks.
+- `claims_checker.py` — new `required_xml_kinds(folder)`
+  (CF3.pdf via the same `has_pdf` rule -> `("cf5",
+  "esoa")`, else all `CLAIM_KINDS`) used by
+  `build_claim_number_rows()` (CF3 + CF5/eSOA same series
+  -> "CLAIM NO. MATCH" with a "both ... (CF4 waived)"
+  note; one of two -> INCOMPLETE naming the missing one;
+  none -> NO XML; differ -> MISMATCH) and by
+  `list_folders_missing_xml()` (CF3 folders show (n/2)
+  and leave the panel at 2/2); report rules text gains
+  the CF3 line.
+- `tests/test_claims_requirement_rules.py` — the old
+  `test_cf3_does_not_waive_cf4_xml` (which locked the
+  previous behavior) replaced by
+  `test_cf3_waives_cf4_xml_for_nsd_claims` (+
+  `test_cf3_does_not_waive_cf5_or_esoa`,
+  `test_cf4_still_required_without_cf3`); new
+  integration tests (CF3 + CF5/eSOA -> READY with the
+  waiver note; CF3 + eSOA only -> INCOMPLETE Missing
+  "CF5 XML").
+- `tests/test_claim_number_match.py` — new
+  `BuildClaimNumberRowsCF3Tests` (5 tests) and 2 panel
+  tests (`(1/2)` listed, `(0/2)` listed, 2/2 removed).
+
+Behavior before and after (folder with CF3.pdf + CF5 +
+eSOA, no CF4):
+
+- Before: INCOMPLETE (Missing "CF4 XML"); claim row
+  "CLAIM NO. INCOMPLETE"; panel "(2/3)".
+- After: READY; claim row "CLAIM NO. MATCH (both ...
+  CF4 waived)"; panel removed. Without CF3.pdf the
+  three-XML behavior is unchanged.
+
+Safety or compatibility notes:
+
+- `evaluate_requirements` stays pure; the checker needed
+  no detection change (CF3.pdf already flows through
+  `get_found_items`).
+- The XML Clicker / copy_xml / settle path is untouched:
+  whatever HBSys generates still gets copied; the
+  checker simply no longer demands CF4 for CF3 folders.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_claim_number_match
+  tests.test_claims_requirement_rules
+  tests.test_gui_no_xml_panel`: 74 tests, OK.
+- Full suite `python -m unittest discover -s tests`:
+  see the result recorded at the end of this session.
+
+### 2026-10-13 - Fix: NO FINAL BILL + blank date now runs Date Fill first, then Final Bill
+
+Reason:
+
+Operator request 2026-10-13: "pag blank yung
+hprofserv.pdoctorsigndate, hpatcon1.consentdate and
+hpatcon1.authsigndate either alin sa kanila dapat mag
+date fill din ... wag muna nyang i xml clicker hanggang
+di pa tapos ang date fill at final bill ... saka lang
+mag proceed sa xml clicker kung ready to generate XML =
+YES ... date fill, then sunod final bill."
+
+Root cause (verified in `core/agent/fees_actions.py`
+`decide_action`): step 2 returns FINAL_BILL for every
+NO FINAL BILL row BEFORE reaching the signed-date check
+(step 3). The workflow's `fees_says_date_fill` condition
+asks "did the Fees routing say DATE_FILL?" — for an
+unbilled patient with blank dates the answer was NO, so
+the Date Fill node was SKIPPED while the Final Bill
+node's own Date Fill gate (operator rule 2026-10-09)
+refuses to bill unverified folders. The patient was
+stuck forever and never reached XML.
+
+Fix (workflow tab only — `core/agent/fees_actions.py`
+is UNTOUCHED, so Agent Plan and Claims Agent are
+unaffected): `fees_says_date_fill` additionally fires
+for NO FINAL BILL rows with any blank signed date (same
+`_missing_signed_dates` rule — suffixed columns
+pdoctorsigndate / consentdate / authsigndate, either
+alin sa kanila). Both conditions are then TRUE, and the
+workflow order runs them in sequence: Date Fill (node 2)
+fills the dates, Final Bill (node 3) bills afterwards.
+`fees_allows_xml` needed NO change: a NO FINAL BILL row
+can never satisfy it (the Fees routing never says
+XML_CLICKER for it, and it is not MISMATCH) — so the
+XML Clicker still waits until Ready to Generate = YES,
+exactly as requested.
+
+Files modified:
+
+- `core/workflow_conditions.py` — new
+  `FEES_STATUS_NO_FINAL_BILL`, `no_final_bill_rows()` /
+  `no_final_bill_folders_missing_dates()` (pure
+  helpers; non-dict rows ignored, never guessed);
+  `fees_says_date_fill` unions them in; `__main__`
+  self-check extended (NO BILL + complete dates ->
+  Final Bill only; NO BILL + blank date -> Date Fill
+  AND Final Bill, XML skipped).
+- `tests/test_workflow_conditions.py` — new
+  `NoFinalBillDateFillTests` (7 tests): blank date
+  needs Date Fill; still needs Final Bill too (both
+  TRUE = date fill muna, sunod final bill); complete
+  dates skip Date Fill; EACH of the three date columns
+  alone triggers; NO BILL never allows XML (either
+  variant); helpers are pure; plus a cross-pass
+  progression test (pass 1 -> post-Date-Fill ->
+  post-Final-Bill+re-check) proving the chain moves
+  forward every pass and terminates — no loop possible
+  (the engine also visits each node exactly once).
+
+Behavior before and after (single patient, NO FINAL
+BILL + blank consent date):
+
+- Before: Date Fill SKIPPED, Final Bill RUNS but bills
+  nothing (unverified gate) -> stuck, XML never reached.
+- After: Date Fill RUNS (fills dates) -> Final Bill RUNS
+  (bills) -> Fees re-check -> Ready YES -> XML Clicker
+  RUNS.
+
+Verification performed and its result:
+
+- `python core/workflow_conditions.py`: standalone
+  check passed.
+- `python -m unittest tests.test_workflow_conditions`:
+  40 tests, OK (33 + 7 bago).
+- Full suite `python -m unittest discover -s tests`:
+  see the result recorded at the end of this session.
+
+### 2026-10-13 - Rule: DTR is not required when CF2 is detected (Newborn claim)
+
+Reason:
+
+Operator request 2026-10-13: "sa may claim checker
+baguhin mo ung pag check di required ang DTR kung may
+nadetect na CF2" — a newborn claim (CF2.pdf present) was
+held INCOMPLETE for a missing DTR.
+
+Files modified:
+
+- `core/claims_requirement_rules.py` — the CF2 branch of
+  `evaluate_requirements()` now removes DTR from the
+  required list and adds the note "CF2 present - DTR not
+  required for Newborn claim". The waiver is CF2-specific:
+  a regular claim missing DTR is still INCOMPLETE. The
+  removal respects the Claim Attachment Profile (if DTR
+  is unchecked it is already absent; if CF2 itself is
+  unchecked, CF2 is invisible to every rule, so no
+  classification and no waiver — never guessed).
+- `claims_checker.py` — report rules text only:
+  "CF2 present -> claim classified as Newborn; DTR not
+  required". The checker itself needed no code change: it
+  already detects CF2.pdf via `get_found_items()` and
+  routes through `evaluate_requirements()`.
+- `tests/test_claims_requirement_rules.py` — 5 new
+  tests: CF2 without DTR is READY (unit); regular claim
+  without DTR is still held (unit); the waiver leaves
+  other missing docs intact — profile-independent via a
+  temp empty profile path, the same pattern the rules
+  module's own `main()` uses (this machine's real
+  profile has SOA1/SOA2 unchecked, so the test cannot
+  rely on SOA1 being required); CF2 folder without DTR
+  is READY end to end; same folder without CF2 is still
+  INCOMPLETE with Missing=DTR.
+
+Behavior before and after:
+
+- Before: CF2 present + DTR missing -> INCOMPLETE,
+  Missing=DTR.
+- After: CF2 present + DTR missing -> READY with the
+  note "CF2 present - DTR not required for Newborn
+  claim". Without CF2, a missing DTR still blocks.
+
+Safety or compatibility notes:
+
+- Pure rules-module change; no file detection, GUI, or
+  upload logic touched.
+- The waiver removes DTR only — every other required,
+  conditional (ANR/NSD/MRF/COE-NO), and XML requirement
+  is unchanged.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_claims_requirement_rules`:
+  21 tests, OK (16 + 5 bago).
+- `python core/claims_requirement_rules.py`: standalone
+  smoke test PASSED (9 checks).
+- Full suite `python -m unittest discover -s tests`:
+  see the result recorded at the end of this session.
+
+### 2026-10-13 - Change: Workflow now copies the XMLs itself (copy_xml node after xml_clicker)
+
+Reason:
+
+Operator request 2026-10-13: "pag natapos kasi ang XML
+clicker doon sana mag run yung auto copy wag ipause
+dapat" — the Workflow's Claims Checker node marked a
+patient INCOMPLETE while a manual dashboard run of the
+same checker marked it READY.
+
+Root cause (verified from file timestamps, 2026-10-12
+17:09-17:13 run of patient YAP, EDITHA JACINTO -
+000000000021801):
+
+    17:10:33-17:11:04  xml_clicker writes CF4/CF5/eSOA
+                         into C:\Shared Folder\FTPURL
+    ~17:11:14          claims_checker node scans the
+                         patient folder: 0 of 3 XMLs ->
+                         INCOMPLETE
+    ~17:12:09          workflow ends
+    17:12:20           the three XMLs finally appear in
+                         the patient folder (file
+                         CreationTime)
+    17:13:21           manual dashboard click: 3 of 3
+                         XMLs -> READY
+
+The XMLs reach the patient folder ONLY via the background
+auto-copy service (core/xml_auto_copy.py, driven by the
+GUI every 10s), and that service PAUSES for the entire
+workflow run (edh_claims_gui_XML_COPY_BUTTON.py:
+`auto_copy_xml_tick` -> "Auto Copy XML: Paused (workflow
+running)"). Its auto cycles also require TWO unchanged
+polling cycles before copying ("Waiting for a second
+unchanged polling cycle"), so even unpaused it needs
+10-20s. A fixed settle delay inside the checker therefore
+cannot make the XMLs arrive during a workflow run.
+
+Fix: the workflow copies the XMLs itself, immediately
+after the XML Clicker finishes, using the EXISTING
+`copy_xml` registry node (`python -m core.xml_auto_copy`).
+Its standalone mode already performs the immediate copy
+the operator asked for: `scan_once(require_observed_stable
+=False)` — the same immediate, atomic, sha256-verified,
+never-overwrite-different-content copy the GUI's Copy XML
+button performs (IDENTICAL_SKIP when already copied;
+CONFLICT preserves a different existing file).
+
+Files modified:
+
+- `core/workflow_engine.py` — `default_workflow()` now
+  inserts `copy_xml` between `xml_clicker` and
+  `claims_checker` (9 nodes); `DEFAULT_NODE_CONDITIONS`
+  gains `"copy_xml": "always"`; module docstring updated
+  (order + the copy_xml rule, replacing the old
+  "auto-copy handles it" note); the `__main__`
+  self-check updated to the 9-node order (8 connections,
+  n1 -> n9).
+- `workflow_config.json` (gitignored live config) —
+  regenerated from the new default and re-validated:
+  05 xml_clicker -> 06 copy_xml -> 07 claims_checker.
+- `tests/test_workflow_engine.py` — default-order
+  assertion updated (9 nodes, range(1, 10));
+  `test_default_excludes_claims_processor_and_copy_xml`
+  became `test_default_excludes_claims_processor_but_
+  copies_xml` (copy_xml now asserted BETWEEN xml_clicker
+  and claims_checker); fresh-copy count 8 -> 9.
+- `tests/test_workflow_conditions.py` — default
+  conditions assertion gains `copy_xml = always`.
+- `tests/test_xml_auto_copy.py` — new
+  `test_single_immediate_cycle_copies_all_three_xmls`:
+  one `scan_once(require_observed_stable=False)` lands
+  all three XMLs in the patient folder on the FIRST
+  cycle (the copy_xml node's contract).
+
+Behavior before and after:
+
+- Before (workflow): xml_clicker -> claims_checker scans
+  0/3 XMLs (auto-copy paused) -> INCOMPLETE; the XMLs
+  only arrive after the workflow ends.
+- After (workflow): xml_clicker -> copy_xml copies the
+  three XMLs into the patient folders immediately ->
+  claims_checker scans 3/3 XMLs -> READY.
+- The GUI's auto-copy pause is UNCHANGED (it still
+  protects HBSys automation); the dashboard is
+  UNCHANGED (its runs keep the 12s settle; the auto
+  service is active there).
+
+Safety or compatibility notes:
+
+- No new code in the copy path: the node reuses
+  core/xml_auto_copy.py exactly as the GUI's Copy XML
+  button does.
+- Copy safety is preserved: atomic temp-file + rename,
+  source-signature re-check during the copy, sha256
+  verification, IDENTICAL_SKIP (no re-copy), CONFLICT
+  (a different existing file is never overwritten).
+- The 12s Claims Checker settle stays as a small buffer;
+  it is no longer the mechanism that makes the XMLs
+  arrive.
+- A saved custom workflow (not Restore Default) is NOT
+  rewritten — only the factory default and the live
+  default config changed.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_workflow_engine
+  tests.test_workflow_conditions
+  tests.test_gui_workflow_tab_conditions
+  tests.test_xml_auto_copy
+  tests.test_unattended_report_suppression`:
+  114 tests, OK.
+- Full suite `python -m unittest discover -s tests`:
+  see the result recorded at the end of this session.
+
+### 2026-10-12 - Change: XML settle delay raised from 8s to 12s (all three XMLs)
+
+Reason:
+
+Operator request 2026-10-12: "bago mo isunod sa workflow
+ang claims checker dapat mga 12 seconds para macopy ang
+tatlong XML" — the 8s from the same morning was an
+estimate; the HBSys background auto-copy
+(`enable_auto_copy_xml: true`) needs ~12s to move all
+three XMLs (CF4, CF5, eSOA) into the patient folder.
+
+Files modified:
+
+- `claims_checker.py` — `DEFAULT_XML_SETTLE_SECONDS`
+  raised `8.0` -> `12.0` (comment records the operator's
+  measured time).
+- `tests/test_unattended_report_suppression.py` — default
+  assertion and docstrings updated 8s -> 12s
+  (`test_default_is_twelve_seconds`).
+
+Behavior before and after:
+
+- Before: the Claims Checker waited 8s before scanning —
+  occasionally still "NO XML" / "CLAIM NO. INCOMPLETE"
+  while the third XML was still copying.
+- After: waits 12s, covering the copy of all three XMLs.
+
+Safety or compatibility notes:
+
+- The delay models the HBSys auto-copy itself, so it is a
+  property of the mechanism, not the runner: the new
+  default protects GUI runs and Workflow runs alike.
+- Fully configurable as before: env
+  `CLAIMS_CHECKER_XML_SETTLE_SECONDS` (any positive
+  number; `0` disables the wait; negative clamps to `0`;
+  an unreadable value falls back to the default with a
+  warning — never guessed).
+- Read-only: still only a `time.sleep()` before the scan;
+  no folder, XML, or PDF is touched.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_unattended_report_suppression`:
+  19 tests, OK.
+- Full suite `python -m unittest discover -s tests`: 916
+  tests, OK (same count as the prior run; the two edited
+  assertions are in the 19 above).
+
+### 2026-10-12 - Change: "Patients Without XML" panel now requires all 3 XMLs
+
+Reason:
+
+Operator request 2026-10-12: a patient must only leave the
+"Patients Without XML" panel when ALL THREE required XMLs
+(CF4, CF5, eSOA) are present. A folder holding only 1 or 2 of
+them must stay listed and show how many are there.
+
+Before this change the panel used `list_folders_without_xml()`,
+which tested for ANY xml file — so a folder with only CF4, or
+only CF4+CF5, already vanished from the panel and gave no hint
+that XMLs were still missing.
+
+Files modified:
+
+- `claims_checker.py` — new `list_folders_missing_xml(root)`:
+  returns `(rows, total)` where each row is
+  ``FOLDER NAME  (n/3)``. A folder is listed when fewer than
+  3 of the required kinds are found; it uses the checker's OWN
+  `has_xml()` rule over `CLAIM_KINDS` ("cf4", "cf5", "esoa"),
+  so the panel can never disagree with the Claims Checker's
+  status. Rows sort case-insensitively; blank/missing/unreadable
+  roots return `([], 0)`. The old `list_folders_without_xml()`
+  (zero xml files at all) is kept for that separate question.
+- `edh_claims_gui_XML_COPY_BUTTON.py` — `populate_no_xml_list()`
+  now reads `list_folders_missing_xml()` and inserts the counted
+  rows; the card title stays `Patients Without XML (N)` where N
+  is the number of folders missing at least one XML.
+- `tests/test_claim_number_match.py` — new
+  `ListFoldersMissingXmlTests` (9 tests): 3/3 not listed,
+  2/3, 1/3 and 0/3 listed with the right count, case-insensitive
+  sort, stray files ignored, missing/blank root, and the kinds are
+  the checker's own `CLAIM_KINDS`.
+- `tests/test_gui_no_xml_panel.py` — panel tests updated to the
+  new rule: `(0/3)` listed, `(1/3)` and `(2/3)` listed with the
+  count, all-three shows `(none)` and card `Patients Without XML
+  (0)`; `make_patient` kept as a CF4-only legacy helper and a
+  `make_patient_with(name, kinds)` helper added.
+
+Behavior before and after:
+
+- Before: folder with 1 or 2 XMLs -> NOT listed (missing XMLs
+  invisible in the panel).
+- After: folder with 1 or 2 XMLs -> listed as `NAME  (1/3)` /
+  `NAME  (2/3)`; only 3/3 removes it.
+
+Safety / compatibility notes:
+
+- The `Check Missing` button logic (`output_dir_has_xml`) is
+  unchanged — it only asks "is there any xml at all", which is a
+  different question from "does this patient have all 3".
+- The panel still never touches patient files; it only lists
+  folder names and counts.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_claim_number_match
+  tests.test_gui_no_xml_panel`: 42 tests, OK.
+- Full suite `python -m unittest discover -s tests`: see the
+  result recorded at the end of this session's run.
+
+### 2026-10-12 - Rule: a fees MISMATCH claim goes to the XML Clicker (not Final Bill)
+
+Reason:
+
+Operator request 2026-10-12: "pag mismatch dapat ang icall nya is XML
+clicker na."
+
+Verified basis (fees_checker.check_patient_folder, Status rules):
+
+    if itemized <= TOLERANCE:      -> Status = "NO FINAL BILL"
+    elif abs(diff) <= TOLERANCE:   -> Status = "MATCH"
+    else:                          -> Status = "MISMATCH"
+
+`NO FINAL BILL` means itemized is 0.00 — the bill was never finalized.
+A `MISMATCH` row therefore has itemized > 0, i.e. **the bill is already
+finalized in HBSys**. It therefore does not need Final Bill again and
+may proceed to XML generation.
+
+This AGREES with the 2026-10-07 operator rule ("NO FINAL BILL lang ang
+rurun, hindi na ang MISMATCH — para hindi lahat finafinal bill"): that
+rule already kept MISMATCH away from Final Bill. What was missing was the
+next step — MISMATCH stopped at MANUAL REVIEW and never reached XML.
+
+Safety detail added: a MISMATCH row whose signed dates are still blank
+is routed to Date Fill first and is EXCLUDED from the XML node until the
+dates are filled, so the generated XML cannot carry the very dates Date
+Fill exists to fix.
+
+Files modified:
+
+- `core/workflow_conditions.py` — (a) new condition
+  `fees_allows_xml` ("Run when Fees allows XML (ready to generate, or
+  MISMATCH totals)"); (b) `mismatch_rows()` /
+  `mismatch_folders_missing_dates()` / `mismatch_folders_allowing_xml()`
+  / `_unique()` — pure helpers; (c) `fees_says_date_fill` ay
+  sinusundan din ng MISMATCH rows na kulang pa ang dates;
+  (d) `mismatch_rows` ay naglalabas ng non-dict/unreadable rows sa
+  para hindi kailanman makatugma ang sirang row; (e) `fees_ready_xml`
+  (strict, Ready-to-Generate lamang) ay NAKALAN at nananatiling
+  available para sa mas istrikto na workflow.
+- `core/workflow_engine.py` — ang default na `xml_clicker` node ay
+  gumagamit na ng `fees_allows_xml`.
+- `tests/test_workflow_conditions.py` — bagong `MismatchRoutingTests`
+  (10 tests): MISMATCH hindi napupunta sa Final Bill, pinapayagan sa
+  XML, strict `fees_ready_xml` ay nagliliwanag pa ring strict,
+  kulang-dates ay Date Fill muna, tanging MISMATCH ang special-cased
+  (MATCH/NO FINAL BILL/NO RECORD/ERROR ay may kanya-kanyang
+  pagpapahalaga), at helpers ay pure. Na-update rin ang 2 default-order
+  assertion sa `fees_allows_xml`.
+- `tests/test_gui_workflow_tab_conditions.py` — na-update ang
+  inaasahang condition ng default workflow.
+- `workflow_config.json` — na-apply ang default (xml_clicker =
+  `fees_allows_xml`), na-validate at na-reload.
+
+HINDI binago (pinagkasunusan ng Phase 0 audit): ang
+`core/agent/fees_actions.py` ay HINDI ginalaw — ang Agent Plan tab at
+ang Claims Agent tab ay may kanya-kanyang operator rules at hindi
+naapektuhan ng pagbabagong ito. Ang change ay nasa WORKFLOW tab lamang.
+
+Behavior before and after:
+
+- Before (workflow): MISMATCH -> `fees_says_final_bill` FALSE ->
+  `fees_allows_xml`(strict) FALSE -> XML Clicker SKIPPED.
+- After: MISMATCH (may kumpletong dates) -> XML Clicker RUNS.
+  MISMATCH (kulang dates) -> Date Fill RUNS, XML Clicker SKIPPED
+  hanggang ma-date-fill.
+
+Verification performed and its result:
+
+- `python core/workflow_conditions.py`: standalone check passed.
+- Full suite `python -m unittest discover -s tests`: 906 tests, OK
+  (896 + 10 bago; walang regression).
+
+### 2026-10-12 - Fix: XML Clicker's modal popup is silenced in Workflow runs
+
+Reason:
+
+Operator follow-up 2026-10-12: "may pop up ang xml generator clicker
+tangglin mo ang pop up pag sa workflow" — ang `xml_clicker` node ay
+nagpapakita ng modal `MessageBoxW` (at nag-o-auto-open ng run-log CSV)
+kapag natapos, na kinakain ang focus at humihinto ang workflow.
+
+Verification (bago baguhin): ang suppression ay NA NASA na sa tool —
+`xml_generator_clicker.show_completion_popup()` at `open_run_log()`
+ay may `CLAIMS_AGENT_QUIET=1` guard (mula sa Slice E) na nagpo-print
+na lang. Ang kulang ay hindi ito naka-set mula sa workflow adapter.
+
+Files modified:
+
+- `core/workflow_adapters.py` — bagong `QUIET_NODES = {"xml_clicker"}`
+  at sa `build_env()`, ang mga node sa listahan ay nakakatanggap ng
+  `CLAIMS_AGENT_QUIET=1`. Hindi binago ang mismong tool
+  (`date_fill_hbsys/xml_generator_clicker.py` ay hindi ginalaw —
+  ang umiiral na guard lang ang ginamit).
+- `tests/test_unattended_report_suppression.py` — idinagdag ang 6
+  tests: `xml_clicker` ang quiet, iba pang node ay hindi;
+  at ang mismong tool ay totoong may pagsuppress (`MessageBoxW` at
+  `os.startfile` hindi tinatawag kapag quiet) at totoong may popup
+  kapag WALA ang flag (main dashboard path).
+
+Safety or compatibility notes:
+
+- **Main dashboard ay hindi apektado** — hindi nito dumadaan sa
+  `build_env()`, kaya walang `CLAIMS_AGENT_QUIET` at lumalabas pa rin
+  ang popup (may test).
+- Tool file mismo: **hindi ginalaw**.
+- Env-key based gaya ng umiiral na convention (`CLAIMS_AGENT_FOCUS_GUARD`,
+  `CLAIMS_SUPPRESS_REPORT_OPEN`), kaya madaling i-on/off.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_unattended_report_suppression`:
+  19 tests, OK (13 + 6 bago).
+- Full suite `python -m unittest discover -s tests`: 896 tests, OK
+  (890 + 6 bago; walang regression).
+
+### 2026-10-12 - Fix: Claims Checker waits 8s for the XML auto-copy; Workflow nodes no longer open popups/CSVs
+
+Reason:
+
+Operator request 2026-10-12:
+1. "sa claims checker i delay mo ng 8 seconds para macopy ang XML
+   lahat ng XML" — ang XML Clicker ay nagsusulat ng CF4/CF5/eSOA sa
+   FTPURL at ang background auto-copy (`enable_auto_copy_xml: true`)
+   ang nagkokopya sa patient folder. Kung walang hintay, maaaring
+   masuri ang folder na wala pang XML at maling i-report bilang
+   `NO XML` / `CLAIM NO. INCOMPLETE`.
+2. "sa workflow tanggalin mo na yung pop up at open CSV para tuloy
+   tuloy lang mag run ang mga nodes. sa main dashboard lang ang wag
+   mong tanggalin ang pop up at open CSV" — ang checkers ay
+   nag-a-auto-open ng Excel/CSV/log window sa dulo, na kinakain ang
+   focus sa pagitan ng nodes.
+
+Files modified:
+
+- `claims_checker.py` —
+  (a) `DEFAULT_XML_SETTLE_SECONDS = 8.0` at `xml_settle_seconds()`
+  (env `CLAIMS_CHECKER_XML_SETTLE_SECONDS`; `0` = walang wait, negative
+  ay clamp sa 0, bad value ay bumabalik sa default — hindi haka-haka);
+  (b) `main()` — nag-uunang `time.sleep(settle)` BAGO
+  `iter_patient_folders()`, at nagpi-print kung gaano katagal;
+  (c) ang CSV + log `os.startfile` ay nasa ilalim ng
+  `CLAIMS_SUPPRESS_REPORT_OPEN` check;
+  (d) `import time` at `from core.activity_logger import logger`.
+- `fees_checker.py` — `open_report()` ay sumas skips kapag
+  `CLAIMS_SUPPRESS_REPORT_OPEN=1` (nag-lo-log ng "suppressed").
+- `core/workflow_adapters.py` — `SUPPRESS_REPORT_OPEN_NODES =
+  {fees_checker, claims_checker, claims_checker_recheck}` at
+  `build_env()` ay naglalagay ng `CLAIMS_SUPPRESS_REPORT_OPEN=1` para
+  sa mga node na iyon lamang.
+- `tests/test_unattended_report_suppression.py` (BAGO) — 13 tests:
+  flag sa checker nodes lamang, hindi sa date_fill/final_bill/
+  xml_clicker/attachments/upload; `open_report` suppressed vs opening
+  (dashboard path); settle default/override/zero/negative/bad value;
+  at `main()` na naghihintay at hindi nag-o-open kapag suppressed.
+
+Safety or compatibility notes:
+
+- **Ang main dashboard ay hindi apektado.** Walang binagong code path
+  doon: ang dashboard ay hindi dumadaan sa `build_env()`, kaya walang
+  `CLAIMS_SUPPRESS_REPORT_OPEN` — bukas pa rin ang pop up at CSV
+  doon (may test na nagsasabing bukas pa rin kapag wala ang flag).
+- Tanging dalawang checker node ang napapigilan; hindi napepeke ang
+  ibang node.
+- Read-only pa rin: walang folder ang inilipat, walang XML o PDF ang
+  binabago — ang pagtatalaga ay TIMESTAMP lamang bago mag-scan.
+- Ang 8 ay sinusuportahan ng operator bilang sukat na settle time;
+  nako-configure para madaling baguhin nang hindi may bagong code.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_unattended_report_suppression`:
+  13 tests, OK.
+- Full suite `python -m unittest discover -s tests`: 890 tests, OK
+  (877 + 13 bago; walang regression).
+
+### 2026-10-12 - Feature: Workflow tab exposes the per-node run condition ("Run only when")
+
+Reason:
+
+Phase 4 ng plan. Ang `params["when"]` na ginawa sa Phase 3 ay
+hardcoded sa default workflow — paano ito mamahawakan ng operator sa
+GUI? Kailangan ng list editor na makita at makabago ito nang walang
+pagsusulat ng JSON ng kamay.
+
+Files modified:
+
+- `gui/workflow_tab.py` —
+  (a) `import Path` at ang `WORKFLOW_CONFIG_FILE` default ay ginawa
+  **injectable** (`config_path` ctor arg, gaya ng `AgentPlanFrame.state_file`)
+  para masubukan ang editor nang hindi binabago ang totoong
+  `workflow_config.json` ng operator;
+  (b) bagong "Run only when:" combobox sa Selected Node panel, mga
+  label mula sa `CONDITION_LABELS` (`core/workflow_conditions.py`);
+  (c) `_on_when_selected()` — sinusulat ang piniling condition id sa
+  `node.params["when"]`; `_condition_id_from_label()` na reverse map
+  (unknown label -> `always`, hindi kailanman magtatago ng typo);
+  (d) `_refresh_selection_info()` — ipinapakita ang kasalukuyang
+  condition ng node at **ina-disable ang combo kapag walang
+  selection**, kaya hindi kailanman mali ang na-edit;
+  (e) `_refresh_order_list()` — ginagawang `[<condition>]` marker ang
+  row ng conditional node sa execution order list (kasama ng
+  `[disabled]`), kaya nakikita agad sa list kung aling step ang gated;
+  (f) `add_node()` — ang bagong node ay `when="always"` (operator ang
+  nagse-set ng condition kung kailangan).
+- `tests/test_gui_workflow_tab_conditions.py` (BAGO) — 12 tests
+  (headless, withdrawn window, walang workflow run/subprocess/HBSys):
+  combo disabled hangga't walang selection, label<->id round-trip,
+  unknown label -> always, hindi naipupunta sa ibang node ang edit,
+  gate marker sa list row, default ng bagong node, at
+  save/reload survival.
+
+Default na nakikita ng operator sa Workflow tab:
+
+    01. Fees Check  (charges vs HBSys DB)
+    02. Date Fill (REGULAR, discharge date)  [fees_says_date_fill]
+    03. Final Bill (HBSys Billing -> Final)  [fees_says_final_bill]
+    04. Fees Check  (charges vs HBSys DB)
+    05. XML Clicker (CF4 -> CF5 -> eSOA)  [fees_ready_xml]
+    06. Claims Checker (sort READY/INCOMPLETE)
+    07. Add Claims Upload (tag claims in HBSys)  [checker_is_ready]
+    08. Claim Attachments (attach docs + doc types)  [checker_is_ready]
+
+Safety or compatibility notes:
+
+- Puro UI/save: **wala** sa engine execution path ang binago ng Phase 4
+  (ang engine ay Phase 3 na). Ang editor ay nag-a-apply lamang ng
+  `params["when"]`.
+- Kapag walang node ang selected, hindi mababago ang kahit anong
+  condition (may test).
+- Ang `config_path` default ay `WORKFLOW_CONFIG_FILE` — ang dating
+  gawi; walang pagbabago sa production path.
+- Hindi naghihiwalay ng bagong framework: Tkinter lamang (Canvas/window
+  tree ay hindi ginamit).
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_gui_workflow_tab_conditions`: 12 tests, OK.
+- Full suite `python -m unittest discover -s tests`: 877 tests, OK
+  (865 + 12 bago; walang regression).
+
+### 2026-10-12 - Feature: Per-node workflow conditions (`params["when"]`) — the Fees Checker now gates the HBSys nodes
+
+Reason:
+
+Phase 0 audit finding D2 + operator direction 2026-10-12. Ang engine
+ay STRICTLY SEQUENTIAL: kahit `fees(2)` = NO, tumatakbo pa rin ang
+`xml_clicker`. Ang operator ay nagsabing ang **Fees Check ang
+magdedetermine kung ano ang gagawin** — kulang ang dates -> Date Fill;
+`NO FINAL BILL` -> Final Bill; handa na -> XML Clicker.
+
+Root cause of the gap: `WorkflowEngine.run()` ay may nodes lang na
+hindi pa naka-`when`, at walang paraan malaman ng engine ang verdict
+ng Fees Check (`fees_checker.main()` ay laging `return 0`).
+
+Files added:
+
+- `core/workflow_conditions.py` (BAGO) — pure, deterministic, no GUI at
+  walang I/O sa loob ng `evaluate()`. Condition ids: `always`,
+  `fees_says_date_fill`, `fees_says_final_bill`, `fees_ready_xml`,
+  `checker_is_ready`. **Ang routing logic ay HINDI muling ginawa** —
+  ginagamit ang existing na pure function
+  `core.agent.fees_actions.decide_action()` at ini-aggregate lang sa
+  batch ("may pasyenteng kailangan" = run the node). May
+  `CONDITION_LABELS` para sa list editor.
+- `tests/test_workflow_conditions.py` (BAGO) — 23 tests: evaluator
+  truth table, "kapag may 1 lang na kailangan, run pa rin",
+  malformed row = skip (never guess), unknown condition = skip,
+  at engine integration (skip + chain continues).
+
+Files modified:
+
+- `core/workflow_engine.py` —
+  (a) `DEFAULT_NODE_CONDITIONS` + taglayin sa `default_workflow()`
+  params (kasama ang `continue_on_fail` ng Date Fill);
+  (b) bago mag-run ng node: kung `params["when"]` ay hindi `always`,
+  `evaluate_condition(...)`; kapag FALSE -> `NODE_STATUS_SKIPPED` +
+  reason + isang linya sa output stream, at **magpapatuloy ang chain**
+  (hindi naaapektuhan ang failure policy, at hindi tinatanggal ang node);
+  (c) `_build_context()` / `_refresh_condition_context()` — READ-ONLY
+  na pagbabasa ng katotohanan: `fees_rows` mula sa pinakabagong
+  `fees_checker_report*.csv` (`agent_plan_store.latest_fees_csv`) at
+  `ready_folders` mula sa `claims_checker_results\READY`. Refresh
+  happens AFTER bawat successful node. Kahit mag-fail ang pagbabasa,
+  hindi nagta-throw — isang hindi nababasang katotohanan ay
+  SKIP-with-reason lang, hindi kailanman "yes";
+  (d) module docstring.
+- `tests/test_workflow_final_bill_node.py` — `final_bill` params test:
+  `assertEqual(params["final_bill"], {})` -> `assertFalse(...get(
+  "continue_on_fail"))`, dahil may bagong `when` key na.
+- `workflow_config.json` — na-apply ang bagong default (owner option
+  A: Restore Default), na-validate at na-reload.
+
+Default workflow ngayon:
+
+| # | node | when |
+|---|---|---|
+| 1 | fees_checker | always |
+| 2 | date_fill_regular | fees_says_date_fill |
+| 3 | final_bill | fees_says_final_bill |
+| 4 | fees_checker | always |
+| 5 | xml_clicker | fees_ready_xml |
+| 6 | claims_checker | always |
+| 7 | add_claims_upload | checker_is_ready |
+| 8 | claim_attachments | checker_is_ready |
+
+Safety or compatibility notes:
+
+- **Additive lamang.** Ang node na walang `when` ay ginagawa gaya
+  dati ("always") — walang node ang nawalan ng pagganap.
+- Ito ay **per-node SKIP**, hindi graph branching: walang parallelismo,
+  walang ibang execution order. Ang engine ay nananatiling
+  STRICTLY SEQUENTIAL.
+- Ang skip ay **hindi failure** — hindi ito nagpapatigil ng chain at
+  hindi naaapektuhan ang `continue_on_fail`.
+- Deterministic: walang AI/LLM. Kapag walang basang katotohanan
+  (walang Fees row, walang READY folder), **SKIP with reason** — hindi
+  kailanman itutuloy batay sa haka-haka.
+- `claims_checker` ay nag-MOVE ng folders; kaya ang `checker_is_ready`
+  ay binabasa sa `claims_checker_results\READY` pagkatapos nito
+  tumakbo (read-only, walang folder ang inilipat).
+
+Verification performed and its result:
+
+- `python core/workflow_conditions.py`: standalone check passed.
+- `python -m unittest tests.test_workflow_conditions
+  tests.test_workflow_engine tests.test_workflow_final_bill_node`:
+  91 tests, OK.
+- Full suite `python -m unittest discover -s tests`: 865 tests, OK
+  (842 + 23 bago; walang regression).
+- Na-load ang `workflow_config.json`: 8 nodes, tamang order, 7
+  connections, tamang `when` sa bawat node.
+
+### 2026-10-12 - Change: Default Workflow order is now the operator pipeline (fees → date fill → final bill → fees → XML)
+
+Reason:
+
+Phase 0 audit (2026-10-12) + owner decisions:
+1. List editor lang — walang visual canvas. Ang v1 canvas ay
+   sinusuportahan ngayon ng owner na tanggalin (2026-09-11 decision),
+   kaya walang Phase 6.
+2. Ang `claims_processor` ay HINDI na bahagi ng workflow. Ang owner
+   ay nagsasagawa ng production engine MANUALLY at sinusuri ang
+   mga pirma at dates bago mag-run.
+3. Bagong default order (owner-specified):
+   fees_checker(1) -> date_fill_regular -> final_bill ->
+   fees_checker(2) -> xml_clicker -> claims_checker ->
+   add_claims_upload -> claim_attachments.
+4. Option A pinili: panatilihin ang fees(1) — tatlong fees check ang
+   magiging tumatakbo (fees-1, internal ng final_bill node, fees-2).
+   Read-only at pinaka-safe; kinuha ang katatagan sa kabila ng bilis.
+5. `copy_xml` ay wala sa default dahil `enable_auto_copy_xml: true`
+   sa claims_gui_config.json (napatunayan) — awtomatikong nai-copy ang
+   XML mula FTPURL papunta sa patient folder.
+
+Files modified:
+
+- `core/workflow_engine.py` — `default_workflow()` keys (9 -> 8 nodes);
+  module docstring (default order + rationale); `__main__` self-check
+  inosynchronous na sa bagong order (8 nodes / 7 connections / n8).
+- `tests/test_workflow_final_bill_node.py` — `DefaultWorkflowTests`
+  in-update: Date Fill BEFORE Final Bill, 8 nodes, 7 connections;
+  idinagdag ang assertion na date_fill < final_bill.
+- `tests/test_workflow_engine.py` (BAGO, 34 tests) — Phase 1 safety net
+  para sa EXISTING engine: order-by-order, disabled nodes, 4 refusal
+  cases, HBSys gate, stop, save/load/validate round-trip, at ang
+  `continue_on_fail` na babasahan sa FAILED node (hindi sa susunod).
+  Isinama rin ang test na schema-valid ang dalawang fees_checker node
+  (kailangan ng fees-1/fees-2) at ang default-order assertions.
+
+Hindi ginalaw (pinagkasunusan ng audit rules):
+
+- `workflow_config.json` — SARILI MONG custom config (date_fill +
+  final_bill lang ang enabled, may duplicate copy_xml node).
+  HINDI i-overwrite; maaari itong i-"Restore Default" sa GUI pag
+  handa na ang operator.
+- Walang binagong engine logic, registry, adapter, o GUI code sa
+  Phase 2 — order/data change lamang.
+- Walang per-node conditions pa (Phase 3) — hanggang doon ay
+  STRICTLY SEQUENTIAL pa: xml_clicker ay tumatakbo kahit fees(2)=NO.
+
+Behavior before and after:
+
+- Before (default): claims_processor -> final_bill -> date_fill ->
+  xml_clicker -> copy_xml -> fees_checker -> claims_checker ->
+  add_claims_upload -> claim_attachments (9 nodes).
+- After (default): fees_checker -> date_fill_regular -> final_bill ->
+  fees_checker -> xml_clicker -> claims_checker -> add_claims_upload ->
+  claim_attachments (8 nodes).
+
+Verification performed and its result:
+
+- `python -m core.workflow_engine` — default-order at persistence checks
+  OK.Ang "HBSys gate skips UI node when HBSys closed" self-check ay
+  FAIL, ngunit **verified pre-existing**: pinatakbo ang committed HEAD
+  version at nagbigay ng parehong failure, dahil bukas ang HBSys sa
+  PC na ito (environment-dependent self-check, hindi introduced ng
+  change na ito).
+- `python -m unittest tests.test_workflow_engine
+  tests.test_workflow_final_bill_node`: 68 tests, OK.
+
 ### 2026-10-09 - Improvement: Claim Processor heartbeat + no-prompt hang protection
 
 Reason:

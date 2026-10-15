@@ -30,7 +30,11 @@ from gui.add_claims_upload_tab import AddClaimsUploadFrame
 from gui.agent_plan_tab import AgentPlanFrame
 from gui.claims_agent_tab import ClaimsAgentFrame
 from gui.claim_attachments_tab import ClaimAttachmentsFrame
-from claims_checker import list_folders_without_xml, output_dir_has_xml
+from claims_checker import (
+    list_folders_missing_xml,
+    list_folders_without_xml,
+    output_dir_has_xml,
+)
 from gui.workflow_tab import WorkflowFrame
 from gui.pdf_preview_panel import PdfPreviewPanel
 from gui.run_status_overlay import RunStatusOverlay
@@ -42,6 +46,14 @@ CONFIG_FILE = os.path.join(BASE_DIR, "claims_gui_config.json")
 DOCTORS_FILE = os.path.join(BASE_DIR, "doctors_config.json")
 GHOSTSCRIPT_PATH = r"C:\Program Files\gs\gs10.07.0\bin\gswin64c.exe"
 MANUAL_SIGN_MAX_SIZE_KB = 1000
+
+# TRANSMITTED archives opened by the Folders tab (operator request
+# 2026-10-15): one click opens both. Same folders that Archive
+# Transmitted Claims writes to.
+TRANSMITTED_BACKUP_FOLDERS = (
+    r"C:\Shared Folder\FTPURL\TRANSMITTED\scan via bot",
+    r"\\192.168.1.193\Echague District Hospital Files\melvin\SHAREDFOLDER\TRANSMITTED\MELVIN\scan via bot",
+)
 
 SCRIPT_CONFIG = {
     "merge_pdf": "merge.py",
@@ -1803,6 +1815,9 @@ class EDHClaimsGUI(tk.Tk):
 
         ttk.Button(claims, text="Open ARCHIVED",
                    command=lambda: self.open_folder(os.path.join(BASE_DIR, "claims_checker_results", "READY_ARCHIVED"))).pack(fill="x", pady=4)
+
+        ttk.Button(claims, text="Open TRANSMITTED Backups",
+                   command=self.open_transmitted_backups).pack(fill="x", pady=4)
 
         processing = ttk.LabelFrame(left, text="Processing Folders", padding=12)
         processing.pack(fill="x", pady=8)
@@ -3818,18 +3833,24 @@ class EDHClaimsGUI(tk.Tk):
         self.refresh_check_missing_button_state()
 
     def populate_no_xml_list(self):
-        """Refresh the 'Patients Without XML' panel from the output folder."""
+        """Refresh the 'Patients Without XML' panel from the output folder.
+
+        Operator rule 2026-10-12: a patient is removed from this panel
+        only when ALL THREE required XMLs (CF4, CF5, eSOA) are present.
+        A folder with 1 or 2 of them stays listed and shows the count,
+        e.g. "DELA CRUZ, JUAN ...  (2/3)".
+        """
         if not hasattr(self, "no_xml_list"):
             return
         output_dir = self.settings.get("output_folder", "")
         try:
-            names, total = list_folders_without_xml(output_dir)
+            rows, total = list_folders_missing_xml(output_dir)
         except Exception:
-            names, total = [], 0
+            rows, total = [], 0
         self.no_xml_list.delete(0, "end")
-        if names:
-            for name in names:
-                self.no_xml_list.insert("end", name)
+        if rows:
+            for row in rows:
+                self.no_xml_list.insert("end", row)
         else:
             self.no_xml_list.insert("end", "(none)")
         self.no_xml_card.configure(text=f"Patients Without XML ({total})")
@@ -4162,6 +4183,30 @@ class EDHClaimsGUI(tk.Tk):
             else:
                 return
         os.startfile(path)
+
+    def open_transmitted_backups(self):
+        """Open the local and network TRANSMITTED backups with one click.
+
+        Operator request 2026-10-15. Each folder is opened
+        independently — if one is unreachable (e.g. the network share
+        is offline) the other still opens and the missing one is
+        reported once at the end. No create-prompt: these folders are
+        created by Archive Transmitted Claims itself.
+        """
+        missing = []
+        for path in TRANSMITTED_BACKUP_FOLDERS:
+            if os.path.exists(path):
+                try:
+                    os.startfile(normalize_windows_path(path))
+                    continue
+                except OSError:
+                    pass
+            missing.append(path)
+        if missing:
+            messagebox.showinfo(
+                "TRANSMITTED Backup",
+                "Hindi mabuksan:\n\n" + "\n\n".join(missing),
+            )
 
     def open_file(self, path):
         if not os.path.exists(path):

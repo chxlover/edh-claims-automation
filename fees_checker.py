@@ -600,7 +600,16 @@ def run_check(
 
 
 def open_report(path: Path) -> None:
-    """Open the report with the default application (Windows)."""
+    """Open the report with the default application (Windows).
+
+    Suppressed when ``CLAIMS_SUPPRESS_REPORT_OPEN=1`` — the unattended
+    Workflow node sets it so the checkers do not steal focus with an
+    Excel/CSV window between nodes (operator request 2026-10-12).
+    The main dashboard never sets it, so its behavior is unchanged.
+    """
+    if os.environ.get("CLAIMS_SUPPRESS_REPORT_OPEN", "") == "1":
+        logger.info(f"Report open suppressed (unattended run): {path}")
+        return
     try:
         if sys.platform == "win32":
             os.startfile(str(path))  # type: ignore[attr-defined]

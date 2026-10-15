@@ -146,6 +146,27 @@ class XmlAutoCopyServiceTests(unittest.TestCase):
         self.assertEqual(second.copied_count, 1)
         self.assertTrue((folder / source.name).exists())
 
+    def test_single_immediate_cycle_copies_all_three_xmls(self):
+        # The workflow's copy_xml node (operator rule 2026-10-13)
+        # relies on this contract: ONE scan_once with
+        # require_observed_stable=False — the same immediate copy
+        # the GUI's Copy XML button performs — lands all three
+        # generated XMLs in the patient folder on the FIRST cycle.
+        # The background auto service cannot do this inside a
+        # workflow run (it pauses, and its auto cycles need two
+        # unchanged polls), which is exactly why the node exists.
+        folder = self.patient_folder()
+        files = [
+            self.xml_file(doc, doc.encode())
+            for doc in ("CF4", "CF5", "eSOA")
+        ]
+        result = self.service.scan_once(require_observed_stable=False)
+        self.assertEqual(result.copied_count, 3)
+        for item in files:
+            destination = folder / item.name
+            self.assertTrue(destination.exists())
+            self.assertEqual(destination.read_bytes(), item.read_bytes())
+
     def test_identical_destination_is_not_overwritten(self):
         folder = self.patient_folder()
         source = self.xml_file()

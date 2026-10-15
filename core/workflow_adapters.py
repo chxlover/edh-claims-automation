@@ -66,6 +66,26 @@ STATUS_DONE = "DONE"
 STATUS_FAILED = "FAILED"
 STATUS_STOPPED = "STOPPED"
 
+# Nodes that must NOT open a report window mid-workflow (operator request
+# 2026-10-12): the checkers auto-open their CSV/XLSX on finish, which
+# steals focus between nodes. Only these keys are suppressed, and only
+# when launched through the workflow adapter.
+SUPPRESS_REPORT_OPEN_NODES = frozenset({
+    "fees_checker",
+    "claims_checker",
+    "claims_checker_recheck",
+})
+
+# Nodes that show a MODAL MessageBox / auto-open a window when they
+# finish. The tools already honour ``CLAIMS_AGENT_QUIET=1`` (they print
+# instead); this only turns it on for unattended workflow runs
+# (operator request 2026-10-12: "tanggalin mo ang pop up pag sa
+# workflow"). The main dashboard is unaffected — it launches the tools
+# without this flag, so the popup still appears there.
+QUIET_NODES = frozenset({
+    "xml_clicker",
+})
+
 
 def build_command(spec: NodeSpec, *, live: bool) -> list[str]:
     """Full argv for one node — deterministic, registry-driven.
@@ -132,6 +152,16 @@ def build_env(
             if value is not None:
                 env[key] = str(value)
     env.update(spec.extra_env)
+    # Unattended workflow nodes must not steal focus with a popup or an
+    # Excel/CSV window between nodes (operator request 2026-10-12). Only
+    # the WORKFLOW tab sets this; the main dashboard does not run through
+    # build_env(), so its reports still open exactly as before.
+    if spec.key in SUPPRESS_REPORT_OPEN_NODES:
+        env["CLAIMS_SUPPRESS_REPORT_OPEN"] = "1"
+    if spec.key in QUIET_NODES:
+        # XML Clicker prints instead of showing its modal MessageBox and
+        # instead of opening the run-log CSV.
+        env["CLAIMS_AGENT_QUIET"] = "1"
     return env
 
 

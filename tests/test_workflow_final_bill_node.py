@@ -123,23 +123,33 @@ class RegistryTests(unittest.TestCase):
 
 
 class DefaultWorkflowTests(unittest.TestCase):
-    """The default order mirrors the manual pipeline: Final Bill BEFORE Date Fill."""
+    """The default order mirrors the operator pipeline (2026-10-12,
+    copy_xml added 2026-10-13).
 
-    def test_default_order_places_final_bill_second(self):
+    Operator direction: Date Fill BEFORE Final Bill, the Claim Processor is
+    run manually by the operator first, the XML Clicker is followed by an
+    immediate Copy XML (the background auto-copy service pauses during a
+    workflow), and the Fees Checker brackets the HBSys steps (1st pass
+    routes, 2nd pass re-checks).
+    """
+
+    def test_default_order_places_date_fill_before_final_bill(self):
         config = default_workflow()
         types = [n.node_type for n in config.nodes]
         self.assertEqual(types, [
-            "claims_processor",
-            "final_bill",
+            "fees_checker",
             "date_fill_regular",
+            "final_bill",
+            "fees_checker",
             "xml_clicker",
             "copy_xml",
-            "fees_checker",
             "claims_checker",
             "add_claims_upload",
             "claim_attachments",
         ])
         self.assertEqual([n.order for n in config.nodes], list(range(1, 10)))
+        self.assertLess(
+            types.index("date_fill_regular"), types.index("final_bill"))
 
     def test_default_connections_chain_nine_nodes(self):
         config = default_workflow()
@@ -156,7 +166,9 @@ class DefaultWorkflowTests(unittest.TestCase):
         config = default_workflow()
         params = {n.node_type: n.params for n in config.nodes}
         self.assertTrue(params["date_fill_regular"]["continue_on_fail"])
-        self.assertEqual(params["final_bill"], {})
+        # Final Bill deliberately has NO continue_on_fail (2026-10-12); it
+        # does carry a Phase-3 `when` condition, so only assert the flag.
+        self.assertFalse(params["final_bill"].get("continue_on_fail"))
         # The ABTC twin carries the same default even though
         # it is not part of the default chain.
         self.assertTrue(

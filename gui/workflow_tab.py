@@ -32,6 +32,7 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk
 from typing import Callable, Optional
 
@@ -46,9 +47,15 @@ from core.workflow_engine import (
     WorkflowConfig,
     WorkflowConfigError,
     WorkflowEngine,
+    WORKFLOW_CONFIG_FILE,
     default_workflow,
     load_workflow,
     save_workflow,
+)
+from core.workflow_conditions import (
+    CONDITION_ALWAYS,
+    CONDITION_LABELS,
+    node_condition,
 )
 from core.workflow_registry import NODE_REGISTRY, categories, node_labels
 
@@ -71,10 +78,15 @@ class WorkflowFrame(ttk.Frame):
         parent,
         settings_getter: Callable[[], dict],
         log_callback: Callable[[str], None],
+        config_path: Optional[Path] = None,
     ) -> None:
         super().__init__(parent, padding=8)
         self.settings_getter = settings_getter
         self.log_callback = log_callback
+        # Where the workflow is loaded from / saved to. Injectable so the
+        # editor can be tested without touching the operator's real
+        # workflow_config.json (same pattern as AgentPlanFrame.state_file).
+        self.config_path = Path(config_path) if config_path else WORKFLOW_CONFIG_FILE
 
         self.config: WorkflowConfig = WorkflowConfig()
         self.engine: Optional[WorkflowEngine] = None
@@ -192,6 +204,32 @@ class WorkflowFrame(ttk.Frame):
             wraplength=230,
         ).pack(fill="x", pady=(8, 0))
 
+        # -- run condition (Phase 4, 2026-10-12) ----------------------------
+        # Per-node `when`: the node runs only when its condition is met,
+        # otherwise it is SKIPPED with a reason and the chain continues.
+        # Absent value means "always" (the pre-Phase-3 behaviour).
+        ttk.Separator(node_box).pack(fill="x", pady=(10, 8))
+        ttk.Label(node_box, text="Run only when:").pack(
+            fill="x", anchor="w"
+        )
+        self.when_var = tk.StringVar(value=CONDITION_LABELS[CONDITION_ALWAYS])
+        self.when_combo = ttk.Combobox(
+            node_box,
+            textvariable=self.when_var,
+            values=[CONDITION_LABELS[c] for c in CONDITION_LABELS],
+            state="readonly",
+        )
+        self.when_combo.pack(fill="x", pady=(2, 0))
+        self.when_combo.bind("<<ComboboxSelected>>", self._on_when_selected)
+        self.when_combo.configure(state="disabled")  # until a node is picked
+        ttk.Label(
+            node_box,
+            text="Not met = node is SKIPPED with a reason;\n"
+                 "the workflow keeps going.",
+            foreground="#64748B",
+            wraplength=230,
+        ).pack(fill="x", pady=(6, 0))
+
         # -- controls ------------------------------------------------------------
         controls = ttk.Frame(self)
         controls.pack(fill="x", pady=(8, 0))
@@ -224,8 +262,8 @@ class WorkflowFrame(ttk.Frame):
 
     def _load_initial_config(self) -> None:
         try:
-            self.config = load_workflow()
-            self._log("Loaded saved workflow from workflow_config.json")
+            self.config = load_workflow(self.config_path)
+            self._log(f"Loaded saved workflow from {self.config_path.name}")
         except WorkflowConfigError as exc:
             self.config = default_workflow()
             self._log(f"Config not loaded ({exc}); using DEFAULT workflow")
@@ -233,7 +271,7 @@ class WorkflowFrame(ttk.Frame):
 
     def save_config(self) -> None:
         try:
-            path = save_workflow(self.config)
+            path = save_workflow(self.config, self.config_path)
         except WorkflowConfigError as exc:
             self._log(f"Save refused: {exc}")
             return
@@ -262,6 +300,9 @@ class WorkflowFrame(ttk.Frame):
             node_type=key,
             enabled=True,
             order=next_order,
+            # Phase 4: a new node is unconditional; the operator sets a
+            # condition afterwards if the step should be gated.
+            params={"when": CONDITION_ALWAYS},
         )
         self.config.nodes.append(node)
         self._selected_node = node.id
@@ -402,8 +443,12 @@ class WorkflowFrame(ttk.Frame):
             spec = NODE_REGISTRY.get(node.node_type)
             label = spec.label if spec else node.node_type
             state = "" if node.enabled else "  [disabled]"
+            # Phase 4: show a compact marker when the node is conditional so
+            # the list itself reveals which steps are gated.
+            condition = node_condition(node)
+            gate = "" if condition == CONDITION_ALWAYS else f"  [{condition}]"
             self.order_list.insert(
-                "end", f"{node.order:02d}. {label}{state}"
+                "end", f"{node.order:02d}. {label}{state}{gate}"
             )
         # restore selection + status colors by node id
         for index, node in enumerate(ordered):
@@ -425,6 +470,8 @@ class WorkflowFrame(ttk.Frame):
         if node is None:
             self.node_info.set("Select a node in the list")
             self.enabled_var.set(True)
+            self.when_var.set(CONDITION_LABELS[CONDITION_ALWAYS])
+            self.when_combo.configure(state="disabled")
             return
         spec = NODE_REGISTRY.get(node.node_type)
         self.node_info.set(
@@ -432,6 +479,36 @@ class WorkflowFrame(ttk.Frame):
             f"{spec.description if spec else ''}"
         )
         self.enabled_var.set(node.enabled)
+        # Show the node's current condition; enable the combo only with a
+        # selection so an edit can never land on the wrong node.
+        condition = node_condition(node)
+        if condition not in CONDITION_LABELS:
+            condition = CONDITION_ALWAYS
+        self.when_var.set(CONDITION_LABELS[condition])
+        self.when_combo.configure(state="readonly")
+
+    # -- run condition (Phase 4) ---------------------------------------------
+
+    def _on_when_selected(self, _event=None) -> None:
+        """Store the chosen condition on the selected node (params['when'])."""
+        node = self._find_node(self._selected_node) if self._selected_node else None
+        if node is None:
+            self._log("Select a node in the list first")
+            return
+        chosen_id = self._condition_id_from_label(self.when_var.get())
+        if not isinstance(node.params, dict):
+            node.params = {}
+        node.params["when"] = chosen_id
+        label = CONDITION_LABELS.get(chosen_id, chosen_id)
+        self._log(f"Run condition set: {label}")
+
+    @staticmethod
+    def _condition_id_from_label(label: str) -> str:
+        """Reverse of CONDITION_LABELS; unknown label falls back to always."""
+        for condition_id, text in CONDITION_LABELS.items():
+            if text == label:
+                return condition_id
+        return CONDITION_ALWAYS
 
     def _paint_node_status(self, node_id: str, status: str) -> None:
         """Color the node's row in the list by run status."""

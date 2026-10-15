@@ -17,10 +17,15 @@ Execution rules (v1 — deliberately simple, matching reality):
     * STRICTLY SEQUENTIAL by `order` over enabled nodes. All HBSys
       automations share one window/mouse — no parallelism exists today
       and none is introduced.
+    * Per-node CONDITIONS (Phase 3, 2026-10-12): a node may declare
+      `params["when"] = <condition id>` (see `core/workflow_conditions.py`).
+      A false condition SKIPS that node with a reason and the chain
+      continues; the node is never removed from the workflow. Absent
+      `when` means "always" — the pre-Phase-3 behaviour, unchanged.
     * Connections are stored/rendered metadata; they visualize the chain
       and are kept consistent with node order. Graph traversal and
-      branching/conditions are OUT OF SCOPE for v1 (the current
-      pipeline has no branching).
+      branching/conditions were OUT OF SCOPE for v1 (the current
+      pipeline has no branching); conditions are per-node skips only.
     * Failure policy: a FAILED node stops the workflow by default
       (fail-safe: never continue an HBSys chain after an error) unless
       the node's params set continue_on_fail=True.
@@ -39,13 +44,34 @@ Persistence: `C:\\claims_bot\\workflow_config.json` — same JSON style as
 the existing `claims_gui_config.json` (load_json/save_json pattern).
 A missing or corrupt file never runs; the GUI offers Restore Default.
 
-DEFAULT_WORKFLOW reproduces the current manual happy-path pipeline
-(README pipeline order):
-    claims_processor → final_bill → date_fill_regular → xml_clicker →
-    copy_xml → fees_checker → claims_checker → add_claims_upload →
-    claim_attachments
-(archive stays a manual GUI action in v1; INCOMPLETE/review outcomes
-remain handled by the existing manual tools, unchanged.)
+DEFAULT_WORKFLOW reproduces the operator's manual pipeline (operator
+direction 2026-10-12, copy_xml added 2026-10-13):
+
+    fees_checker (1st pass) -> date_fill_regular -> final_bill ->
+    fees_checker (2nd pass) -> xml_clicker -> copy_xml ->
+    claims_checker -> add_claims_upload -> claim_attachments
+
+Notes on this default:
+    * `claims_processor` is DELIBERATELY NOT part of the workflow. The
+      operator runs the production engine manually first and checks the
+      signatures and dates by hand before starting the workflow.
+    * `copy_xml` runs RIGHT AFTER xml_clicker (operator rule
+      2026-10-13). The background auto-copy service PAUSES while a
+      workflow runs, so the workflow copies the generated XMLs itself:
+      `python -m core.xml_auto_copy` copies immediately
+      (require_observed_stable=False — the same immediate, atomic,
+      sha256-verified, never-overwrite-different-content copy the
+      GUI's Copy XML button performs). Without this node the Claims
+      Checker would scan folders before the XMLs arrive and wrongly
+      report INCOMPLETE.
+    * `fees_checker` appears TWICE on purpose (first pass routes the
+      patient, second pass re-checks after Date Fill + Final Bill). Two
+      instances of one node_type with distinct ids are schema-valid.
+    * This default sets ORDER only. Per-node conditions ("run this node
+      only when ...") are not implemented yet, so until then the nodes
+      still run strictly sequentially (see the module docstring).
+    (archive stays a manual GUI action; INCOMPLETE/review outcomes
+    remain handled by the existing manual tools, unchanged.)
 """
 
 from __future__ import annotations
@@ -57,6 +83,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from core.workflow_adapters import ScriptNodeAdapter
+from core.workflow_conditions import evaluate as evaluate_condition
+from core.workflow_conditions import node_condition
 from core.workflow_registry import NODE_REGISTRY, NodeSpec, get_node_spec
 
 CONFIG_VERSION = 1
@@ -140,6 +168,34 @@ DEFAULT_NODE_PARAMS = {
     "date_fill_abtc": {"continue_on_fail": True},
 }
 
+# Per-node conditions of the DEFAULT workflow (Phase 3, 2026-10-12,
+# operator direction). Each node runs only when the batch still has work
+# for it: the Fees Check routes the patient (1st pass), Date Fill and
+# Final Bill fix what is missing, the Fees Check re-checks (2nd pass),
+# and only a patient that passes becomes ready for XML. The upload
+# nodes need a READY folder from the Claims Checker.
+#
+# MISMATCH rule (operator rule 2026-10-12): a fees row whose Status is
+# MISMATCH has itemized > 0, i.e. the bill is ALREADY finalized in
+# HBSys — so it does not need Final Bill again and may go straight to
+# XML generation. Its signed dates are still required first, so a
+# MISMATCH row missing dates is picked up by Date Fill and is excluded
+# from the XML node until they are filled. `fees_ready_xml` (strict,
+# Ready-to-Generate only) is kept available for a stricter workflow.
+#
+# These are per-node SKIPS, not graph branching: a skipped node is
+# reported as SKIPPED with a reason and the chain continues.
+DEFAULT_NODE_CONDITIONS = {
+    "fees_checker": "always",
+    "date_fill_regular": "fees_says_date_fill",
+    "final_bill": "fees_says_final_bill",
+    "xml_clicker": "fees_allows_xml",
+    "copy_xml": "always",
+    "claims_checker": "always",
+    "add_claims_upload": "checker_is_ready",
+    "claim_attachments": "checker_is_ready",
+}
+
 
 def default_workflow() -> WorkflowConfig:
     """The DEFAULT WORKFLOW — the current manual pipeline order.
@@ -149,12 +205,12 @@ def default_workflow() -> WorkflowConfig:
     right canvas layout; connections chain the enabled happy path.
     """
     keys = [
-        "claims_processor",
-        "final_bill",
+        "fees_checker",
         "date_fill_regular",
+        "final_bill",
+        "fees_checker",
         "xml_clicker",
         "copy_xml",
-        "fees_checker",
         "claims_checker",
         "add_claims_upload",
         "claim_attachments",
@@ -166,7 +222,14 @@ def default_workflow() -> WorkflowConfig:
             enabled=True,
             order=index,
             position={"x": 40 + (index - 1) * 180, "y": 60},
-            params=DEFAULT_NODE_PARAMS.get(key, {}),
+            params={
+                **DEFAULT_NODE_PARAMS.get(key, {}),
+                **(
+                    {"when": DEFAULT_NODE_CONDITIONS[key]}
+                    if key in DEFAULT_NODE_CONDITIONS
+                    else {}
+                ),
+            },
         )
         for index, key in enumerate(keys, start=1)
     ]
@@ -380,6 +443,7 @@ class WorkflowEngine:
             key=lambda node: node.order,
         )
         report = WorkflowRunReport(result=WORKFLOW_COMPLETED, reason="")
+        context = self._build_context(settings)
         self._running = True
         self._stop_requested = False
         try:
@@ -396,6 +460,23 @@ class WorkflowEngine:
                     report.result = WORKFLOW_REFUSED
                     report.reason = f"unknown node type {node.node_type!r}"
                     break
+
+                # Per-node condition (Phase 3): a false condition SKIPS
+                # this node with its reason and the chain CONTINUES — the
+                # node stays in the workflow and the failure policy below
+                # is untouched.
+                condition = node_condition(node)
+                if condition != "always":
+                    should_run, why = evaluate_condition(condition, context)
+                    if not should_run:
+                        self._record(
+                            report, node, NODE_STATUS_SKIPPED,
+                            f"condition '{condition}' not met: {why}",
+                        )
+                        self.on_output(
+                            f"[workflow] {spec.label} skipped — {why}"
+                        )
+                        continue
 
                 # HBSys gate for UI-automation nodes (same pre-check the
                 # main GUI applies to Date Fill / XML Clicker).
@@ -422,6 +503,10 @@ class WorkflowEngine:
 
                 if status == "DONE":
                     self._record(report, node, NODE_STATUS_DONE, "")
+                    # A finished node may have produced the facts the NEXT
+                    # node's condition needs (Fees CSV, READY folders), so
+                    # refresh the condition context after every success.
+                    self._refresh_condition_context(context)
                     continue
                 if status == "STOPPED":
                     self._record(report, node, NODE_STATUS_STOPPED, "stopped by user")
@@ -498,6 +583,54 @@ class WorkflowEngine:
         except Exception:
             return False
 
+    # -- condition context (Phase 3) ---------------------------------------
+
+    def _build_context(self, settings: dict) -> dict:
+        """Initial, empty condition context (nothing has run yet)."""
+        return {
+            "output_root": self._output_root(settings),
+            "fees_rows": [],
+            "ready_folders": [],
+        }
+
+    @staticmethod
+    def _output_root(settings: dict) -> Path:
+        root = str(settings.get("output_folder", "") or "").strip()
+        return Path(root) if root else Path(__file__).resolve().parent.parent / "output"
+
+    def _refresh_condition_context(self, context: dict) -> None:
+        """Re-read the facts conditions depend on. READ-ONLY, best effort.
+
+        * ``fees_rows``     — the latest written Fees Check CSV (the node
+          writes it; ``agent_plan_store.latest_fees_csv`` finds it).
+        * ``ready_folders`` — patient folders currently in
+          ``claims_checker_results\\READY`` (the Claims Checker MOVES
+          folders there, and the uploaders read from there).
+
+        Any failure leaves the previous value in place and never raises:
+        an unreadable fact only ever causes a node to SKIP with a reason.
+        """
+        try:
+            from core.agent import agent_plan_store as plan_store
+
+            base = Path(__file__).resolve().parent.parent
+            csv_path = plan_store.latest_fees_csv(base)
+            if csv_path is not None and csv_path.is_file():
+                rows = plan_store.read_fees_rows(csv_path)
+                if rows:
+                    context["fees_rows"] = rows
+        except Exception:
+            pass
+        try:
+            base = Path(__file__).resolve().parent.parent
+            ready = base / "claims_checker_results" / "READY"
+            if ready.is_dir():
+                context["ready_folders"] = [
+                    p.name for p in ready.iterdir() if p.is_dir()
+                ]
+        except Exception:
+            pass
+
 
 # -- standalone test (AGENTS.md: every module must support __main__) -------
 
@@ -523,10 +656,10 @@ if __name__ == "__main__":
     # -- default workflow ---------------------------------------------------
     default = default_workflow()
     check(
-        "default: 9 nodes in current manual pipeline order",
+        "default: 9 nodes in the operator pipeline order (2026-10-13)",
         [n.node_type for n in default.nodes] == [
-            "claims_processor", "final_bill", "date_fill_regular", "xml_clicker",
-            "copy_xml", "fees_checker", "claims_checker", "add_claims_upload",
+            "fees_checker", "date_fill_regular", "final_bill", "fees_checker",
+            "xml_clicker", "copy_xml", "claims_checker", "add_claims_upload",
             "claim_attachments",
         ]
         and [n.order for n in default.nodes] == list(range(1, 10)),

@@ -144,6 +144,74 @@ class BuildClaimNumberRowsTests(unittest.TestCase):
         self.assertEqual(row["Status"], "NO XML")
 
 
+class BuildClaimNumberRowsCF3Tests(unittest.TestCase):
+    """Operator rule 2026-10-15: a CF3 (NSD/nanganak) folder needs
+    CF5 + eSOA only — CF4 is waived in the claim-number rows too."""
+
+    def setUp(self):
+        self.temporary = TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def build(self, name: str, files: list[str]) -> dict:
+        folder = make_patient_folder(self.root, name, files)
+        rows = claims_checker.build_claim_number_rows([folder])
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_cf3_with_cf5_and_esoa_match(self):
+        row = self.build(
+            "SANTOS, MARIA CLARA",
+            [
+                "CF3.pdf",
+                "SANTOS, MARIA, CLARA-260924150960_CF5.xml",
+                "SANTOS, MARIA, CLARA-260924150960_eSOA.xml",
+            ],
+        )
+        self.assertEqual(row["Status"], "CLAIM NO. MATCH")
+        self.assertIn("both", row["Notes"])
+
+    def test_cf3_with_only_cf5_is_incomplete(self):
+        row = self.build(
+            "SANTOS, MARIA CLARA",
+            [
+                "CF3.pdf",
+                "SANTOS, MARIA, CLARA-260924150960_CF5.xml",
+            ],
+        )
+        self.assertEqual(row["Status"], "CLAIM NO. INCOMPLETE")
+        self.assertIn("ESOA", row["Notes"])
+
+    def test_cf3_with_differing_numbers_is_mismatch(self):
+        row = self.build(
+            "SANTOS, MARIA CLARA",
+            [
+                "CF3.pdf",
+                "SANTOS, MARIA, CLARA-260924150960_CF5.xml",
+                "SANTOS, MARIA, CLARA-260924199999_eSOA.xml",
+            ],
+        )
+        self.assertEqual(row["Status"], "CLAIM NO. MISMATCH")
+
+    def test_cf3_with_no_xml_is_still_no_xml(self):
+        row = self.build("SANTOS, MARIA CLARA", ["CF3.pdf"])
+        self.assertEqual(row["Status"], "NO XML")
+
+    def test_no_cf3_still_needs_all_three(self):
+        # Same XMLs without CF3.pdf -> INCOMPLETE (CF4 missing).
+        row = self.build(
+            "SANTOS, MARIA CLARA",
+            [
+                "SANTOS, MARIA, CLARA-260924150960_CF5.xml",
+                "SANTOS, MARIA, CLARA-260924150960_eSOA.xml",
+            ],
+        )
+        self.assertEqual(row["Status"], "CLAIM NO. INCOMPLETE")
+        self.assertIn("CF4", row["Notes"])
+
+
 
 class WriteReportsWithClaimRowsTests(unittest.TestCase):
     def setUp(self):
@@ -287,6 +355,98 @@ class ListFoldersWithoutXmlTests(unittest.TestCase):
 
     def test_blank_root_returns_empty(self):
         self.assertEqual(claims_checker.list_folders_without_xml(""), ([], 0))
+
+
+class ListFoldersMissingXmlTests(unittest.TestCase):
+    """Operator rule 2026-10-12: 3/3 required to leave the list.
+
+    The panel must not agree/disagree with the Claims Checker, so this
+    reuses the checker's own has_xml() rule.
+    """
+
+    def setUp(self):
+        self.temporary = TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def _folder(self, name, kinds, pdfs=()):
+        folder = self.root / name
+        folder.mkdir(parents=True, exist_ok=True)
+        for kind in kinds:
+            (folder / f"{name}-260924150960_{kind}.xml").write_text(
+                "{}", encoding="utf-8")
+        for pdf in pdfs:
+            (folder / pdf).write_text("x", encoding="utf-8")
+        return folder
+
+    def test_three_of_three_is_not_listed(self):
+        self._folder("COMPLETE", ["CF4", "CF5", "ESOA"])
+        self.assertEqual(claims_checker.list_folders_missing_xml(self.root),
+                         ([], 0))
+
+    def test_cf3_folder_needs_two_of_two(self):
+        # Operator rule 2026-10-15: CF3.pdf present -> CF5 + eSOA
+        # only. 2/2 removes it; 1/2 stays listed as (1/2).
+        self._folder("NSD_FULL", ["CF5", "ESOA"], pdfs=["CF3.pdf"])
+        self._folder("NSD_HALF", ["CF5"], pdfs=["CF3.pdf"])
+        rows, total = claims_checker.list_folders_missing_xml(self.root)
+        self.assertEqual(rows, ["NSD_HALF  (1/2)"])
+        self.assertEqual(total, 1)
+
+    def test_cf3_folder_with_no_xml_shows_zero_of_two(self):
+        self._folder("NSD_NONE", [], pdfs=["CF3.pdf"])
+        rows, total = claims_checker.list_folders_missing_xml(self.root)
+        self.assertEqual(rows, ["NSD_NONE  (0/2)"])
+        self.assertEqual(total, 1)
+
+    def test_two_of_three_is_listed_with_count(self):
+        self._folder("TWO", ["CF4", "CF5"])
+        rows, total = claims_checker.list_folders_missing_xml(self.root)
+        self.assertEqual(rows, ["TWO  (2/3)"])
+        self.assertEqual(total, 1)
+
+    def test_one_of_three_is_listed_with_count(self):
+        self._folder("ONE", ["ESOA"])
+        rows, total = claims_checker.list_folders_missing_xml(self.root)
+        self.assertEqual(rows, ["ONE  (1/3)"])
+        self.assertEqual(total, 1)
+
+    def test_zero_of_three_is_listed_with_zero_count(self):
+        self._folder("NONE", [])
+        rows, total = claims_checker.list_folders_missing_xml(self.root)
+        self.assertEqual(rows, ["NONE  (0/3)"])
+        self.assertEqual(total, 1)
+
+    def test_sorts_case_insensitively(self):
+        self._folder("zeta", [])
+        self._folder("Alpha", [])
+        self._folder("bravo", ["CF4"])
+        rows, total = claims_checker.list_folders_missing_xml(self.root)
+        self.assertEqual(rows, ["Alpha  (0/3)", "bravo  (1/3)", "zeta  (0/3)"])
+        self.assertEqual(total, 3)
+
+    def test_stray_files_are_ignored(self):
+        self._folder("PATIENT", [])
+        (self.root / "loose.pdf").write_text("x", encoding="utf-8")
+        rows, _ = claims_checker.list_folders_missing_xml(self.root)
+        self.assertEqual(rows, ["PATIENT  (0/3)"])
+
+    def test_missing_or_blank_root_returns_empty(self):
+        self.assertEqual(
+            claims_checker.list_folders_missing_xml(self.root / "MISSING"),
+            ([], 0),
+        )
+        self.assertEqual(claims_checker.list_folders_missing_xml(""), ([], 0))
+
+    def test_matches_the_claim_kinds_the_checker_uses(self):
+        # The three kinds are the checker's own CLAIM_KINDS (cf4/cf5/esoa).
+        self.assertEqual(
+            sorted(claims_checker.CLAIM_KINDS), ["cf4", "cf5", "esoa"])
+        self._folder("PATIENT", ["CF4", "CF5"])
+        rows, _ = claims_checker.list_folders_missing_xml(self.root)
+        self.assertTrue(rows[0].endswith("(2/3)"))
 
 
 class OutputDirHasXmlTests(unittest.TestCase):

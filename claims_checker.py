@@ -3,9 +3,11 @@ import datetime as dt
 import json
 import os
 import re
+import time
 from pathlib import Path
 from PIL import Image
 
+from core.activity_logger import logger
 from core.claims_requirement_rules import BASE_REQUIREMENTS, evaluate_requirements
 
 try:
@@ -39,6 +41,14 @@ INCOMPLETE_DIR = CLAIMS_RESULTS_DIR / "INCOMPLETE"
 SIGNATURE_CHECK_CONFIG = BASE_DIR / "signature_check_config.json"
 POPPLER_PATH = r"C:\poppler\Library\bin"
 TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# Operator rule 2026-10-12: wait for the XML auto-copy service to finish
+# moving CF4/CF5/eSOA into the patient folders before checking, so a
+# folder is never judged "NO XML" just because the copy was still in
+# flight. 12s is the operator's measured time for all three XMLs to
+# land (raised from the initial 8s estimate the same day).
+# Override with CLAIMS_CHECKER_XML_SETTLE_SECONDS (0 = no wait).
+DEFAULT_XML_SETTLE_SECONDS = 12.0
 
 ALWAYS_REQUIRED = list(BASE_REQUIREMENTS)
 BIRTH_CERT_KEYWORDS = ["birth certificate", "certificate of live birth"]
@@ -139,6 +149,28 @@ CLAIM_SERIES_RE = re.compile(r"-(\d+)_(cf4|cf5|esoa)\.xml$", re.IGNORECASE)
 
 CLAIM_KINDS = ("cf4", "cf5", "esoa")
 
+#: XML kinds required for a CF3 (NSD/nanganak) claim. Operator rule
+#: 2026-10-15: a CF3 claim generates only CF5 + eSOA — CF4 XML is NOT
+#: required for it. Folders without CF3.pdf need all of CLAIM_KINDS.
+NSD_XML_KINDS = ("cf5", "esoa")
+
+
+def required_xml_kinds(patient_folder) -> tuple:
+    """XML kinds one patient folder must hold (CF3-aware).
+
+    A folder containing CF3.pdf is an NSD (nanganak) claim and needs
+    only CF5 + eSOA; every other folder needs CF4 + CF5 + eSOA. Uses
+    the SAME pdf rule as the requirement check (``has_pdf``), so the
+    Status verdict, the claim-number rows, and the panel can never
+    disagree about which folder is CF3.
+    """
+    try:
+        if has_pdf(patient_folder, "CF3"):
+            return NSD_XML_KINDS
+    except OSError:
+        pass
+    return CLAIM_KINDS
+
 
 def extract_claim_series(patient_folder):
     """Collect HBSys claim series numbers from XML filenames.
@@ -174,8 +206,9 @@ def build_claim_number_rows(folders):
     """
     rows = []
     for folder in folders:
+        required = required_xml_kinds(folder)
         series = extract_claim_series(folder)
-        present = [kind for kind in CLAIM_KINDS if series[kind]]
+        present = [kind for kind in required if series[kind]]
         found = "; ".join(
             f"{kind.upper()}={_format_series(series, kind)}" for kind in CLAIM_KINDS
         )
@@ -183,15 +216,19 @@ def build_claim_number_rows(folders):
         if not present:
             status = "NO XML"
             notes = "no XML files found in the patient folder"
-        elif len(present) < len(CLAIM_KINDS):
+        elif len(present) < len(required):
             status = "CLAIM NO. INCOMPLETE"
-            missing_kinds = [k.upper() for k in CLAIM_KINDS if not series[k]]
+            missing_kinds = [k.upper() for k in required if not series[k]]
             notes = "missing XML: " + ", ".join(missing_kinds)
         else:
-            all_numbers = set().union(*(series[kind] for kind in CLAIM_KINDS))
+            all_numbers = set().union(*(series[kind] for kind in required))
             if len(all_numbers) == 1:
                 status = "CLAIM NO. MATCH"
-                notes = "all three claim numbers match"
+                notes = (
+                    "both claim numbers match (CF4 waived for CF3/NSD claim)"
+                    if len(required) == 2
+                    else "all three claim numbers match"
+                )
             else:
                 status = "CLAIM NO. MISMATCH"
                 notes = "claim numbers differ across XML files"
@@ -222,6 +259,43 @@ def folder_has_any_xml(folder):
     except OSError:
         pass
     return False
+
+
+def list_folders_missing_xml(root):
+    """Return (display rows, total) for folders missing a required XML.
+
+    Rule (operator request 2026-10-12, CF3/NSD rule 2026-10-15): a
+    patient leaves this list ONLY when ALL its required XMLs are
+    present — CF4 + CF5 + eSOA normally, but CF5 + eSOA only for a
+    folder holding CF3.pdf (NSD/nanganak: CF4 is waived). A folder
+    holding fewer stays listed and shows how many are actually there,
+    e.g. ``DELA CRUZ, JUAN ...  (2/3)`` or ``...  (1/2)`` for CF3.
+
+    Uses the SAME existence rule as the Claims Checker (``has_xml``)
+    and the SAME CF3 rule (``required_xml_kinds``), so this panel,
+    the claim-number rows, and the checker's status can never
+    disagree. Folders are returned sorted case-insensitively; scan
+    errors yield an empty list.
+    """
+    if not str(root or "").strip():
+        return [], 0
+    try:
+        entries = [p for p in Path(root).iterdir() if p.is_dir()]
+    except OSError:
+        return [], 0
+    rows = []
+    for folder in entries:
+        try:
+            kinds = required_xml_kinds(folder)
+            found = sum(1 for kind in kinds if has_xml(folder, kind))
+        except OSError:
+            kinds = CLAIM_KINDS
+            found = 0
+        required = len(kinds)
+        if found < required:
+            rows.append(f"{folder.name}  ({found}/{required})")
+    rows.sort(key=str.lower)
+    return rows, len(rows)
 
 
 def list_folders_without_xml(root):
@@ -856,7 +930,8 @@ def write_reports(rows, claim_rows=None):
         f.write("COE eligibility NO -> MRF + PBC or MMC required\n")
         f.write("ANR present -> OPR + CF3 required\n")
         f.write("NSD01 in CSF -> OPR + CF3 required\n")
-        f.write("CF2 present -> claim classified as Newborn\n")
+        f.write("CF2 present -> claim classified as Newborn; DTR not required\n")
+        f.write("CF3 present -> CF4 XML not required (NSD: CF5 + eSOA only)\n")
         f.write("Conditional requirements are cumulative\n")
         f.write("Enabled signature boxes -> warning only\n")
 
@@ -893,10 +968,47 @@ def organize_claim_folders(rows, source_dir=OUTPUT_DIR):
 
         shutil.move(str(folder), str(dest))
 
+def xml_settle_seconds() -> float:
+    """Seconds to wait for the XML auto-copy before checking (default 12).
+
+    Operator rule 2026-10-12. Never negative; a bad value falls back to
+    the default rather than guessing a different wait.
+    """
+    raw = os.environ.get("CLAIMS_CHECKER_XML_SETTLE_SECONDS")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_XML_SETTLE_SECONDS
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        logger.warning(
+            f"Bad CLAIMS_CHECKER_XML_SETTLE_SECONDS={raw!r}; "
+            f"using {DEFAULT_XML_SETTLE_SECONDS:g}s"
+        )
+        return DEFAULT_XML_SETTLE_SECONDS
+    return max(0.0, value)
+
+
 def main():
     recheck_mode = os.environ.get("CLAIMS_RECHECK_INCOMPLETE", "0") == "1"
 
     source_dir = INCOMPLETE_DIR if recheck_mode else OUTPUT_DIR
+
+    # XML settle delay (operator request 2026-10-12): the XML Clicker
+    # writes CF4/CF5/eSOA into FTPURL and the background auto-copy
+    # service copies them into each patient folder. Without a short wait
+    # the checker can scan a folder whose XML has not arrived yet and
+    # wrongly report NO XML / CLAIM NO. INCOMPLETE. NOTE: the auto-copy
+    # service pauses while a workflow runs, so inside a Workflow run a
+    # fixed wait alone cannot make the XMLs arrive — see the workflow
+    # auto-copy pause in edh_claims_gui_XML_COPY_BUTTON.py.
+    # Override with CLAIMS_CHECKER_XML_SETTLE_SECONDS (0 disables).
+    settle = xml_settle_seconds()
+    if settle > 0:
+        print(
+            f"Waiting {settle:g}s for the XML auto-copy to finish "
+            f"(set CLAIMS_CHECKER_XML_SETTLE_SECONDS=0 to skip)"
+        )
+        time.sleep(settle)
 
     folders = list(iter_patient_folders(source_dir))
     rows = [check_patient_folder(folder) for folder in folders]
@@ -922,6 +1034,13 @@ def main():
             print(f"  - {name}")
     else:
         print("Patients Without XML: none")
+
+    # Unattended runs (Workflow node) must not steal focus with a CSV or
+    # log window between nodes — operator request 2026-10-12. The main
+    # dashboard never sets this, so its popups are unchanged.
+    if os.environ.get("CLAIMS_SUPPRESS_REPORT_OPEN", "") == "1":
+        print("Report open suppressed (unattended run)")
+        return
 
     try:
         os.startfile(str(csv_path))
