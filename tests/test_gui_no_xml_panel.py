@@ -97,6 +97,40 @@ class NoXmlPanelTests(unittest.TestCase):
             )
         return folder
 
+    def test_output_panel_shows_contents_badges(self):
+        # Operator request 2026-10-15: the Output Folders rows carry
+        # each folder's PDF/XML badge — no folder needs opening.
+        folder = self.make_patient_with("ALPHA, JANE", ["CF4"])
+        (folder / "CSF.pdf").write_text("x", encoding="utf-8")
+        (folder / "DTR.pdf").write_text("x", encoding="utf-8")
+
+        self.app.refresh_folder_lists()
+
+        rows = list(self.app.output_folders_list.get(0, "end"))
+        self.assertEqual(len(rows), 1)
+        self.assertIn("ALPHA, JANE", rows[0])
+        self.assertIn("[CSF DTR | XML 1/3]", rows[0])
+        self.assertEqual(
+            self.app.output_folders_card.cget("text"), "Output Folders (1)"
+        )
+
+    def test_other_panels_have_no_badges(self):
+        # Only the Output panel carries badges (operator scope):
+        # with_contents=False (the default) keeps plain folder names.
+        folder = self.output_dir / "ALPHA, JANE"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "CSF.pdf").write_text("x", encoding="utf-8")
+
+        self.app.populate_folder_list(
+            self.app.ready_folders_card,
+            self.app.ready_folders_list,
+            "Ready Folders",
+            str(self.output_dir),
+        )
+
+        rows = list(self.app.ready_folders_list.get(0, "end"))
+        self.assertEqual(rows, ["ALPHA, JANE"])
+
     def test_panel_lists_folder_with_zero_of_three_xml(self):
         self.make_patient_with("ALPHA, JANE", [])
 
@@ -271,6 +305,121 @@ class TabAutoRefreshTests(unittest.TestCase):
             self.assertEqual(calls, [False])
         finally:
             root.destroy()
+
+
+class FolderColumnsLayoutTests(unittest.TestCase):
+    """Operator request 2026-10-15: resizable folder columns + zebra rows.
+
+    Uses the same app fixture (temp output dir): three patient folders
+    exercise stripes, and the draggable sash between the Output/Ready
+    column and the Incomplete/No-XML column is asserted directly.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = gui_module.EDHClaimsGUI()
+        cls.app.withdraw()
+        cls.app.update_idletasks()
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.app.destroy()
+        except Exception:  # noqa: BLE001 - cleanup must not mask failures.
+            pass
+
+    def setUp(self):
+        self.temporary = TemporaryDirectory()
+        self.output_dir = Path(self.temporary.name)
+        self.original_output = self.app.settings.get("output_folder", "")
+        self.app.settings["output_folder"] = str(self.output_dir)
+        for name in ("BRAVO, JOHN", "ALPHA, JANE", "CHARLIE, JUAN"):
+            folder = self.output_dir / name
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "CSF.pdf").write_text("x", encoding="utf-8")
+        self.app.reset_folder_split()
+
+    def tearDown(self):
+        self.app.settings["output_folder"] = self.original_output
+        self.temporary.cleanup()
+
+    def test_folder_columns_are_a_resizable_paned_window(self):
+        import tkinter as tk
+
+        sash = getattr(self.app, "folder_sash", None)
+        self.assertIsNotNone(sash)
+        self.assertIsInstance(sash, tk.Frame)
+        # The sash sits in the divider column of the split.
+        self.assertIn(sash, self.app.folder_split_body.grid_slaves(column=2))
+        self.assertEqual(
+            int(self.app.folder_split_body.columnconfigure(1)["minsize"]),
+            gui_module.FOLDER_SPLIT_DEFAULT)
+
+    def _sash_event(self, x_root):
+        class _Event:
+            pass
+
+        event = _Event()
+        event.x_root = x_root
+        return event
+
+    def test_dragging_sash_resizes_the_output_column(self):
+        body = self.app.folder_split_body
+        before = int(body.columnconfigure(1)["minsize"])
+        self.app._on_folder_sash_press(self._sash_event(500))
+        self.app._on_folder_sash_drag(self._sash_event(600))
+        after = int(body.columnconfigure(1)["minsize"])
+        self.assertEqual(after, before + 100)
+
+    def test_dragging_sash_is_clamped_to_the_minimum(self):
+        body = self.app.folder_split_body
+        self.app._on_folder_sash_press(self._sash_event(500))
+        self.app._on_folder_sash_drag(self._sash_event(-5000))
+        self.assertEqual(
+            int(body.columnconfigure(1)["minsize"]),
+            gui_module.FOLDER_SPLIT_MIN)
+
+    def test_reset_restores_the_default_split(self):
+        body = self.app.folder_split_body
+        body.columnconfigure(1, minsize=700)
+        self.app.reset_folder_split()
+        self.assertEqual(
+            int(body.columnconfigure(1)["minsize"]),
+            gui_module.FOLDER_SPLIT_DEFAULT)
+
+    def test_output_rows_alternate_backgrounds(self):
+        self.app.refresh_folder_lists()
+        rows = list(self.app.output_folders_list.get(0, "end"))
+        self.assertEqual(len(rows), 3)
+        panel = self.app.colors["panel"]
+        bg = self.app.colors["bg"]
+        self.assertNotEqual(panel, bg)
+        for index in range(3):
+            got = str(self.app.output_folders_list.itemcget(index, "background"))
+            self.assertEqual(got, panel if index % 2 == 0 else bg)
+
+    def test_no_xml_rows_alternate_backgrounds(self):
+        self.app.refresh_folder_lists()
+        size = self.app.no_xml_list.size()
+        self.assertGreater(size, 0)
+        panel = self.app.colors["panel"]
+        bg = self.app.colors["bg"]
+        for index in range(size):
+            got = str(self.app.no_xml_list.itemcget(index, "background"))
+            self.assertEqual(got, panel if index % 2 == 0 else bg)
+
+    def test_stripes_follow_theme_change(self):
+        self.app.refresh_folder_lists()
+        self.app.settings["theme"] = "Slate Dark"
+        self.app.apply_theme()
+        try:
+            dark_bg = self.app.colors["bg"]
+            self.assertEqual(dark_bg, "#111827")
+            got = str(self.app.output_folders_list.itemcget(1, "background"))
+            self.assertEqual(got, dark_bg)
+        finally:
+            self.app.settings["theme"] = "Light Blue"
+            self.app.apply_theme()
 
 
 if __name__ == "__main__":

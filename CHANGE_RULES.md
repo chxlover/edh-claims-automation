@@ -38,6 +38,303 @@ changes and must not be recorded individually.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
 
+### 2026-10-16 - Fix: non-ASCII text (the enye in DOÑA) was dropped by pyautogui.write
+
+Reason:
+
+Operator report 2026-10-16: "ang script natin di nya kaya mag
+copy at paste ng Ñ dinidisregard nya."
+
+`pyautogui.write()` can only send characters that exist in
+`pyautogui.KEYBOARD_KEYS` (lowercase letters, digits, symbols,
+named keys). Any non-ASCII character — the enye in `DOÑA`,
+accents such as `á é í ó ú` — is **silently dropped**. So the
+patient name typed into an HBSys search box came out as `DOA`
+and the search/row match found nothing. The same class of bug
+applied to the patient folder path typed into the Claim
+Attachments file dialog, because those folder names contain the
+patient name.
+
+Verified live: `Ñ ñ á é í ó ú` are absent from
+`pyautogui.KEYBOARD_KEYS` (194 entries).
+
+Files added:
+
+- `core/unicode_typing.py` — `can_type(text)` (True only when
+  every character is in the pyautogui key list or printable
+  ASCII 0x20–0x7E, which pyautogui types via Shift);
+  `send_unicode_text(text, interval=)` which injects each
+  non-ASCII character as a real Unicode keystroke through the
+  Win32 `SendInput` API with `KEYEVENTF_UNICODE` / `VK_PACKET`
+  (the same input channel pyautogui uses); `paste_text(text)`
+  (pyperclip copy + Ctrl+V) kept only as a last-resort fallback;
+  and `write_text(text, interval=)` which uses the normal
+  `pyautogui.write` path for typeable text and the Unicode
+  keystroke path for anything else.
+
+Files modified:
+
+- `core/add_claims_uploader.py` — `AddClaimsOperator.write()`
+  now routes through `unicode_typing.write_text` and logs the
+  clipboard fallback. (Used for the patient name search box.)
+- `core/claim_attachments_uploader.py` — (a)
+  `AttachmentsOperator.write()` routes through the helper; (b)
+  the patient-name search box entry
+  (`pyautogui.write(patient_name, ...)`) now goes through the
+  helper; (c) `type_folder_path_and_open` now types the folder
+  path through the helper (folder names carry the patient name,
+  so they can contain the enye).
+- `date_fill_hbsys/xml_generator_clicker.py` —
+  `XmlGeneratorOperator.write()` routes through the helper. (CF4
+  patient-name entry now keeps the enye.)
+
+Behavior before: text with a non-ASCII character was typed with
+the character missing (`DOÑA` → `DOA`), so the HBSys search or
+the file-dialog path did not match.
+
+Behavior after: pure ASCII text takes the exact same
+`pyautogui.write` path as before (no change). Text containing a
+non-ASCII character is typed as real Unicode keystrokes
+(`SendInput` / `KEYEVENTF_UNICODE`), so `DOÑA` is entered
+correctly. The fallback runs only in live mode and only for
+affected text; dry runs and ASCII-only text are untouched.
+
+Why the fallback is *not* Ctrl+V: HBSys screens (window class
+`FNWND370`) are custom-drawn 4GL windows whose entry fields are
+not standard Windows edit controls, so they ignore `Ctrl+V` — a
+clipboard paste leaves the field empty (operator report: "di nya
+mapaste"). They *do* accept ordinary keystrokes, which is why
+the Unicode keystroke path is used first and the clipboard paste
+is only a last resort if `SendInput` itself fails.
+
+Safety / compatibility:
+
+- No new dependency. The Unicode keystroke path uses `ctypes`
+  from the standard library only; `pyperclip==1.11.0` (used only
+  by the last-resort fallback) was already a declared production
+  dependency. The module imports `pyautogui`/`pyperclip` lazily
+  inside the functions.
+- The three operators keep their own logging and (where present)
+  `guard_blind_input` behavior; only the raw keystroke send
+  changed. No production workflow order or condition changed.
+- Verified on the production machine: `ctypes.sizeof(INPUT)`
+  is 40 (correct x64 layout) and `_key_events_for("DOÑA")` →
+  `0x44, 0x4F, 0xD1, 0x41` (the enye is U+00D1).
+  `can_type("DOA, JENNIFER SAMSON")` True, `can_type("DOÑA")`
+  False.
+
+Verification:
+
+- `python -m unittest tests.test_unicode_typing` — 15 tests OK
+  (can_type True/False, SendInput down/up Unicode events + struct
+  size, SendInput-failure → clipboard fallback, Ctrl+V paste,
+  each of the three operators routes through the helper, dry
+  run never touches the keyboard, folder-path typing uses the
+  helper). All key sends are mocked; no live input, no HBSys.
+- Full suite: `Ran 981 tests — OK`.
+
+### 2026-10-15 - Feature: resizable folder columns + zebra patient rows
+
+Reason:
+
+Operator request 2026-10-15: "gawin mo ngang
+nareresize ang mga column sa pagitan ng output folder
+at incomplete folders tapos lagyan mo ng background
+color alternate ang row name ng patient para mabilis
+makita."
+
+Files modified:
+
+- `edh_claims_gui_XML_COPY_BUTTON.py` —
+  (a) the Output/Ready column and the
+  Incomplete/No-XML column now sit in a draggable
+  split instead of a fixed pack split — the divider
+  drags to resize (clamped between 220px and
+  window-left rail-sash-right min; double-click
+  restores the 420px default);
+  (b) new `_apply_zebra_stripes(listbox)`: even rows
+  theme `panel`, odd rows theme `bg` (subtle in all
+  four themes; selection highlight untouched), applied
+  in `populate_folder_list` + `populate_no_xml_list`
+  (all four folder panels) and re-applied in
+  `apply_theme` so a theme switch re-stripes.
+- `tests/test_gui_no_xml_panel.py` — new
+  `FolderColumnsLayoutTests` (7 tests): sash exists and
+  occupies the divider column; drag widens the
+  Output/Ready column; drag clamps to the minimum;
+  double-click/reset restores the default; output rows
+  alternate panel/bg; no-xml rows alternate; stripes
+  follow a theme change to Slate Dark and back.
+
+Behavior before and after:
+
+- Before: fixed 50/50-ish column split, plain white
+  rows.
+- After: draggable sash between the columns;
+  alternate-row backgrounds on every folder panel.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_gui_no_xml_panel`:
+  23 tests, OK (16 + 7).
+- Full suite `python -m unittest discover -s tests`:
+  see the result recorded at the end of this session.
+
+### 2026-10-15 - Fix: folder columns went blank (PanedWindow did not paint)
+
+Reason:
+
+After the "resizable folder columns" change (above),
+the Output/Ready, Incomplete/No-XML and Live
+Processing Logs panels rendered **blank** (whole
+columns white) even though the window was restarted.
+A PanedWindow sash was drawn but none of the pane
+contents painted.
+
+Root cause (isolated with screenshots of the live
+window plus standalone minimal layouts):
+
+- The classic `tk.PanedWindow` **and** the ttk
+  `ttk.PanedWindow` both fail to paint their pane
+  children on this machine's Tk build
+  (Tcl/Tk 8.6.15, Python 3.14.1): the panes report
+  correct geometry (`winfo_width/height` non-zero) but
+  never render. The same layout with plain `pack` (or
+  `grid`) renders perfectly. This is environment/Tk
+  specific, not a data problem, and not caused by the
+  zebra striping or the `clam` theme (both were ruled
+  out independently).
+
+Files modified:
+
+- `edh_claims_gui_XML_COPY_BUTTON.py` — replaced the
+  `tk.PanedWindow` with a grid split plus a hand-made
+  draggable sash. Module constants `FOLDER_SPLIT_*`
+  and `FOLDER_SASH_WIDTH`. New methods
+  `_bind_folder_sash`, `_on_folder_sash_press`,
+  `_on_folder_sash_drag`, `reset_folder_split`;
+  `apply_theme` recolors the sash. No other dashboard
+  widget or behavior changed.
+- `tests/test_gui_no_xml_panel.py` — the
+  `FolderColumnsLayoutTests` now assert the sash and
+  the drag math instead of a PanedWindow.
+
+Behavior before and after:
+
+- Before (broken): blank folder columns and logs;
+  sash visible but dragging changed nothing visible.
+- After: all panels render; the divider drags to
+  resize, double-click resets to the default.
+
+Verification performed and its result:
+
+- Live window capture (PrintWindow) of a freshly
+  restarted GUI: Output Folders (10), Ready Folders
+  (0), Incomplete Folders (0), Live Processing Logs
+  (with content) and Patients Without XML (7) all
+  render, with the divider between the two columns.
+- `python -m unittest tests.test_gui_no_xml_panel`:
+  23 tests, OK.
+- Full suite `python -m unittest discover -s tests`:
+  see the result recorded at the end of this session.
+
+### 2026-10-15 - Feature: Output Folders rows show PDF/XML content badges
+
+Reason:
+
+Operator request 2026-10-15: "sa main dashboard output
+folders dapat makita kung ano ang laman nyang PDF para
+diko na open ung patients folder isa isa." Operator
+choice: **inline badges** (every row carries its tags —
+nothing to click).
+
+Files modified:
+
+- `claims_checker.py` — new `BADGE_DOC_ORDER` and
+  `describe_folder_contents(folder)` (pure, filename-only
+  scan: document presence via the SAME `has_pdf` rule,
+  XML count via `required_xml_kinds` so CF3 folders show
+  `n/2`; scan errors yield `[unreadable]`, never
+  guessed). Example:
+  `[CSF COE SOA1 DTR MRF PBC | XML 0/3]`.
+- `edh_claims_gui_XML_COPY_BUTTON.py` — `populate_folder_list`
+  gains `with_contents=False`; only the Output Folders
+  panel passes True (operator scope — Ready/Incomplete
+  panels keep plain names).
+- `tests/test_claim_number_match.py` — new
+  `FolderContentsBadgeTests` (6 tests): badge content,
+  canonical order, empty folder, CF3 `(n/2)`,
+  unreadable, same stems as the checker.
+- `tests/test_gui_no_xml_panel.py` — 2 wiring tests:
+  Output rows carry badges + count title; other panels
+  stay plain.
+
+Behavior before and after:
+
+- Before: Output rows were bare folder names — every
+  folder had to be opened in Explorer to see its PDFs.
+- After: `NAME  [CSF COE SOA1 DTR | XML 0/3]` — the
+  whole output is surveyable at a glance. Live check on
+  9 real folders: all correct (incl. one `[no PDFs]`
+  empty folder the operator can now spot immediately).
+
+Safety or compatibility notes:
+
+- Filename-only scan (no OCR/DB); badge rules are the
+  checker's own rules, so badge vs Status can never
+  disagree.
+- Ready/Incomplete panels unchanged.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_claim_number_match
+  tests.test_gui_no_xml_panel`: 57 tests, OK.
+- Live badge run over `C:\claims_bot\output`: 9
+  folders, all correct.
+- Full suite `python -m unittest discover -s tests`:
+  see the result recorded at the end of this session.
+
+### 2026-10-15 - Feature: PDF Preview zoom In/Out (level carries over)
+
+Reason:
+
+Operator request 2026-10-15: "sa pdf preview izoom mo
+at lagyan mo ng zoom in zoom out para makita for
+example zoom in ko sya macacary over nya ung zoom sa
+next page."
+
+Files modified:
+
+- `gui/pdf_preview_panel.py` — new Zoom - / Zoom +
+  buttons beside Previous/Next plus a Zoom % label;
+  `self._zoom` (fraction of fit size, x1.25 steps,
+  clamped 50%-300%) is NEVER reset on sheet change or
+  refresh, so the level carries over to the next page.
+  100% renders exactly like before (fit-to-canvas).
+  Added canvas scrollbars + mouse-wheel scroll so a
+  zoomed sheet can be panned.
+- `tests/test_gui_pdf_preview_zoom.py` (BAGO) — 6
+  tests with a fake sheet service and temp PNGs:
+  default 100%; in/out change the level; zoom carries
+  over to Next/Previous sheet and survives refresh with
+  new sheets; clamps at limits; scrollbars and wheel
+  scroll work zoomed in.
+
+Behavior before and after:
+
+- Before: contact sheets always fit-to-canvas, no zoom,
+  no scrollbars.
+- After: Zoom - / Zoom + (Zoom: N% label); the level
+  persists across Previous/Next/Regenerate/Document
+  switch; scrollbars + wheel for panning when zoomed.
+
+Verification performed and its result:
+
+- `python -m unittest tests.test_gui_pdf_preview_zoom`:
+  6 tests, OK.
+- Full suite `python -m unittest discover -s tests`:
+  see the result recorded at the end of this session.
+
 ### 2026-10-15 - Feature: one-click button opens both TRANSMITTED backups
 
 Reason:

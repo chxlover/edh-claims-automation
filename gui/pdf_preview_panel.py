@@ -2,6 +2,9 @@
 
 Builds 3-column contact sheets for CSF and COE PDFs inside the main GUI,
 then previews them with Previous / Next navigation -- no external viewer needed.
+
+Zoom (+/-) is persistent: once set, it carries over to the next sheet
+(and across refreshes), so the operator does not re-zoom every page.
 """
 
 from __future__ import annotations
@@ -20,6 +23,12 @@ from core.pdf_preview_service import (
     pdf_preview_service,
 )
 
+#: Zoom step per click (x1.25 / /1.25) and hard limits, as fractions of
+#: the fit-to-canvas size. 100% == fit, exactly like before zoom existed.
+ZOOM_STEP = 1.25
+ZOOM_MIN = 0.5
+ZOOM_MAX = 3.0
+
 
 class PdfPreviewPanel:
     """Embedded preview panel with prev/next buttons and per-sheet navigation."""
@@ -34,6 +43,10 @@ class PdfPreviewPanel:
         self._sheets: list[Path] = []
         self._sheet_index = 0
         self._tk_image: ImageTk.PhotoImage | None = None
+        # Persistent zoom (fraction of fit size). Never reset on sheet
+        # change or refresh — operator request: zoom carries over to the
+        # next page.
+        self._zoom = 1.0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -76,16 +89,49 @@ class PdfPreviewPanel:
         )
         self.next_btn.pack(side="left")
 
+        self.zoom_out_btn = ttk.Button(
+            nav, text="Zoom -", command=self.zoom_out
+        )
+        self.zoom_out_btn.pack(side="left", padx=(12, 4))
+        self.zoom_in_btn = ttk.Button(
+            nav, text="Zoom +", command=self.zoom_in
+        )
+        self.zoom_in_btn.pack(side="left")
+
+        self.zoom_label_var = tk.StringVar(value="Zoom: 100%")
+        ttk.Label(nav, textvariable=self.zoom_label_var).pack(
+            side="left", padx=8
+        )
+
         refresh_btn = ttk.Button(
             nav, text="Regenerate Sheets", command=self._refresh
         )
         refresh_btn.pack(side="right", padx=(8, 0))
 
+        container = ttk.Frame(self.parent)
+        container.pack(fill="both", expand=True)
+
         self.canvas = tk.Canvas(
-            self.parent, bg="#111111", highlightthickness=0
+            container, bg="#111111", highlightthickness=0
         )
-        self.canvas.pack(fill="both", expand=True)
+        self.v_scroll = ttk.Scrollbar(
+            container, orient="vertical", command=self.canvas.yview
+        )
+        self.h_scroll = ttk.Scrollbar(
+            container, orient="horizontal", command=self.canvas.xview
+        )
+        self.canvas.configure(
+            yscrollcommand=self.v_scroll.set,
+            xscrollcommand=self.h_scroll.set,
+        )
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.v_scroll.grid(row=0, column=1, sticky="ns")
+        self.h_scroll.grid(row=1, column=0, sticky="ew")
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
         self._canvas_image_id: int | None = None
+
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
 
     def refresh(self) -> None:
         self._refresh()
@@ -143,7 +189,11 @@ class PdfPreviewPanel:
         self.parent.update_idletasks()
         cw = max(300, self.canvas.winfo_width() - 20)
         ch = max(200, self.canvas.winfo_height() - 20)
-        img.thumbnail((cw, ch), Image.LANCZOS)
+        fit = min(cw / img.width, ch / img.height)
+        target_w = max(1, int(img.width * fit * self._zoom))
+        target_h = max(1, int(img.height * fit * self._zoom))
+        if (target_w, target_h) != img.size:
+            img = img.resize((target_w, target_h), Image.LANCZOS)
         self._tk_image = ImageTk.PhotoImage(img)
 
         if self._canvas_image_id is not None:
@@ -186,6 +236,24 @@ class PdfPreviewPanel:
         if self._sheet_index < len(self._sheets) - 1:
             self._sheet_index += 1
             self._render_current()
+
+    # -- zoom (persistent across sheets) -----------------------------------
+
+    def zoom_in(self) -> None:
+        """Zoom one step in; the level carries over to the next sheet."""
+        self._set_zoom(self._zoom * ZOOM_STEP)
+
+    def zoom_out(self) -> None:
+        """Zoom one step out; the level carries over to the next sheet."""
+        self._set_zoom(self._zoom / ZOOM_STEP)
+
+    def _set_zoom(self, value: float) -> None:
+        self._zoom = min(ZOOM_MAX, max(ZOOM_MIN, value))
+        self.zoom_label_var.set(f"Zoom: {int(round(self._zoom * 100))}%")
+        self._render_current()
+
+    def _on_mousewheel(self, event) -> None:
+        self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
 
 def main() -> None:

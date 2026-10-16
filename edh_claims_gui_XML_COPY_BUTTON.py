@@ -31,6 +31,7 @@ from gui.agent_plan_tab import AgentPlanFrame
 from gui.claims_agent_tab import ClaimsAgentFrame
 from gui.claim_attachments_tab import ClaimAttachmentsFrame
 from claims_checker import (
+    describe_folder_contents,
     list_folders_missing_xml,
     list_folders_without_xml,
     output_dir_has_xml,
@@ -129,6 +130,16 @@ THEMES = {
         "log_bg": "#020617", "log_fg": "#E2E8F0",
     },
 }
+
+# Folder-column split (operator request 2026-10-15). The Output/Ready
+# column starts at FOLDER_SPLIT_DEFAULT px and can be dragged between
+# FOLDER_SPLIT_MIN and (window - left rail - sash - right minimum).
+FOLDER_SPLIT_DEFAULT = 420
+FOLDER_SPLIT_MIN = 220
+FOLDER_SPLIT_MAX = 10000
+FOLDER_SPLIT_RIGHT_MIN = 260
+FOLDER_SPLIT_LEFT_RAIL = 400
+FOLDER_SASH_WIDTH = 6
 
 DEFAULT_DOCTORS = [
     {
@@ -1399,6 +1410,9 @@ class EDHClaimsGUI(tk.Tk):
         if hasattr(self, "folder_list_boxes"):
             for listbox in self.folder_list_boxes:
                 listbox.configure(bg=self.colors["panel"], fg=self.colors["ink"])
+                self._apply_zebra_stripes(listbox)
+        if getattr(self, "folder_sash", None) is not None:
+            self.folder_sash.configure(bg=self.colors["line"])
         if self.hbsys_status_label is not None:
             self.hbsys_status_label.configure(bg=self.colors["bg"])
         if self.hbsys_warning_label is not None:
@@ -1531,8 +1545,22 @@ class EDHClaimsGUI(tk.Tk):
         body = ttk.Frame(self.dashboard_tab)
         body.pack(fill="both", expand=True, pady=(12, 0))
 
+        # Operator request 2026-10-15: the Output/Ready column and the
+        # Incomplete/No-XML column are resizable via a draggable sash.
+        # A grid split is used instead of tk.PanedWindow because panes
+        # of a PanedWindow do not paint on this Tk build (they report
+        # correct geometry but stay blank). Columns: 0 = fixed
+        # Production Actions rail, 1 = resizable Output/Ready column,
+        # 2 = the sash, 3 = Incomplete/No-XML + logs (absorbs the rest).
+        # Dragging only changes column 1's minsize.
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, minsize=FOLDER_SPLIT_LEFT_RAIL, weight=0)
+        body.columnconfigure(1, minsize=FOLDER_SPLIT_DEFAULT, weight=0)
+        body.columnconfigure(2, minsize=FOLDER_SASH_WIDTH, weight=0)
+        body.columnconfigure(3, weight=1)
+
         left = ttk.Frame(body, width=400)
-        left.pack(side="left", fill="y", padx=(0, 10))
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         left.pack_propagate(False)
         left_canvas = tk.Canvas(
             left,
@@ -1559,13 +1587,26 @@ class EDHClaimsGUI(tk.Tk):
         )
 
         middle = ttk.Frame(body)
-        middle.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        middle.grid(row=0, column=1, sticky="nsew")
         middle.columnconfigure(0, weight=1)
         middle.rowconfigure(0, weight=1)
         middle.rowconfigure(1, weight=1)
 
+        self.folder_split_body = body
+        self.middle_folders_frame = middle
+
+        # Draggable divider between the two folder columns.
+        self.folder_sash = tk.Frame(
+            body,
+            width=6,
+            bg=self.colors["line"],
+            cursor="sb_h_double_arrow",
+        )
+        self.folder_sash.grid(row=0, column=2, sticky="ns")
+        self._bind_folder_sash()
+
         right = ttk.Frame(body)
-        right.pack(side="right", fill="both", expand=True)
+        right.grid(row=0, column=3, sticky="nsew")
         right.columnconfigure(0, weight=1)
         right.rowconfigure(0, weight=1)
         right.rowconfigure(1, weight=2)
@@ -3796,15 +3837,106 @@ class EDHClaimsGUI(tk.Tk):
         self.folder_list_boxes.append(listbox)
         return card, listbox
 
-    def populate_folder_list(self, card, listbox, base_title, root):
-        """Refresh one folder name panel; the title shows the folder count."""
+    def _bind_folder_sash(self):
+        """Wire the draggable divider between the two folder columns.
+
+        Operator request 2026-10-15. Press records the starting width,
+        drag moves column 1's minsize, double-click restores the
+        default. Hover tint makes the divider discoverable.
+        """
+        self.folder_sash.bind("<Button-1>", self._on_folder_sash_press)
+        self.folder_sash.bind("<B1-Motion>", self._on_folder_sash_drag)
+        self.folder_sash.bind(
+            "<Double-Button-1>",
+            lambda _event: self.reset_folder_split(),
+        )
+        self.folder_sash.bind(
+            "<Enter>",
+            lambda _event: self.folder_sash.configure(
+                bg=self.colors["primary_soft"]),
+        )
+        self.folder_sash.bind(
+            "<Leave>",
+            lambda _event: self.folder_sash.configure(
+                bg=self.colors["line"]),
+        )
+
+    def _on_folder_sash_press(self, event):
+        self._folder_sash_start_x = event.x_root
+        width = self.middle_folders_frame.winfo_width()
+        if width <= 1:
+            # Window not laid out yet (e.g. withdrawn): fall back to the
+            # column's current minsize, which mirrors the real width.
+            width = int(self.folder_split_body.columnconfigure(1)["minsize"])
+        self._folder_sash_start_width = width
+
+    def _on_folder_sash_drag(self, event):
+        body = self.folder_split_body
+        start_x = getattr(self, "_folder_sash_start_x", event.x_root)
+        start_w = getattr(
+            self, "_folder_sash_start_width",
+            self.middle_folders_frame.winfo_width())
+        total = body.winfo_width()
+        if total > 1:
+            left_rail = int(body.columnconfigure(0)["minsize"])
+            upper = max(
+                FOLDER_SPLIT_MIN,
+                total - left_rail - FOLDER_SASH_WIDTH
+                - FOLDER_SPLIT_RIGHT_MIN)
+        else:
+            # Not laid out yet: enforce only the floor; the next real
+            # drag re-clamps against the actual window width.
+            upper = FOLDER_SPLIT_MAX
+        width = start_w + (event.x_root - start_x)
+        width = max(FOLDER_SPLIT_MIN, min(upper, width))
+        body.columnconfigure(1, minsize=int(width))
+
+    def reset_folder_split(self):
+        """Restore the default Output/Ready column width."""
+        self.folder_split_body.columnconfigure(
+            1, minsize=FOLDER_SPLIT_DEFAULT)
+
+    def _apply_zebra_stripes(self, listbox):
+        """Alternate row backgrounds for readability (operator 2026-10-15).
+
+        Even rows use the theme panel color, odd rows the theme bg —
+        a subtle pair in all four themes. Selection highlight is
+        untouched (Tk draws it over the item background).
+        """
+        even = self.colors["panel"]
+        odd = self.colors["bg"]
+        for index in range(listbox.size()):
+            try:
+                listbox.itemconfig(
+                    index, background=even if index % 2 == 0 else odd)
+            except Exception:
+                pass
+
+    def populate_folder_list(self, card, listbox, base_title, root,
+                             with_contents=False):
+        """Refresh one folder name panel; the title shows the folder count.
+
+        Operator request 2026-10-15: with_contents=True appends each
+        folder's PDF/XML badge (claims_checker.describe_folder_contents)
+        so the Output panel shows what every folder holds without
+        opening it. Filename-only scan — no OCR, no slowdown.
+        """
         names, total = self.list_subfolder_names(root)
         listbox.delete(0, "end")
         if names:
             for name in names:
-                listbox.insert("end", name)
+                row = name
+                if with_contents:
+                    try:
+                        badge = describe_folder_contents(
+                            os.path.join(root, name))
+                    except Exception:
+                        badge = "[unreadable]"
+                    row = f"{name}  {badge}"
+                listbox.insert("end", row)
         else:
             listbox.insert("end", "(no folders)")
+        self._apply_zebra_stripes(listbox)
         card.configure(text=f"{base_title} ({total})")
 
     def refresh_folder_lists(self):
@@ -3816,6 +3948,7 @@ class EDHClaimsGUI(tk.Tk):
             self.output_folders_list,
             "Output Folders",
             self.settings.get("output_folder", ""),
+            with_contents=True,
         )
         self.populate_folder_list(
             self.ready_folders_card,
@@ -3853,6 +3986,7 @@ class EDHClaimsGUI(tk.Tk):
                 self.no_xml_list.insert("end", row)
         else:
             self.no_xml_list.insert("end", "(none)")
+        self._apply_zebra_stripes(self.no_xml_list)
         self.no_xml_card.configure(text=f"Patients Without XML ({total})")
 
     def refresh_check_missing_button_state(self):

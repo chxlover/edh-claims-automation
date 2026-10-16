@@ -50,6 +50,7 @@ import pyautogui
 from PIL import Image
 from pywinauto import Desktop
 
+from core import unicode_typing
 from core.add_claims_ocr import (
     HighlightedRow,
     capture_popup,
@@ -209,7 +210,11 @@ class AddClaimsOperator:
     def write(self, text: str) -> None:
         self.log_action(f"type {text!r}")
         if self.live:
-            pyautogui.write(text, interval=0.01)
+            if not unicode_typing.can_type(text):
+                self.log_action(
+                    "non-ASCII text - Unicode keystroke fallback (enye/accents)"
+                )
+            unicode_typing.write_text(text, interval=0.01)
         self.maybe_wait()
 
     def verify_screen_layout(self) -> None:

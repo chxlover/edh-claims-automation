@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core import unicode_typing  # noqa: E402
 from core.xml_output_checker import (  # noqa: E402
     REQUIRED_XML_KINDS,
     find_existing_xml_kinds,
@@ -209,7 +210,11 @@ class XmlGeneratorOperator:
     def write(self, text: str) -> None:
         self.log_action(f"type {text!r}")
         if self.live:
-            pyautogui.write(text, interval=0.01)
+            if not unicode_typing.can_type(text):
+                self.log_action(
+                    "non-ASCII text - Unicode keystroke fallback (enye/accents)"
+                )
+            unicode_typing.write_text(text, interval=0.01)
         self.maybe_wait()
 
     def focus_hbsys(self) -> None:

@@ -449,6 +449,59 @@ class ListFoldersMissingXmlTests(unittest.TestCase):
         self.assertTrue(rows[0].endswith("(2/3)"))
 
 
+class FolderContentsBadgeTests(unittest.TestCase):
+    """Operator request 2026-10-15: dashboard rows show folder contents."""
+
+    def setUp(self):
+        self.temporary = TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def _folder(self, name, files):
+        folder = self.root / name
+        folder.mkdir(parents=True, exist_ok=True)
+        for filename in files:
+            (folder / filename).write_text("x", encoding="utf-8")
+        return folder
+
+    def test_badge_lists_pdfs_and_xml_count(self):
+        folder = self._folder("PATIENT", ["CSF.pdf", "COE.pdf", "DTR.pdf",
+                                          "PATIENT-260924150960_CF4.xml"])
+        self.assertEqual(claims_checker.describe_folder_contents(folder),
+                         "[CSF COE DTR | XML 1/3]")
+
+    def test_badge_canonical_order_not_filename_order(self):
+        folder = self._folder("PATIENT", ["PBC.pdf", "MRF.pdf", "CSF.pdf"])
+        self.assertEqual(claims_checker.describe_folder_contents(folder),
+                         "[CSF MRF PBC | XML 0/3]")
+
+    def test_badge_empty_folder(self):
+        folder = self._folder("PATIENT", [])
+        self.assertEqual(claims_checker.describe_folder_contents(folder),
+                         "[no PDFs | XML 0/3]")
+
+    def test_badge_cf3_folder_shows_two(self):
+        folder = self._folder("NSD", ["CF3.pdf", "SOA1.pdf",
+                                      "NSD-260924150960_CF5.xml",
+                                      "NSD-260924150960_eSOA.xml"])
+        self.assertEqual(claims_checker.describe_folder_contents(folder),
+                         "[SOA1 CF3 | XML 2/2]")
+
+    def test_badge_unreadable_folder(self):
+        self.assertEqual(
+            claims_checker.describe_folder_contents(self.root / "MISSING"),
+            "[unreadable]")
+
+    def test_badge_uses_checker_rules(self):
+        # Same stems the requirement check detects (incl. lowercase).
+        folder = self._folder("PATIENT", ["cf2.pdf", "mmc.pdf"])
+        badge = claims_checker.describe_folder_contents(folder)
+        self.assertIn("CF2", badge)
+        self.assertIn("MMC", badge)
+
+
 class OutputDirHasXmlTests(unittest.TestCase):
     def setUp(self):
         self.temporary = TemporaryDirectory()

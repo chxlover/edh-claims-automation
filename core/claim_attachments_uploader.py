@@ -59,6 +59,7 @@ import pyautogui
 from PIL import Image, ImageDraw
 from pywinauto import Desktop
 
+from core import unicode_typing
 from core.add_claims_verifier import FolderDates, parse_folder_name
 from core.attachments_state import AttachmentsState
 from core.claim_attachments_doctype_audit import (
@@ -387,7 +388,11 @@ class AttachmentsOperator:
     def write(self, text: str) -> None:
         self.log_action(f"type {text!r}")
         if self.live:
-            pyautogui.write(text, interval=0.01)
+            if not unicode_typing.can_type(text):
+                self.log_action(
+                    "non-ASCII text - Unicode keystroke fallback (enye/accents)"
+                )
+            unicode_typing.write_text(text, interval=0.01)
         self.maybe_wait()
 
     def verify_screen_layout(self) -> None:
@@ -461,9 +466,11 @@ class AttachmentsOperator:
         pyautogui.press("delete")
         sleep_short(0.2)
 
-        # Type patient name
+        # Type patient name. Non-ASCII characters (e.g. the enye in
+        # DOÑA) are dropped by pyautogui.write, so route through the
+        # Unicode fallback when needed (core.unicode_typing).
         self.log_action(f"typing patient name: {patient_name!r}")
-        pyautogui.write(patient_name, interval=0.02)
+        unicode_typing.write_text(patient_name, interval=0.02)
         sleep_short(0.5)
 
         # Click Search button — double-click to ensure it registers
@@ -1480,7 +1487,14 @@ class AttachmentsOperator:
         sleep_short(0.1)
         pyautogui.press("delete")
         sleep_short(0.1)
-        pyautogui.write(folder_path, interval=0.01)
+        # Folder paths carry the patient name, so they can contain the
+        # enye (e.g. ...\DOÑA, JENNIFER ...). pyautogui.write drops it;
+        # route through the Unicode-safe helper.
+        if not unicode_typing.can_type(folder_path):
+            self.log_action(
+                "non-ASCII path - Unicode keystroke fallback (enye/accents)"
+            )
+        unicode_typing.write_text(folder_path, interval=0.01)
         sleep_short(0.5)
 
         # Press Enter to navigate to the folder

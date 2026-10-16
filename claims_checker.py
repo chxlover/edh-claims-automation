@@ -298,6 +298,38 @@ def list_folders_missing_xml(root):
     return rows, len(rows)
 
 
+#: Document codes shown in folder badges, in canonical order (same list
+#: the requirement check detects via ``get_found_items``).
+BADGE_DOC_ORDER = (
+    "CSF", "COE", "SOA1", "SOA2", "CF2", "CF3",
+    "MRF", "PBC", "MMC", "ANR", "OPR", "DTR",
+)
+
+
+def describe_folder_contents(folder) -> str:
+    """Short bracket tag of a patient folder's PDFs + XML count.
+
+    Operator request 2026-10-15: the dashboard Output Folders panel
+    shows what each folder holds without opening it, e.g.
+    ``CABLING, ...  [CSF COE SOA1 DTR MRF PBC | XML 0/3]``.
+
+    Filename-only scan (no OCR, no DB): document presence uses the
+    SAME ``has_pdf`` rule as the requirement check and the XML count
+    uses ``required_xml_kinds`` (CF3 folders show ``n/2``), so the
+    badge can never disagree with the checker's verdict. Scan errors
+    yield ``[unreadable]`` — never guessed.
+    """
+    try:
+        folder = Path(folder)
+        docs = [doc for doc in BADGE_DOC_ORDER if has_pdf(folder, doc)]
+        kinds = required_xml_kinds(folder)
+        xml_found = sum(1 for kind in kinds if has_xml(folder, kind))
+    except OSError:
+        return "[unreadable]"
+    parts = " ".join(docs) if docs else "no PDFs"
+    return f"[{parts} | XML {xml_found}/{len(kinds)}]"
+
+
 def list_folders_without_xml(root):
     """Return (sorted folder names with no XML, total) under root.
 
