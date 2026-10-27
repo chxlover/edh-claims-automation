@@ -38,6 +38,54 @@ changes and must not be recorded individually.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
 
+### 2026-10-27 - Feature: XML Clicker focus via taskbar icon (image recognition)
+
+Reason:
+
+Operator suggestion 2026-10-27: "mas ok cguro kung icheck mo sa task
+bar ang icon ng xml clicker ... C:\\claims_bot\\eclaims_icon.png
+ganyan ang image na iclick mo." set_focus() on the custom-drawn 4GL
+HBSys windows (FNWND370 / FNWND3115) often fails silently, leaving
+the wrong window in the foreground; clicking the pinned taskbar icon
+reliably raises the whole HBSys application.
+
+Files modified:
+
+- `date_fill_hbsys/xml_generator_clicker.py` —
+  (a) `_eclaims_icon_path()` resolves the icon image (absolute
+      C:\\claims_bot\\eclaims_icon.png, with a repo-relative fallback);
+  (b) `focus_via_taskbar_icon()` uses pyautogui.locateOnScreen
+      (confidence 0.8, grayscale) with 5 retries, then clicks the
+      centre of the matched region; returns True/False;
+  (c) `focus_hbsys()` now calls it before the existing set_focus()
+      loop, so the application is raised first and set_focus() only
+      confirms.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: focus relied on Desktop enumeration + set_focus(),
+which silently fails on 4GL windows and leaves a stray window on top.
+
+Behavior after: the taskbar icon is located by image and clicked first
+(bringing HBSys to the foreground reliably); set_focus() remains as a
+fallback/confirmation. Dry-run mode is a safe no-op. If the icon
+image is missing or not found, the run continues with the previous
+behaviour (no crash).
+
+Safety / compatibility:
+
+- No new dependency (pyautogui.locateOnScreen uses the already-
+  installed opencv for the confidence match; grayscale keeps it fast).
+- Best-effort and fail-open: every failure is logged and the run
+  continues with set_focus().
+- Only affects the XML Clicker; Date Fill / Final Bill keep their
+  existing raise_to_top + set_focus + verify flow.
+
+Verification:
+
+- `python -m py_compile date_fill_hbsys/xml_generator_clicker.py` — OK.
+- Icon image verified present: C:\\claims_bot\\eclaims_icon.png
+  (45x37, RGB).
+
 ### 2026-10-27 - Fix: window-crossing hardening for Date Fill -> Final Bill -> XML Clicker
 
 Reason:

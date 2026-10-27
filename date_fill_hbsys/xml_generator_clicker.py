@@ -246,6 +246,14 @@ class XmlGeneratorOperator:
                 self.log_action(f"HBSys screen after go_home: {after.screen}")
         except Exception as exc:  # noqa: BLE001 - best-effort, never block
             self.log_action(f"screen detection skipped: {exc}")
+
+        # Bring HBSys to the foreground via its taskbar icon (image
+        # recognition). set_focus() on a custom-drawn 4GL window often
+        # fails silently, while clicking the pinned taskbar icon reliably
+        # raises the whole application. Fall back to set_focus() below if
+        # the icon cannot be located.
+        self.focus_via_taskbar_icon()
+
         windows = [
             window
             for window in Desktop(backend="win32").windows()
@@ -295,6 +303,58 @@ class XmlGeneratorOperator:
                 self.maybe_wait()
                 return
             time.sleep(0.15)
+
+    def _eclaims_icon_path(self):
+        """Path to the taskbar icon image, or None if unavailable."""
+        candidates = [
+            Path(r"C:\claims_bot\eclaims_icon.png"),
+            Path(__file__).resolve().parent.parent / "eclaims_icon.png",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def focus_via_taskbar_icon(self) -> bool:
+        """Bring HBSys to the foreground by clicking its taskbar icon.
+
+        Uses image recognition (pyautogui.locateOnScreen) on the pinned
+        taskbar icon, which is more reliable than set_focus() for the
+        custom-drawn 4GL windows. Returns True when the icon was found
+        and clicked. Safe no-op in dry-run mode.
+        """
+        if not self.live:
+            return False
+        icon_path = self._eclaims_icon_path()
+        if icon_path is None:
+            self.log_action(
+                "taskbar icon image not found - falling back to set_focus()"
+            )
+            return False
+        self.log_action(f"locating taskbar icon: {icon_path}")
+        for attempt in range(5):
+            try:
+                location = pyautogui.locateOnScreen(
+                    str(icon_path), confidence=0.8, grayscale=True
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                self.log_action(f"locateOnScreen failed: {exc}")
+                location = None
+            if location is not None:
+                try:
+                    center = pyautogui.center(location)
+                    self.log_action(
+                        f"taskbar icon found at {center} - clicking"
+                    )
+                    pyautogui.click(center)
+                    sleep_short(1.0)
+                    return True
+                except Exception as exc:  # noqa: BLE001
+                    self.log_action(f"taskbar click failed: {exc}")
+                    return False
+            sleep_short(0.4)
+        self.log_action("taskbar icon not found on screen")
+        return False
 
     def close_stale_select_encounter(self) -> None:
         if not self.live:
