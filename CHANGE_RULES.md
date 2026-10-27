@@ -38,6 +38,72 @@ changes and must not be recorded individually.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
 
+### 2026-10-27 - Feature: Workflow tab "Enable All / Disable All" + quick checklist
+
+Reason:
+
+Operator request 2026-10-27: "sa may workflow tab meron kasing
+enable ang gusto ko may enable all. para mabilis i enable at
+disable tapos dapat may check list din ng workflow na para iclick
+kung eenable at disable kasi ang nangyayari iclick mo pa ung
+specific workflow then icheck ang enable bigyan mo ako paano
+mapapabilis yun."
+
+The previous UI only allowed toggling one node at a time: pick a
+row in the Execution Order list, then tick the single "Enabled"
+checkbox in the "Selected Node" panel. For a 9-node workflow that
+meant 9 select-and-toggle cycles just to enable or disable all.
+
+Files modified:
+
+- `gui/workflow_tab.py` —
+  (a) new `enable_all()` / `disable_all()` methods that flip every
+      node's `enabled` flag in one click;
+  (b) a new "Quick Enable (checklist)" panel beside the Execution
+      Order list: a scrollable frame with one Checkbutton per node,
+      each bound to that node's `enabled` flag, so a node can be
+      enabled/disabled by clicking its checkbox directly without
+      selecting the row first;
+  (c) `_refresh_checklist()` rebuilds the checkbuttons whenever
+      `_refresh_order_list()` runs, keeping the checklist in sync
+      with the list (selection, reorder, add, delete, restore
+      default, run status);
+  (d) `_on_checklist_toggle(node_id)` applies the new state and
+      refreshes the list.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: enabling/disabling N nodes required N select-and-
+toggle cycles through the "Selected Node" panel.
+
+Behavior after: one click on "Enable All" / "Disable All" toggles
+every node; each node can also be flipped directly from its own
+checkbox in the checklist; the order list, the selected-node
+"Enabled" checkbox, and the checklist all stay in sync.
+
+Safety / compatibility:
+
+- No engine, registry, adapter, persistence, or condition change.
+  `NodeInstance.enabled` is the single source of truth; the
+  checklist only mirrors it.
+- Existing tests (`tests.test_gui_workflow_tab_conditions`,
+  12 tests) still pass; the Listbox-based `order_list` API used
+  by them is untouched, so nothing in the test suite breaks.
+- The `__main__` self-test block at the bottom of the module has
+  pre-existing stale assertions (it expects the default workflow
+  to start with `claims_processor`, while the shipped default now
+  starts with `fees_checker`); unrelated to this change and left
+  untouched. Verified the feature instead with a standalone
+  instantiation check (enable_all / disable_all / per-node toggle
+  all round-trip correctly).
+
+Verification:
+
+- `.venv\\Scripts\\python.exe -m unittest tests.test_gui_workflow_tab_conditions`
+  — 12 tests OK.
+- Standalone instantiation check (enable_all / disable_all /
+  per-node checklist toggle) — OK.
+- `python -m py_compile gui/workflow_tab.py` — OK.
+
 ### 2026-10-16 - Fix: non-ASCII text (the enye in DOÑA) was dropped by pyautogui.write
 
 Reason:

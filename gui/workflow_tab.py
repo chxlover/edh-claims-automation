@@ -230,6 +230,49 @@ class WorkflowFrame(ttk.Frame):
             wraplength=230,
         ).pack(fill="x", pady=(6, 0))
 
+        # -- quick enable/disable checklist -----------------------------------
+        # Lets the operator flip several nodes' enabled state at once
+        # without selecting each row in the list (faster than the
+        # per-node "Enabled" checkbox above).
+        checklist_box = ttk.LabelFrame(
+            body, text="Quick Enable (checklist)", padding=6
+        )
+        checklist_box.grid(row=0, column=2, sticky="ns", padx=(8, 0))
+        checklist_box.rowconfigure(1, weight=1)
+        checklist_box.columnconfigure(0, weight=1)
+        chk_btns = ttk.Frame(checklist_box)
+        chk_btns.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Button(
+            chk_btns, text="Enable All", command=self.enable_all
+        ).pack(side="left", expand=True, fill="x", padx=(0, 2))
+        ttk.Button(
+            chk_btns, text="Disable All", command=self.disable_all
+        ).pack(side="left", expand=True, fill="x", padx=(2, 0))
+        chk_canvas = tk.Canvas(
+            checklist_box, highlightthickness=0, width=220, height=260
+        )
+        chk_scroll = ttk.Scrollbar(
+            checklist_box, orient="vertical", command=chk_canvas.yview
+        )
+        chk_canvas.configure(yscrollcommand=chk_scroll.set)
+        chk_canvas.grid(row=1, column=0, sticky="nsew")
+        chk_scroll.grid(row=1, column=1, sticky="ns")
+        self._checklist_inner = ttk.Frame(chk_canvas)
+        self._checklist_window = chk_canvas.create_window(
+            (0, 0), window=self._checklist_inner, anchor="nw"
+        )
+        self._checklist_inner.bind(
+            "<Configure>",
+            lambda e, c=chk_canvas: c.configure(scrollregion=c.bbox("all")),
+        )
+        chk_canvas.bind(
+            "<Configure>",
+            lambda e, c=chk_canvas, w=self._checklist_window: c.itemconfig(
+                w, width=e.width
+            ),
+        )
+        self._checklist_vars: dict[str, tk.BooleanVar] = {}
+
         # -- controls ------------------------------------------------------------
         controls = ttk.Frame(self)
         controls.pack(fill="x", pady=(8, 0))
@@ -328,6 +371,20 @@ class WorkflowFrame(ttk.Frame):
         self._log(f"Deleted node (workflow only — module untouched): {label}")
         self._refresh_order_list()
 
+    def enable_all(self) -> None:
+        """Enable every node in the workflow (one click)."""
+        for node in self.config.nodes:
+            node.enabled = True
+        self._log("All nodes enabled")
+        self._refresh_order_list()
+
+    def disable_all(self) -> None:
+        """Disable every node in the workflow (one click)."""
+        for node in self.config.nodes:
+            node.enabled = False
+        self._log("All nodes disabled")
+        self._refresh_order_list()
+
     def toggle_enabled(self) -> None:
         node_id = self._selected_node_id_from_list()
         if node_id is None:
@@ -340,6 +397,41 @@ class WorkflowFrame(ttk.Frame):
         state = "enabled" if node.enabled else "disabled"
         self._log(f"Node {state}: {NODE_REGISTRY[node.node_type].label}")
         self._refresh_order_list()
+
+    def _on_checklist_toggle(self, node_id: str) -> None:
+        """Flip a node's enabled flag from the quick checklist."""
+        node = self._find_node(node_id)
+        if node is None:
+            return
+        var = self._checklist_vars.get(node_id)
+        new_state = bool(var.get()) if var is not None else node.enabled
+        if node.enabled == new_state:
+            return
+        node.enabled = new_state
+        state = "enabled" if node.enabled else "disabled"
+        spec = NODE_REGISTRY.get(node.node_type)
+        label = spec.label if spec else node.node_type
+        self._log(f"Node {state}: {label}")
+        self._refresh_order_list()
+
+    def _refresh_checklist(self) -> None:
+        """Rebuild the quick-enable checkbuttons to mirror config.nodes."""
+        if not hasattr(self, "_checklist_inner"):
+            return
+        for child in self._checklist_inner.winfo_children():
+            child.destroy()
+        self._checklist_vars.clear()
+        for node in sorted(self.config.nodes, key=lambda n: n.order):
+            spec = NODE_REGISTRY.get(node.node_type)
+            label = spec.label if spec else node.node_type
+            var = tk.BooleanVar(value=node.enabled)
+            self._checklist_vars[node.id] = var
+            ttk.Checkbutton(
+                self._checklist_inner,
+                text=label,
+                variable=var,
+                command=lambda nid=node.id: self._on_checklist_toggle(nid),
+            ).pack(anchor="w", fill="x", pady=1)
 
     def move_node(self, direction: int) -> None:
         """Move the selected node up/down in the execution order."""
@@ -463,6 +555,7 @@ class WorkflowFrame(ttk.Frame):
                     self.order_list.selection_set(index)
                     self.order_list.see(index)
                     break
+        self._refresh_checklist()
         self._refresh_selection_info()
 
     def _refresh_selection_info(self) -> None:
