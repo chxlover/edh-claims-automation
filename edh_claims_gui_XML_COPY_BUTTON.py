@@ -4356,6 +4356,12 @@ class EDHClaimsGUI(tk.Tk):
         def append():
             self.log_text.insert("end", message + "\n")
             self.log_text.see("end")
+            overlay = getattr(self, "run_status_overlay", None)
+            if overlay is not None:
+                try:
+                    overlay.append_log(message)
+                except Exception:
+                    pass
         self.after(0, append)
 
     def clear_logs(self):

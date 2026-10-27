@@ -31,6 +31,7 @@ Standalone demo / visual check:
 
 from __future__ import annotations
 
+import collections
 import tkinter as tk
 from pathlib import Path
 
@@ -77,8 +78,10 @@ class RunStatusOverlay:
     """Display-only draggable robot status window near the taskbar start corner."""
 
     WIDTH = 288
-    HEIGHT = 70              # 52 + the extra patient-count row
+    HEIGHT = 130             # 52 + count row + ~4 live-log lines
     COUNT_ROW_HEIGHT = 18    # px of the "Date Fill N left" line
+    LOG_LINES = 4            # how many recent log lines the tail shows
+    LOG_CHAR_LIMIT = 52      # truncate long lines so the tail stays compact
     MARGIN_X = 10
     TASKBAR_GAP = 54         # sits just above the taskbar / Start corner
     ROBOT = 44               # robot icon size (px)
@@ -99,6 +102,9 @@ class RunStatusOverlay:
         self._running = False
         self._label = "Idle"
         self._count = ""      # remaining patients ("Date Fill 2 left" or "")
+        self._log_lines: collections.deque = collections.deque(
+            maxlen=self.LOG_LINES
+        )
         self._icon_photo: tk.PhotoImage | None = None
         self._eye_ids: list[tuple[int, int]] = []
 
@@ -165,6 +171,22 @@ class RunStatusOverlay:
         )
         self.count_label.grid(row=2, column=1, sticky="w", padx=(0, 8), pady=(0, 6))
 
+        # -- live log tail (last few lines of what the script is doing) -------
+        self.log_label = tk.Label(
+            self.frame,
+            text="",
+            bg=COL_BG,
+            fg="#94A3B8",
+            font=("Consolas", 7),
+            justify="left",
+            anchor="nw",
+            wraplength=self.WIDTH - 70,
+        )
+        self.log_label.grid(
+            row=3, column=1, columnspan=2, sticky="nw",
+            padx=(0, 8), pady=(0, 6),
+        )
+
         # -- status lamp dot (the static icon cannot blink) ---------------
         self.lamp_canvas = tk.Canvas(
             self.frame,
@@ -193,6 +215,7 @@ class RunStatusOverlay:
         self._running = False
         self._label = "Idle"
         self._count = ""
+        self._log_lines.clear()
         self._apply_state()
 
     def set_running(self, label: str = "Running") -> None:
@@ -203,6 +226,7 @@ class RunStatusOverlay:
             # restart the blink / shine / dots animation
             self._blink_on = True
             self._phase = 0
+            self._log_lines.clear()
         self._apply_state()
 
     def set_count(self, count: str = "") -> None:
@@ -217,6 +241,30 @@ class RunStatusOverlay:
         if text == self._count:
             return
         self._count = text
+        self._apply_state()
+
+    def append_log(self, line: str) -> None:
+        """Append one live log line to the tail (display-only)."""
+        text = str(line or "").strip()
+        if not text:
+            return
+        if len(text) > self.LOG_CHAR_LIMIT:
+            text = text[: self.LOG_CHAR_LIMIT - 1] + "…"
+        if self._log_lines and self._log_lines[-1] == text:
+            return  # de-dupe consecutive identical lines
+        self._log_lines.append(text)
+        self._apply_state()
+
+    def set_log_lines(self, lines) -> None:
+        """Replace the whole tail (display-only)."""
+        self._log_lines.clear()
+        for line in (lines or []):
+            text = str(line or "").strip()
+            if not text:
+                continue
+            if len(text) > self.LOG_CHAR_LIMIT:
+                text = text[: self.LOG_CHAR_LIMIT - 1] + "…"
+            self._log_lines.append(text)
         self._apply_state()
 
     @property
@@ -386,6 +434,9 @@ class RunStatusOverlay:
         self.count_label.configure(
             text=self._count,
             fg=COL_TEXT_COUNT,
+        )
+        self.log_label.configure(
+            text="\n".join(self._log_lines),
         )
         self.refresh_visibility()
 

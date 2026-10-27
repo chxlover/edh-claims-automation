@@ -38,6 +38,57 @@ changes and must not be recorded individually.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
 
+### 2026-10-27 - Feature: Run-status overlay shows live log tail
+
+Reason:
+
+Operator request 2026-10-27: "ilagay mo nga sa overlay ang logs kung
+ano ang ginagawa ng script para alam ko kung nasaan na ang script na
+nag rurun." The overlay previously showed only the status line
+("Script running..." / "Workflow running...") plus the remaining-
+patient count; the operator could not see WHAT the automation was
+doing at the moment (typing a patient name, searching, Final Bill
+OK, XML Clicker CF4 done, etc.) without looking at the main GUI log.
+
+Files modified:
+
+- `gui/run_status_overlay.py` —
+  (a) new `append_log(line)` / `set_log_lines(lines)` methods and a
+      `_log_lines` deque (max 4, each line truncated to 52 chars);
+  (b) a new `log_label` (Consolas 7, left-justified) under the
+      count row showing the last few log lines;
+  (c) `_apply_state()` now refreshes `log_label`; `set_idle()` and the
+      running transition clear the tail so stale lines do not linger;
+  (d) overlay height 70 -> 130 to fit the tail.
+- `edh_claims_gui_XML_COPY_BUTTON.py` — `self.log()` now also pushes
+  each line to `run_status_overlay.append_log()` (scheduled on the
+  Tk thread; guarded against a missing overlay). Workflow lines
+  already flow through `self.log()` via `_log_with_progress`, so they
+  are covered automatically.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: the overlay showed only the status line and the
+remaining-patient count; the actual activity was visible only in the
+main GUI's Live Processing Logs panel.
+
+Behavior after: the overlay shows the last ~4 log lines of whatever the
+script/workflow is doing, updating as lines arrive, so the operator can
+see at a glance where the automation currently is (typing, searching,
+Final Bill OK, XML Clicker CF4/CF5/eSOA, ...). Idle clears the tail.
+
+Safety / compatibility:
+
+- Display-only: still never takes focus; no new input handling.
+- The overlay's poll loop (750 ms) is unchanged; append_log() is
+  called from the Tk thread via self.after(0, ...).
+- No engine/registry/adapter change.
+
+Verification:
+
+- `python -m py_compile gui/run_status_overlay.py
+  edh_claims_gui_XML_COPY_BUTTON.py` — OK.
+- Standalone overlay demo ran 4 s without crashing.
+
 ### 2026-10-27 - Feature: XML Clicker focus via taskbar icon (image recognition)
 
 Reason:
