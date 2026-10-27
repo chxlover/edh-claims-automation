@@ -171,6 +171,12 @@ class FindHbsysWindowsTests(unittest.TestCase):
             handle=3,
         )
         self.other = FakeWindow(text="Notepad", class_name="Notepad", handle=4)
+        self.ghost_title = FakeWindow(
+            text="[Ghost] HBSys - HOMIS Billing", class_name="FNWND370", handle=5
+        )
+        self.ghost_class = FakeWindow(
+            text="HBSys - HOMIS Billing", class_name="Ghost", handle=6
+        )
 
     def test_find_hbsys_windows_excludes_browsers(self):
         factory = desktop_factory(
@@ -179,6 +185,22 @@ class FindHbsysWindowsTests(unittest.TestCase):
         with mock.patch("date_fill_hbsys.hbsys_window.Desktop", factory):
             found = hbsys_window.find_hbsys_windows()
         self.assertEqual([w.handle for w in found], [1, 2])
+
+    def test_find_hbsys_windows_excludes_ghosts(self):
+        factory = desktop_factory(
+            [self.ghost_title, self.ghost_class, self.hbsys_main, self.hbsys_popup]
+        )
+        with mock.patch("date_fill_hbsys.hbsys_window.Desktop", factory):
+            found = hbsys_window.find_hbsys_windows()
+        self.assertEqual([w.handle for w in found], [1, 2])
+
+    def test_find_hbsys_window_skips_ghost_and_returns_real(self):
+        factory = desktop_factory(
+            [self.ghost_title, self.ghost_class, self.hbsys_main]
+        )
+        with mock.patch("date_fill_hbsys.hbsys_window.Desktop", factory):
+            found = hbsys_window.find_hbsys_window()
+        self.assertEqual(found.handle, 1)
 
     def test_find_hbsys_window_skips_chrome_and_returns_hbsys(self):
         factory = desktop_factory([self.chrome, self.hbsys_main, self.other])

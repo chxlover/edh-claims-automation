@@ -218,6 +218,34 @@ class XmlGeneratorOperator:
         self.maybe_wait()
 
     def focus_hbsys(self) -> None:
+        # Clear leftover popups/Billing forms from the previous nodes
+        # (Date Fill / Final Bill) before we take over the screen, so they
+        # cannot cover the Order Transactions toolbar.
+        self.close_stale_windows()
+        # Screen awareness (best-effort, never blocks the run): log the
+        # screen HBSys is currently on and recover from a blocker
+        # (dialog/unknown/closed) via Escape-only go_home() before any
+        # coordinate click. Coordinate automation is fragile, so knowing
+        # the screen is the first line of defence against mis-clicks.
+        try:
+            from core.agent import hbsys_nav, hbsys_screens
+            result = hbsys_screens.detect_screen()
+            self.log_action(f"HBSys screen on entry: {result.screen}")
+            blocker_screens = (
+                hbsys_screens.SCREEN_HBSYS_CLOSED,
+                hbsys_screens.SCREEN_DIALOG,
+                hbsys_screens.SCREEN_UNKNOWN,
+            )
+            if result.screen in blocker_screens:
+                self.log_action(
+                    "HBSys not on a usable screen - attempting go_home()"
+                )
+                nav = hbsys_nav.Navigator(log_fn=self.log_action)
+                nav.go_home()
+                after = hbsys_screens.detect_screen()
+                self.log_action(f"HBSys screen after go_home: {after.screen}")
+        except Exception as exc:  # noqa: BLE001 - best-effort, never block
+            self.log_action(f"screen detection skipped: {exc}")
         windows = [
             window
             for window in Desktop(backend="win32").windows()
@@ -286,6 +314,52 @@ class XmlGeneratorOperator:
                 pyautogui.click(rect.right - 14, rect.top + 12)
             sleep_short(0.4)
             return
+
+    def close_stale_windows(self) -> None:
+        """Close leftover popups / Billing forms that would steal the click.
+
+        Called before the XML Clicker takes over the screen: the previous
+        nodes (Date Fill, Final Bill) leave their Billing form and possibly
+        an Admit History / Rate Validation / PhilHealth Beneficiaries /
+        Select Encounter popup open, which can cover the Order Transactions
+        toolbar where the CF4/CF5/eSOA buttons live. Transient popups are
+        always safe to close; a leftover Billing form is closed too because
+        by the time the XML Clicker runs the Final Bill is already committed
+        (or was skipped). Every close is logged.
+        """
+        if not self.live:
+            return
+        stale_popup_titles = (
+            "Select Encounter",
+            "Admission History",
+            "Admit History",
+            "Rate Validation",
+            "PhilHealth Beneficiaries",
+        )
+        for window in list(Desktop(backend="win32").windows()):
+            title = window_title(window) if False else ""
+            try:
+                title = window.window_text() or ""
+            except Exception:
+                title = ""
+            is_stale_popup = title.strip() in stale_popup_titles
+            is_billing_form = title.strip().startswith("Billing (")
+            if not (is_stale_popup or is_billing_form):
+                continue
+            self.log_action(f"closing stale window before XML: {title!r}")
+            try:
+                window.set_focus()
+            except Exception:
+                pass
+            try:
+                window.close()
+            except Exception:
+                try:
+                    rect = window.rectangle()
+                    pyautogui.click(rect.right - 14, rect.top + 12)
+                except Exception:
+                    pass
+            sleep_short(0.3)
 
     def verify_screen_layout(self) -> None:
         width, height = pyautogui.size()

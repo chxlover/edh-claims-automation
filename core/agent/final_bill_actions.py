@@ -1908,6 +1908,18 @@ def load_patient_by_hospital_no(
     if main is None:
         log("load: HBSys main window not found")
         return False
+    # 2026-09-28 foreground guard (warn mode by default): Final Bill already
+    # uses raise_to_top() + set_focus() + verify, but log a warning when the
+    # foreground is not HBSys so a stray window is visible in the run log.
+    try:
+        from core.agent.window_guard import guard_input as _guard_input
+
+        _guard_input(
+            f"final bill load patient {hospital_no}",
+            log_fn=log,
+        )
+    except Exception:  # noqa: BLE001 - guard is diagnostics only
+        pass
     ensure_com_thread()
     if not raise_to_top(main):
         log("load: could not bring HBSys to the foreground — the GUI may cover it")

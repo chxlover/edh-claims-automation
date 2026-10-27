@@ -60,6 +60,15 @@ from PIL import Image, ImageDraw
 from pywinauto import Desktop
 
 from core import unicode_typing
+
+# 2026-09-28: foreground guard for the BLIND pyautogui input
+# (core/agent/window_guard.py); optional on purpose - without it the tool
+# behaves exactly as it did before.
+try:
+    from core.agent.window_guard import guard_input as _guard_input  # noqa: E402
+except Exception:  # noqa: BLE001 - the guard is diagnostics only
+    _guard_input = None
+
 from core.add_claims_verifier import FolderDates, parse_folder_name
 from core.attachments_state import AttachmentsState
 from core.claim_attachments_doctype_audit import (
@@ -366,6 +375,14 @@ class AttachmentsOperator:
     def maybe_wait(self) -> None:
         time.sleep(self.pause)
 
+    def guard_blind_input(self, action: str) -> bool:
+        if _guard_input is None:
+            return True
+        try:
+            return bool(_guard_input(action, log_fn=self.log_action))
+        except Exception:  # noqa: BLE001 - never break a run
+            return True
+
     def click(self, point: Point, label: str) -> None:
         """Click an absolute screen coordinate."""
         self.log_action(f"click {label} at ({point.x}, {point.y})")
@@ -388,6 +405,8 @@ class AttachmentsOperator:
     def write(self, text: str) -> None:
         self.log_action(f"type {text!r}")
         if self.live:
+            if not self.guard_blind_input(f"type {text!r}"):
+                return
             if not unicode_typing.can_type(text):
                 self.log_action(
                     "non-ASCII text - Unicode keystroke fallback (enye/accents)"
@@ -470,6 +489,8 @@ class AttachmentsOperator:
         # DOÑA) are dropped by pyautogui.write, so route through the
         # Unicode fallback when needed (core.unicode_typing).
         self.log_action(f"typing patient name: {patient_name!r}")
+        if not self.guard_blind_input(f"type patient name {patient_name!r}"):
+            return
         unicode_typing.write_text(patient_name, interval=0.02)
         sleep_short(0.5)
 
@@ -1490,6 +1511,8 @@ class AttachmentsOperator:
         # Folder paths carry the patient name, so they can contain the
         # enye (e.g. ...\DOÑA, JENNIFER ...). pyautogui.write drops it;
         # route through the Unicode-safe helper.
+        if not self.guard_blind_input(f"type folder path {folder_path!r}"):
+            return False
         if not unicode_typing.can_type(folder_path):
             self.log_action(
                 "non-ASCII path - Unicode keystroke fallback (enye/accents)"

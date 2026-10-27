@@ -45,13 +45,28 @@ def is_browser_window(window) -> bool:
     return window_class(window).startswith("Chrome_WidgetWin_")
 
 
+GHOST_WINDOW_CLASSES = frozenset({"Ghost"})
+GHOST_TITLE_MARKERS = ("[Ghost]",)
+
+
+def is_ghost_window(window) -> bool:
+    """True for a phantom HBSys window that must be ignored."""
+    if window_class(window) in GHOST_WINDOW_CLASSES:
+        return True
+    title = window_title(window)
+    return any(marker in title for marker in GHOST_TITLE_MARKERS)
+
+
 def is_hbsys_window(window) -> bool:
     """True when the window is the real HBSys/HOMIS application.
 
     Matches by HBSys window class or by HBSys/HOMIS title markers, and always
-    excludes browser windows even when their tab title contains "HBSys".
+    excludes browser windows and ghost (phantom) windows even when their tab
+    title contains "HBSys".
     """
     if is_browser_window(window):
+        return False
+    if is_ghost_window(window):
         return False
     if window_class(window) in HBSYS_CLASS_NAMES:
         return True

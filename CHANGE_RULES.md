@@ -38,6 +38,77 @@ changes and must not be recorded individually.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
 
+### 2026-10-27 - Fix: window-crossing hardening for Date Fill -> Final Bill -> XML Clicker
+
+Reason:
+
+The three HBSys-touching nodes (Date Fill, Final Bill, XML Clicker) all
+drive the SAME HBSys MDI window. Final Bill leaves the Billing form
+open, and the previous nodes can leave "Admit History / Rate
+Validation / PhilHealth Beneficiaries / Select Encounter" popups on
+screen. Those leftover windows cover the Order Transactions toolbar
+where the CF4/CF5/eSOA buttons live, so the XML Clicker's coordinate
+clicks land on the wrong window. On top of that, a phantom "[Ghost]"
+HBSys-titled window can outrank the real one in find_hbsys_window()
+(first match wins) and silently steal the clicks, and the engine gate
+only checked "any HBSys window exists" (not "HBSys is actually open").
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_window.py` — added `is_ghost_window()` and
+  wired it into `is_hbsys_window()` (returns False for class "Ghost" or
+  titles containing "[Ghost]"). find_hbsys_window() can no longer
+  return a phantom window.
+- `date_fill_hbsys/xml_generator_clicker.py` —
+  (a) new `close_stale_windows()` that closes transient popups
+      (Select Encounter, Admission/Admit History, Rate Validation,
+      PhilHealth Beneficiaries) and leftover "Billing (...)" forms
+      before the XML Clicker takes over the screen;
+  (b) `focus_hbsys()` now calls it first, then runs a best-effort
+      screen check (core.agent.hbsys_screens.detect_screen) and recovers
+      from a blocker (dialog/unknown/closed) via Escape-only go_home().
+- `core/workflow_engine.py` — `_hbsys_available()` now also requires
+  `detect_screen() != HBSYS_CLOSED` (in addition to find_hbsys_window()),
+  so a closed HBSys is never reported as available.
+- `core/add_claims_uploader.py`, `core/claim_attachments_uploader.py` —
+  added the same `guard_blind_input` (warn mode, fail-open) that the
+  XML Clicker already had, called before typing in `write()` and (for
+  claim attachments) before typing the patient name and folder path.
+- `core/agent/final_bill_actions.py` — `load_patient_by_hospital_no()`
+  now calls `guard_input` (warn mode) before typing, in addition to the
+  existing raise_to_top + set_focus + verify.
+- `tests/test_hbsys_window.py` — +3 tests (ghost title excluded, ghost
+  class excluded, find_hbsys_window skips ghost and returns the real one).
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: the XML Clicker took over a screen possibly covered by
+a leftover Billing form / popup, and a ghost HBSys window could outrank
+the real one; the engine gate passed whenever ANY window matched.
+
+Behavior after: ghost windows are ignored; leftover popups/Billing forms
+are closed before the XML Clicker clicks; the screen is logged and
+blockers are cleared via Escape; the engine gate requires HBSys to be
+actually open; Date Fill / the uploaders / Final Bill log a warning when
+the foreground is not HBSys (warn mode, behavior unchanged).
+
+Safety / compatibility:
+
+- All new behavior is additive and fail-open (try/except around the
+  screen/guard calls), so a failure in detection never blocks a run.
+- close_stale_windows() only closes transient popups and Billing forms;
+  it runs only in live mode.
+- No engine/registry/adapter/persistence/condition change beyond the
+  gate's stricter (but strictly more correct) availability check.
+- Guard mode defaults to "warn" (CLAIMS_AGENT_FOCUS_GUARD unset), so
+  behavior is unchanged unless the operator opts into "block".
+
+Verification:
+
+- `python -m unittest tests.test_hbsys_window tests.test_workflow_engine
+  tests.test_gui_workflow_tab_conditions tests.test_unicode_typing`
+  — 124 tests OK (24 + 47? + 12 + 15).
+- `python -m py_compile` on all touched files — OK.
+
 ### 2026-10-27 - Feature: Workflow tab "Enable All / Disable All" + quick checklist
 
 Reason:

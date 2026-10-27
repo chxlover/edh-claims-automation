@@ -579,7 +579,12 @@ class WorkflowEngine:
         try:
             from date_fill_hbsys.hbsys_window import find_hbsys_window
 
-            return find_hbsys_window() is not None
+            if find_hbsys_window() is None:
+                return False
+            from core.agent import hbsys_screens
+
+            result = hbsys_screens.detect_screen()
+            return result.screen != hbsys_screens.SCREEN_HBSYS_CLOSED
         except Exception:
             return False
 

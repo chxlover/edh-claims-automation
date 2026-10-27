@@ -51,6 +51,15 @@ from PIL import Image
 from pywinauto import Desktop
 
 from core import unicode_typing
+
+# 2026-09-28: foreground guard for the BLIND pyautogui input
+# (core/agent/window_guard.py); optional on purpose - without it the tool
+# behaves exactly as it did before.
+try:
+    from core.agent.window_guard import guard_input as _guard_input  # noqa: E402
+except Exception:  # noqa: BLE001 - the guard is diagnostics only
+    _guard_input = None
+
 from core.add_claims_ocr import (
     HighlightedRow,
     capture_popup,
@@ -162,6 +171,14 @@ class AddClaimsOperator:
     def maybe_wait(self) -> None:
         time.sleep(self.pause)
 
+    def guard_blind_input(self, action: str) -> bool:
+        if _guard_input is None:
+            return True
+        try:
+            return bool(_guard_input(action, log_fn=self.log_action))
+        except Exception:  # noqa: BLE001 - never break a run
+            return True
+
     def click(self, point: Point, label: str, *, local: bool = False) -> None:
         """Click a point.  If local=True, converts from popup-local to screen coords."""
         if local and self.popup_window is not None:
@@ -210,6 +227,8 @@ class AddClaimsOperator:
     def write(self, text: str) -> None:
         self.log_action(f"type {text!r}")
         if self.live:
+            if not self.guard_blind_input(f"type {text!r}"):
+                return
             if not unicode_typing.can_type(text):
                 self.log_action(
                     "non-ASCII text - Unicode keystroke fallback (enye/accents)"
