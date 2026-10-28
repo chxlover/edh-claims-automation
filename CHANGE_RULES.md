@@ -107,7 +107,9 @@ Files modified:
       count row showing the last few log lines;
   (c) `_apply_state()` now refreshes `log_label`; `set_idle()` and the
       running transition clear the tail so stale lines do not linger;
-  (d) overlay height 70 -> 130 to fit the tail.
+  (d) overlay size 288x70 -> 340x200 and 4 -> 5 tail lines (Consolas 8)
+      so the live log is actually readable; the earlier 130 px height
+      clipped the tail.
 - `edh_claims_gui_XML_COPY_BUTTON.py` — `self.log()` now also pushes
   each line to `run_status_overlay.append_log()` (scheduled on the
   Tk thread; guarded against a missing overlay). Workflow lines

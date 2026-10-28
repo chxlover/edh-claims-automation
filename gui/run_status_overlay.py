@@ -77,11 +77,11 @@ EYE_HALO_FACTOR = 2.1     # halo radius = eye radius * this
 class RunStatusOverlay:
     """Display-only draggable robot status window near the taskbar start corner."""
 
-    WIDTH = 288
-    HEIGHT = 130             # 52 + count row + ~4 live-log lines
+    WIDTH = 340
+    HEIGHT = 200             # room for title + status + count + ~5 live-log lines
     COUNT_ROW_HEIGHT = 18    # px of the "Date Fill N left" line
-    LOG_LINES = 4            # how many recent log lines the tail shows
-    LOG_CHAR_LIMIT = 52      # truncate long lines so the tail stays compact
+    LOG_LINES = 5            # how many recent log lines the tail shows
+    LOG_CHAR_LIMIT = 60      # truncate long lines so the tail stays compact
     MARGIN_X = 10
     TASKBAR_GAP = 54         # sits just above the taskbar / Start corner
     ROBOT = 44               # robot icon size (px)
@@ -177,7 +177,7 @@ class RunStatusOverlay:
             text="",
             bg=COL_BG,
             fg="#94A3B8",
-            font=("Consolas", 7),
+            font=("Consolas", 8),
             justify="left",
             anchor="nw",
             wraplength=self.WIDTH - 70,
