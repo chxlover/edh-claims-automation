@@ -23,6 +23,12 @@ if __name__ == "__main__" and __package__ in (None, ""):
 from core.activity_logger import ActivityLogger, logger
 
 OUTPUT_DIR = Path(os.getenv("CLAIMS_OUTPUT_FOLDER", "C:/claims_bot/output"))
+# READY folder: patient folders that have already passed the Claims Checker
+# (moved out of output/ into claims_checker_results/READY). PDFs there are
+# still previewable so the operator can check them after the move.
+READY_DIR = Path(
+    os.getenv("CLAIMS_READY_FOLDER", "C:/claims_bot/claims_checker_results/READY")
+)
 LOGS_DIR = Path("logs")
 SHEET_W, SHEET_H = 1920, 1080
 COLS = 3
@@ -113,9 +119,28 @@ def _build_sheet(files: list[Path], out_path: Path) -> None:
     sheet.save(out_path)
 
 
-def _find_pdfs(doc_type: str, output_dir: Path) -> list[Path]:
+def _find_pdfs(doc_type: str, *roots: Path) -> list[Path]:
+    """Collect ``{doc_type}.pdf`` from every given root (deduped).
+
+    Scanning several roots (output + READY) means a PDF can still be
+    previewed after the patient folder has moved to the READY folder.
+    """
     pattern = f"{doc_type}.pdf"
-    return sorted(output_dir.rglob(pattern))
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if not root:
+            continue
+        root_path = Path(root)
+        if not root_path.is_dir():
+            continue
+        for pdf in root_path.rglob(pattern):
+            resolved = pdf.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            found.append(pdf)
+    return sorted(found)
 
 
 class PdfPreviewService:
@@ -125,10 +150,12 @@ class PdfPreviewService:
         self,
         output_dir: Path | str = OUTPUT_DIR,
         logs_dir: Path | str = LOGS_DIR,
+        ready_dir: Path | str | None = READY_DIR,
         activity_logger: ActivityLogger | None = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.logs_dir = Path(logs_dir)
+        self.ready_dir = Path(ready_dir) if ready_dir else None
         self.logger = activity_logger or logger
 
     def list_patients(self, doc_type: str) -> list[Path]:
@@ -138,7 +165,7 @@ class PdfPreviewService:
                 f"Unsupported doc_type: {doc_type}. "
                 f"Supported: {SUPPORTED_DOC_TYPES}"
             )
-        pdfs = _find_pdfs(doc_type, self.output_dir)
+        pdfs = _find_pdfs(doc_type, self.output_dir, self.ready_dir)
         return [p.parent for p in pdfs]
 
     def build_sheets(
@@ -151,8 +178,12 @@ class PdfPreviewService:
                 f"Supported: {SUPPORTED_DOC_TYPES}"
             )
 
-        out_dir = Path(output_dir) if output_dir else self.output_dir
-        pdfs = _find_pdfs(doc_type, out_dir)
+        if output_dir:
+            out_dir = Path(output_dir)
+            pdfs = _find_pdfs(doc_type, out_dir)
+        else:
+            out_dir = self.output_dir
+            pdfs = _find_pdfs(doc_type, self.output_dir, self.ready_dir)
         if not pdfs:
             self.logger.warning(f"No {doc_type}.pdf found in {out_dir}")
             return []

@@ -38,6 +38,54 @@ changes and must not be recorded individually.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
 
+### 2026-10-28 - Feature: PDF Preview also scans the READY folder
+
+Reason:
+
+Operator request 2026-10-28: "sa may PDF preview tab ung source nya
+diba output folder idagdag mo din ang ready folder para kung gusto ko
+icheck ung pdf eh macheck ko padin kahit nasa ready na." Patient
+folders move from output/ to claims_checker_results/READY after the
+Claims Checker, so the preview (which only scanned output/) could no
+longer show their CSF/COE PDFs.
+
+Files modified:
+
+- `core/pdf_preview_service.py` —
+  (a) READY_DIR default (CLAIMS_READY_FOLDER env override, falls back
+      to C:/claims_bot/claims_checker_results/READY);
+  (b) PdfPreviewService.__init__ accepts ready_dir (default READY_DIR);
+  (c) _find_pdfs now takes *roots and scans every given root,
+      deduping by resolved path;
+  (d) list_patients and build_sheets scan output_dir + ready_dir
+      (build_sheets keeps the single-root override for callers that
+      pass output_dir=...).
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: only the output folder was scanned; PDFs in READY
+were invisible to the preview.
+
+Behavior after: both output and READY are scanned (deduped), so a
+patient's CSF/COE can still be previewed after it moves to READY.
+The single-root override in build_sheets keeps backward compatibility
+with callers/tests that pass an explicit output_dir.
+
+Safety / compatibility:
+
+- No UI change; FakePreviewService-based tests are unaffected (the
+  service interface build_sheets(doc_type=...) / list_patients(doc_type=...)
+  is unchanged).
+- A missing READY folder is skipped silently (is_dir check).
+- Dedup by resolved path avoids double-counting a folder present in
+  both roots.
+
+Verification:
+
+- Functional check: temp output + ready folders, each with one CSF.pdf
+  -> list_patients returns both, _find_pdfs returns 2 PDFs. OK.
+- `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
+- `python -m py_compile core/pdf_preview_service.py` — OK.
+
 ### 2026-10-27 - Feature: Run-status overlay shows live log tail
 
 Reason:
