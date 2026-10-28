@@ -1452,6 +1452,37 @@ def confirm_patient_from_db_by_hpercode(initial_hospital_no):
     """
     hospital_no = normalize_hospital_no(initial_hospital_no)
 
+    # Auto-confirm mode (no human popup): used when CONFIRM_PATIENT is False
+    # or CLAIMS_AUTO_CONFIRM_PATIENT=1. Tier 1 = exact unique DB match ->
+    # auto-accept + audit log. Tier 3 = no match -> skip + flag (never
+    # guess); the SOA2 identity fallback below still gets a chance.
+    env_auto = os.environ.get("CLAIMS_AUTO_CONFIRM_PATIENT", "").strip().lower() in {
+        "1", "true", "yes", "y", "on"
+    }
+    auto_confirm = env_auto or (not CONFIRM_PATIENT)
+
+    if auto_confirm:
+        if not hospital_no:
+            print("[AUTO-CONFIRM] Tier 3 (skip+flag): no Hospital No. from SOA1")
+            return None
+        row = get_patient_from_db_by_hpercode(hospital_no)
+        if not row:
+            print(
+                "[AUTO-CONFIRM] Tier 3 (skip+flag): no DB match for",
+                hospital_no,
+                "- will try SOA2 identity fallback",
+            )
+            return None
+        db_patient_name = build_patient_name_from_db(row)
+        db_hpercode = normalize_hospital_no(row.get("hpercode"))
+        print(
+            "[AUTO-CONFIRM] Tier 1 (auto-accepted):",
+            db_patient_name,
+            "-",
+            db_hpercode,
+        )
+        return row
+
     # If Tkinter is not available, fallback to old behavior.
     if tk is None or messagebox is None or simpledialog is None:
         print("[CONFIRM] Tkinter not available. Using DB result without popup.")
@@ -4492,7 +4523,7 @@ def set_patient_context_for_group(group, group_index):
         # -------------------------------
         # SINGLE PATIENT MODE
         # -------------------------------
-        if PROCESS_MODE == "single" and CONFIRM_PATIENT:
+        if PROCESS_MODE == "single":
 
             row = confirm_patient_from_db_by_hpercode(hospital_no)
 
@@ -4976,7 +5007,7 @@ def choose_processing_mode():
     if env_mode in {"single", "multiple"}:
         PROCESS_MODE = env_mode
         CONFIRM_PATIENT = os.environ.get(
-            "CLAIMS_CONFIRM_PATIENT", "1"
+            "CLAIMS_CONFIRM_PATIENT", "0"
         ).strip().lower() in {"1", "true", "yes", "y", "on"}
         print("PROCESS_MODE =", PROCESS_MODE)
         print("CONFIRM_PATIENT =", CONFIRM_PATIENT)
@@ -4995,7 +5026,7 @@ def choose_processing_mode():
     root.attributes("-topmost", True)
 
     mode = tk.StringVar(value="single")
-    confirm = tk.BooleanVar(value=True)
+    confirm = tk.BooleanVar(value=False)
 
     tk.Label(
         root,

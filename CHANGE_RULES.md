@@ -38,6 +38,70 @@ changes and must not be recorded individually.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
 
+### 2026-10-28 - Feature: Auto-confirm patients (no human popup) in claims processor
+
+Reason:
+
+Operator request 2026-10-28: "always may human confirmation ba? yun
+sanang wala ng confirmation ng human. kasi ang mangyayari icoconfirm
+ko din naman kung may di mabasa sa patient review - tapos i visual
+confirm ko naman sya isa isa." The operator verifies patients later
+(patient review + visual confirm one by one), so the mid-flow popup
+only interrupts the batch. Tiered policy keeps the safety net:
+Tier 1 (exact unique DB match) auto-accepts; Tier 3 (no match)
+skips + flags instead of guessing. Ambiguous cases never auto-pick.
+
+Files modified:
+
+- `bot_unknown_trainer_DEFERRED_OUTPUT_REVIEW_PATSUFFIX_ADM_DIS.py` —
+  (a) `confirm_patient_from_db_by_hpercode()` now has an auto-confirm
+      path (controlled by `CONFIRM_PATIENT=False` or
+      `CLAIMS_AUTO_CONFIRM_PATIENT=1`): normalizes hpercode, queries
+      the DB, auto-accepts on a single match (Tier 1, logged), or
+      returns None on no match (Tier 3, skip+flag, logged) — never
+      guesses; the existing SOA2 identity fallback still gets a
+      chance afterwards;
+  (b) main flow now routes single mode through
+      `confirm_patient_from_db_by_hpercode()` in all cases (so the
+      auto path actually runs);
+  (c) startup dialog "Confirm patient before processing" checkbox now
+      defaults to unchecked (auto-confirm on by default); env
+      `CLAIMS_CONFIRM_PATIENT` default changed from "1" to "0".
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: single mode with CONFIRM_PATIENT=True showed a
+Tkinter yes/no popup for every patient; CONFIRM_PATIENT=False went
+straight to `get_patient_from_db_by_hpercode` with no tiered logic
+and no audit line.
+
+Behavior after: by default (CONFIRM_PATIENT=False) the auto path runs
+— exact unique DB match auto-accepts with an audit log line, no match
+skips + flags (Tier 3) and lets the SOA2 identity fallback try.
+Ticking "Confirm patient before processing" restores the original
+popup for operators who want manual confirmation. Set
+CLAIMS_AUTO_CONFIRM_PATIENT=1 to force auto even when the checkbox is
+ticked.
+
+Safety / compatibility:
+
+- "Never guess ambiguous matches" is preserved: the auto path only
+  accepts a single DB match; on 0 (or effectively 2+) matches it
+  skips + flags instead of auto-picking.
+- Tier 3 patients are not silently dropped — they are logged and the
+  existing SOA2 identity fallback + downstream patient review still
+  catch them.
+- Default flip (CONFIRM_PATIENT default 0) changes the out-of-the-box
+  single-mode behavior to auto-confirm, matching the operator's
+  request; the popup remains available via the checkbox.
+- No new dependency.
+
+Verification:
+
+- `python -m py_compile
+  bot_unknown_trainer_DEFERRED_OUTPUT_REVIEW_PATSUFFIX_ADM_DIS.py`
+  — OK (pre-existing SyntaxWarning about "\\c" in a docstring is
+  unrelated).
+
 ### 2026-10-28 - Feature: PDF Preview also scans the READY folder
 
 Reason:
