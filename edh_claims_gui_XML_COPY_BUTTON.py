@@ -66,6 +66,7 @@ SCRIPT_CONFIG = {
     "xml_generator_clicker": "xml_generator_clicker_launcher.py",
     "claims_checker": "claims_checker.py",
     "fees_checker": "fees_checker.py",
+    "final_bill_runner": "final_bill_runner_launcher.py",
     "pdf_splitter": "pdf_splitter_gui.py",
 }
 
@@ -1746,6 +1747,13 @@ class EDHClaimsGUI(tk.Tk):
             lambda: self.notebook.select(self.claim_attachments_tab),
             7,
             0,
+        )
+        add_grid_button(
+            quick_actions,
+            "Final Bill",
+            lambda: self.run_script("final_bill_runner"),
+            7,
+            1,
         )
 
         self.hbsys_warning_label = tk.Label(

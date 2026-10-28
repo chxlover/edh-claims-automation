@@ -38,6 +38,54 @@ changes and must not be recorded individually.
 - Ambiguous patient, document, folder, or confinement matches must never be guessed.
 - Preserve backward compatibility with existing configuration files whenever possible.
 
+### 2026-10-28 - Feature: Final Bill button on the main dashboard
+
+Reason:
+
+Operator request 2026-10-28: "yung final bill sa workflow pwede bang
+isama mo sa main dashboard?" The Final Bill runner (the same
+folder-contract flow the Workflow tab's final_bill node uses) was
+only reachable from the Workflow/Agent Plan tabs; the Production
+Actions rail on the main dashboard had no button for it.
+
+Files added:
+
+- `final_bill_runner_launcher.py` — launcher that runs
+  `python -m core.agent.final_bill_runner --live` with cwd=repo root
+  (mirrors xml_generator_clicker_launcher.py / date_fill_hbsys_testing_launcher.py).
+
+Files modified:
+
+- `edh_claims_gui_XML_COPY_BUTTON.py` —
+  (a) SCRIPT_CONFIG["final_bill_runner"] = "final_bill_runner_launcher.py";
+  (b) a new "Final Bill" button in the Production Actions quick grid
+      (row 7, column 1, next to "Claim Attachments"), wired to
+      run_script("final_bill_runner").
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: Final Bill was only runnable from the Workflow tab
+node or the Agent Plan tab; the main dashboard had no button for it.
+
+Behavior after: the main dashboard's Production Actions rail has a
+"Final Bill" button that runs the same folder-contract Final Bill flow
+(dry-run listing by default is bypassed by the launcher's --live, so
+it drives HBSys like the other dashboard buttons). It respects the
+same CLAIMS_OUTPUT_FOLDER env bridge and run-status overlay as the
+other scripts.
+
+Safety / compatibility:
+
+- No change to the Final Bill logic itself (core.agent.final_bill_runner
+  is untouched); only a launcher + a button + a SCRIPT_CONFIG entry.
+- HBSys must be open (the runner is hbsys_touching); same expectation
+  as the Date Fill / XML Clicker buttons.
+- run_script()'s "one process at a time" guard still applies.
+
+Verification:
+
+- `python -m py_compile edh_claims_gui_XML_COPY_BUTTON.py
+  final_bill_runner_launcher.py` — OK.
+
 ### 2026-10-28 - Feature: Auto-confirm patients (no human popup) in claims processor
 
 Reason:
