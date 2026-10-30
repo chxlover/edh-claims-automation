@@ -26,8 +26,11 @@ OUTPUT_DIR = Path(os.getenv("CLAIMS_OUTPUT_FOLDER", "C:/claims_bot/output"))
 # READY folder: patient folders that have already passed the Claims Checker
 # (moved out of output/ into claims_checker_results/READY). PDFs there are
 # still previewable so the operator can check them after the move.
+# Scan the whole claims_checker_results tree (READY, READY_WITH_REVIEW,
+# INCOMPLETE, READY_ARCHIVED, ...) so review documents (MRF, PBC, MMC,
+# ANR, OPR, DTR) are previewable too, not just output/ + READY.
 READY_DIR = Path(
-    os.getenv("CLAIMS_READY_FOLDER", "C:/claims_bot/claims_checker_results/READY")
+    os.getenv("CLAIMS_READY_FOLDER", "C:/claims_bot/claims_checker_results")
 )
 LOGS_DIR = Path("logs")
 SHEET_W, SHEET_H = 1920, 1080
@@ -41,7 +44,11 @@ TEXT = (30, 30, 30)
 ACCENT = (0, 120, 215)
 
 SUPPORTED_DOC_TYPES = ("CSF", "COE")
-
+# All document types the preview can render. The "review documents"
+# (MRF, PBC, MMC, ANR, OPR, DTR) are only shown in the UI when at
+# least one PDF of that type actually exists, so the radio-button
+# selection stays short.
+ALL_DOC_TYPES = ("CSF", "COE", "MRF", "PBC", "MMC", "ANR", "OPR", "DTR")
 
 @dataclass(frozen=True, slots=True)
 class SheetResult:
@@ -167,6 +174,25 @@ class PdfPreviewService:
             )
         pdfs = _find_pdfs(doc_type, self.output_dir, self.ready_dir)
         return [p.parent for p in pdfs]
+
+    def available_doc_types(self) -> list[str]:
+        """Doc types (from ALL_DOC_TYPES) that have at least one PDF.
+
+        Scans output + READY once and returns the subset that actually
+        exists, so the UI can hide radio buttons for missing types.
+        """
+        roots = [self.output_dir]
+        if self.ready_dir:
+            roots.append(self.ready_dir)
+        found: set[str] = set()
+        for root in roots:
+            if not root or not Path(root).is_dir():
+                continue
+            for pdf in Path(root).rglob("*.pdf"):
+                stem = pdf.stem.upper()
+                if stem in ALL_DOC_TYPES:
+                    found.add(stem)
+        return [d for d in ALL_DOC_TYPES if d in found]
 
     def build_sheets(
         self, doc_type: str = "CSF", output_dir: Path | str | None = None

@@ -86,6 +86,66 @@ Verification:
 - `python -m py_compile edh_claims_gui_XML_COPY_BUTTON.py
   final_bill_runner_launcher.py` — OK.
 
+### 2026-10-30 - Feature: PDF Preview supports review documents (MRF, PBC, MMC, ANR, OPR, DTR)
+
+Reason:
+
+Operator request 2026-10-30: "sa PDF preview iinclude mo nga ang MRF,
+PBC, MMC, ANR, OPR, DTR pero dapat huwag magappear sa selection kung
+walang mga documents na nabanggit para hindi mahaba ang selection sa
+radio button. ito na yung review documents." The preview only supported
+CSF and COE, so the review documents (which live in READY_ARCHIVED /
+READY_WITH_REVIEW / INCOMPLETE / READY) could not be previewed, and the
+radio-button row was a fixed two-item list.
+
+Files modified:
+
+- `core/pdf_preview_service.py` —
+  (a) ALL_DOC_TYPES = ("CSF", "COE", "MRF", "PBC", "MMC", "ANR", "OPR",
+      "DTR");
+  (b) READY_DIR default changed from claims_checker_results/READY to
+      claims_checker_results (rglob now scans READY, READY_WITH_REVIEW,
+      INCOMPLETE, READY_ARCHIVED, and stray patient folders);
+  (c) new `available_doc_types()` that returns the subset of
+      ALL_DOC_TYPES that actually has at least one PDF (scans once,
+      deduped), so missing types are hidden.
+- `gui/pdf_preview_panel.py` —
+  (a) replaced the hardcoded CSF/COE radio buttons with a dynamic
+      `_doc_type_frame` rebuilt by `_rebuild_doc_type_buttons()`;
+  (b) `_available_doc_types()` prefers the service method and falls
+      back to probing list_patients per type;
+  (c) buttons are only rebuilt when the available set changes, so
+      clicking a radio button does not destroy itself mid-callback;
+  (d) if nothing is available, shows "No documents found".
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: only CSF and COE were previewable, and the radio
+buttons were a fixed two-item list regardless of what PDFs existed.
+
+Behavior after: MRF, PBC, MMC, ANR, OPR, DTR are previewable too, but
+a radio button only appears when at least one PDF of that type exists
+in the scanned folders (output + claims_checker_results tree), so the
+selection stays short. The default doc type falls back to the first
+available type if the current one disappears.
+
+Safety / compatibility:
+
+- Service interface (build_sheets(doc_type=...), list_patients(doc_type=...))
+  is unchanged; FakePreviewService-based tests still pass.
+- A missing folder is skipped silently (is_dir check).
+- Dedup by resolved path avoids double-counting.
+- Case-insensitive stem match (MMC matches mmc.pdf).
+
+Verification:
+
+- Panel smoke test against the real service: available = CSF, COE, MRF,
+  PBC, MMC, ANR, OPR, DTR (8 buttons). OK.
+- `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
+- `python -m py_compile core/pdf_preview_service.py gui/pdf_preview_panel.py`
+  — OK.
+- Functional check: temp output + ready folders with one CSF.pdf each ->
+  2 PDFs found. OK.
+
 ### 2026-10-28 - Feature: Auto-confirm patients (no human popup) in claims processor
 
 Reason:

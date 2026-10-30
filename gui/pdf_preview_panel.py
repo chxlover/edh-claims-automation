@@ -55,14 +55,12 @@ class PdfPreviewPanel:
 
         self.doc_type_var = tk.StringVar(value="CSF")
         ttk.Label(toolbar, text="Document:").pack(side="left")
-        for doc in ("CSF", "COE"):
-            ttk.Radiobutton(
-                toolbar,
-                text=doc,
-                variable=self.doc_type_var,
-                value=doc,
-                command=self._refresh,
-            ).pack(side="left", padx=(4, 12))
+        # Radio buttons are built dynamically (see _rebuild_doc_type_buttons)
+        # so only document types that actually have PDFs are shown.
+        self._doc_type_frame = ttk.Frame(toolbar)
+        self._doc_type_frame.pack(side="left")
+        self._doc_type_cache: list[str] = []
+        self._rebuild_doc_type_buttons()
 
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(
@@ -133,11 +131,64 @@ class PdfPreviewPanel:
 
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
 
+    def _available_doc_types(self) -> list[str]:
+        service = self.service
+        if hasattr(service, "available_doc_types"):
+            try:
+                return list(service.available_doc_types())
+            except Exception:  # noqa: BLE001 - fall back below.
+                pass
+        # Fallback: probe list_patients for each known type.
+        try:
+            from core.pdf_preview_service import ALL_DOC_TYPES
+        except Exception:  # noqa: BLE001
+            ALL_DOC_TYPES = ("CSF", "COE")
+        result: list[str] = []
+        for doc in ALL_DOC_TYPES:
+            try:
+                if service.list_patients(doc):
+                    result.append(doc)
+            except Exception:  # noqa: BLE001
+                pass
+        if not result:
+            result = ["CSF", "COE"]
+        return result
+
+    def _rebuild_doc_type_buttons(self) -> None:
+        available = self._available_doc_types()
+        if available == self._doc_type_cache and self._doc_type_frame.winfo_children():
+            # Nothing changed; keep the existing buttons.
+            if self.doc_type_var.get() not in available and available:
+                self.doc_type_var.set(available[0])
+            return
+        for widget in self._doc_type_frame.winfo_children():
+            widget.destroy()
+        self._doc_type_cache = list(available)
+        if not available:
+            ttk.Label(
+                self._doc_type_frame, text="No documents found"
+            ).pack(side="left", padx=(4, 12))
+            return
+        if self.doc_type_var.get() not in available:
+            self.doc_type_var.set(available[0])
+        for doc in available:
+            ttk.Radiobutton(
+                self._doc_type_frame,
+                text=doc,
+                variable=self.doc_type_var,
+                value=doc,
+                command=self._refresh,
+            ).pack(side="left", padx=(4, 12))
+
     def refresh(self) -> None:
         self._refresh()
 
     def _refresh(self) -> None:
+        self._rebuild_doc_type_buttons()
         doc_type = self.doc_type_var.get()
+        if not doc_type:
+            self.status_var.set("No documents found")
+            return
         self.status_var.set(f"Generating {doc_type} sheets...")
         self.parent.update_idletasks()
 
