@@ -86,6 +86,43 @@ Verification:
 - `python -m py_compile edh_claims_gui_XML_COPY_BUTTON.py
   final_bill_runner_launcher.py` — OK.
 
+### 2026-10-30 - Change: PDF Preview sheet navigation resets page to 1
+
+Reason:
+
+Operator request 2026-10-30: "dapat pag nag next reset sa page 1." When
+the operator moves to a different set of patients (Next/Prev sheet)
+while on page 2+, the page view should restart at page 1 instead of
+carrying the current page over to the new patients.
+
+Files modified:
+
+- `gui/pdf_preview_panel.py` — `_previous_sheet()` / `_next_sheet()` now
+  reset `_page_index = 0` and regenerate the sheets when the current
+  page is not 1; when already on page 1 they keep the instant
+  `_render_current()` path (no regen) so sheet flipping stays snappy.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: sheet navigation kept the current page index, so moving
+to a new set of patients showed them at whatever page was active.
+
+Behavior after: moving to a new sheet resets to page 1 and regenerates
+the sheets at page 1; page navigation (Prev/Next Page) still preserves
+the current sheet.
+
+Safety / compatibility:
+
+- When already on page 1, sheet navigation is unchanged (instant
+  re-render, no regen) — zoom tests stay synchronous.
+- `_refresh(reset_sheet=False)` preserves the sheet index across the
+  regen, so the operator lands on the sheet they clicked.
+
+Verification:
+
+- Functional check: on page 2 of sheet 1, Next sheet -> sheet 2, page 1. OK.
+- `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
+- `python -m py_compile gui/pdf_preview_panel.py` — OK.
+
 ### 2026-10-30 - Fix: PDF Preview "Next/Prev Page" reset the sheet to page 1
 
 Reason:

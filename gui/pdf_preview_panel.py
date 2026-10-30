@@ -328,12 +328,22 @@ class PdfPreviewPanel:
     def _previous_sheet(self) -> None:
         if self._sheet_index > 0:
             self._sheet_index -= 1
-            self._render_current()
+            if self._page_index != 0:
+                # Moving to a different set of patients: restart at page 1.
+                self._page_index = 0
+                self._refresh(reset_sheet=False)
+            else:
+                self._render_current()
 
     def _next_sheet(self) -> None:
         if self._sheet_index < len(self._sheets) - 1:
             self._sheet_index += 1
-            self._render_current()
+            if self._page_index != 0:
+                # Moving to a different set of patients: restart at page 1.
+                self._page_index = 0
+                self._refresh(reset_sheet=False)
+            else:
+                self._render_current()
 
     def _previous_page(self) -> None:
         if self._page_index > 0:
