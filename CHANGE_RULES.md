@@ -86,6 +86,46 @@ Verification:
 - `python -m py_compile edh_claims_gui_XML_COPY_BUTTON.py
   final_bill_runner_launcher.py` — OK.
 
+### 2026-10-30 - Change: PDF Preview scans only output + READY folders
+
+Reason:
+
+Operator request 2026-10-30: "dapat nasa output folder lang at ready
+folder lang." The previous change widened READY_DIR to the whole
+claims_checker_results tree (READY, READY_WITH_REVIEW, INCOMPLETE,
+READY_ARCHIVED, stray patient folders) so review documents (MRF, PBC,
+MMC, ANR, OPR, DTR) would appear. The operator wants the scan
+restricted to the output folder and the READY folder only, so the
+selection stays short and fast.
+
+Files modified:
+
+- `core/pdf_preview_service.py` — READY_DIR default reverted from
+  claims_checker_results to claims_checker_results/READY (env override
+  CLAIMS_READY_FOLDER still works).
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: scanned output + the whole claims_checker_results
+tree, so MRF/PBC/MMC/ANR/OPR/DTR (which live in READY_ARCHIVED /
+READY_WITH_REVIEW / INCOMPLETE) appeared in the selection.
+
+Behavior after: only output and READY are scanned. With the current
+data, only CSF, COE and DTR have PDFs in those folders, so only those
+three buttons appear. The review document types (MRF, PBC, MMC, ANR,
+OPR, DTR) remain supported (ALL_DOC_TYPES unchanged) and will appear
+automatically if a PDF of that type exists in output or READY.
+
+Safety / compatibility:
+
+- No UI or interface change.
+- A missing folder is skipped silently (is_dir check).
+
+Verification:
+
+- Panel smoke test: available = CSF, COE, DTR (3 buttons). OK.
+- `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
+- `python -m py_compile core/pdf_preview_service.py` — OK.
+
 ### 2026-10-30 - Fix: PDF Preview rejected review document types (ValueError)
 
 Reason:

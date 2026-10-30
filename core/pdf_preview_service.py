@@ -26,11 +26,12 @@ OUTPUT_DIR = Path(os.getenv("CLAIMS_OUTPUT_FOLDER", "C:/claims_bot/output"))
 # READY folder: patient folders that have already passed the Claims Checker
 # (moved out of output/ into claims_checker_results/READY). PDFs there are
 # still previewable so the operator can check them after the move.
-# Scan the whole claims_checker_results tree (READY, READY_WITH_REVIEW,
-# INCOMPLETE, READY_ARCHIVED, ...) so review documents (MRF, PBC, MMC,
-# ANR, OPR, DTR) are previewable too, not just output/ + READY.
+# Only the output folder and the READY folder are scanned (operator
+# request 2026-10-30). Review documents (MRF, PBC, MMC, ANR, OPR, DTR)
+# that live in READY_ARCHIVED / READY_WITH_REVIEW / INCOMPLETE are NOT
+# scanned, so they only appear when a copy exists in output/ or READY/.
 READY_DIR = Path(
-    os.getenv("CLAIMS_READY_FOLDER", "C:/claims_bot/claims_checker_results")
+    os.getenv("CLAIMS_READY_FOLDER", "C:/claims_bot/claims_checker_results/READY")
 )
 LOGS_DIR = Path("logs")
 SHEET_W, SHEET_H = 1920, 1080
