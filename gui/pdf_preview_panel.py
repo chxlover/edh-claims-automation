@@ -199,7 +199,7 @@ class PdfPreviewPanel:
     def refresh(self) -> None:
         self._refresh()
 
-    def _refresh(self) -> None:
+    def _refresh(self, reset_sheet: bool = True) -> None:
         self._rebuild_doc_type_buttons()
         doc_type = self.doc_type_var.get()
         if not doc_type:
@@ -217,7 +217,7 @@ class PdfPreviewPanel:
                 self.parent.after(
                     0,
                     lambda: self._on_sheets_ready(
-                        doc_type, sheets, max_pages
+                        doc_type, sheets, max_pages, reset_sheet
                     ),
                 )
             except Exception as exc:
@@ -232,10 +232,14 @@ class PdfPreviewPanel:
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_sheets_ready(
-        self, doc_type: str, sheets: list[Path], max_pages: int = 1
+        self, doc_type: str, sheets: list[Path], max_pages: int = 1,
+        reset_sheet: bool = True,
     ) -> None:
         self._sheets = sheets
-        self._sheet_index = 0
+        if reset_sheet or self._sheet_index >= len(sheets):
+            self._sheet_index = 0
+        if self._sheet_index < 0:
+            self._sheet_index = 0
         self._max_pages = max(1, int(max_pages or 1))
         self._render_current()
         self.status_var.set(
@@ -334,12 +338,12 @@ class PdfPreviewPanel:
     def _previous_page(self) -> None:
         if self._page_index > 0:
             self._page_index -= 1
-            self._refresh()
+            self._refresh(reset_sheet=False)
 
     def _next_page(self) -> None:
         if self._page_index < self._max_pages - 1:
             self._page_index += 1
-            self._refresh()
+            self._refresh(reset_sheet=False)
 
     # -- zoom (persistent across sheets) -----------------------------------
 

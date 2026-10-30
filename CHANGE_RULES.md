@@ -86,6 +86,49 @@ Verification:
 - `python -m py_compile edh_claims_gui_XML_COPY_BUTTON.py
   final_bill_runner_launcher.py` — OK.
 
+### 2026-10-30 - Fix: PDF Preview "Next/Prev Page" reset the sheet to page 1
+
+Reason:
+
+Operator report 2026-10-30: "sa pdf preview sa 1st page gumagana
+lahat pag next page mo hanggang pinakalast ngayon diba first 3 yun,
+ngayon ang susunod si click next tapos multiple uli di gumagana ang
+next page susunod after ng first 3 sa pinakaunang page." When the
+operator navigated to sheet 2 (patients 4-6) and clicked "Next Page",
+the sheets regenerated and _on_sheets_ready reset _sheet_index to 0,
+jumping back to sheet 1 (patients 1-3) instead of staying on sheet 2.
+
+Files modified:
+
+- `gui/pdf_preview_panel.py` —
+  (a) `_refresh(reset_sheet=True)` now carries a reset_sheet flag;
+  (b) `_on_sheets_ready(..., reset_sheet=True)` preserves the current
+      sheet index when reset_sheet=False (clamped to the new sheet
+      count), instead of always resetting to 0;
+  (c) `_previous_page()` / `_next_page()` call `_refresh(reset_sheet=False)`
+      so the sheet position is kept across a page change.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: every page change reset the view to sheet 1, so the
+operator could only inspect page N of the first 3 patients.
+
+Behavior after: the current sheet (e.g. patients 4-6) is preserved when
+flipping pages, so all patients' pages can be inspected.
+
+Safety / compatibility:
+
+- Default reset_sheet=True keeps the existing behavior for doc-type
+  changes, radio clicks, Regenerate, and zoom-test callers.
+- _sheet_index is clamped to len(sheets)-1, so an out-of-range index
+  never crashes.
+
+Verification:
+
+- Functional check: navigate to last sheet, Next Page -> sheet index
+  preserved (sheet 2 of 2, page 2 of 9). OK.
+- `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
+- `python -m py_compile gui/pdf_preview_panel.py` — OK.
+
 ### 2026-10-30 - Feature: PDF Preview prev/next page for multi-page PDFs
 
 Reason:
