@@ -68,10 +68,15 @@ def _font(size: int):
     return ImageFont.load_default()
 
 
-def _render_page(pdf_path: Path, cell_w: int) -> Image.Image:
-    """Render the first page of a PDF to fit (cell_w - 2*MARGIN) wide."""
+def _render_page(pdf_path: Path, cell_w: int, page_index: int = 0) -> Image.Image:
+    """Render page *page_index* of a PDF to fit (cell_w - 2*MARGIN) wide."""
     doc = fitz.open(str(pdf_path))
-    page = doc[0]
+    page_count = doc.page_count
+    if page_count <= 0:
+        doc.close()
+        raise ValueError(f"empty PDF: {pdf_path}")
+    index = max(0, min(page_index, page_count - 1))
+    page = doc[index]
     target_w = cell_w - 2 * MARGIN
     zoom = target_w / page.rect.width
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
@@ -80,7 +85,7 @@ def _render_page(pdf_path: Path, cell_w: int) -> Image.Image:
     return img
 
 
-def _build_sheet(files: list[Path], out_path: Path) -> None:
+def _build_sheet(files: list[Path], out_path: Path, page_index: int = 0) -> None:
     sheet = Image.new("RGB", (SHEET_W, SHEET_H), BG)
     draw = ImageDraw.Draw(sheet)
     font_label = _font(17)
@@ -104,7 +109,7 @@ def _build_sheet(files: list[Path], out_path: Path) -> None:
             width=1,
         )
 
-        page_img = _render_page(pdf, COL_W)
+        page_img = _render_page(pdf, COL_W, page_index)
         px = x0 + (COL_W - page_img.width) // 2
         py = y0 + MARGIN + (SHEET_H - MARGIN - LABEL_H - page_img.height) // 2
         if py < y0 + MARGIN:
@@ -118,9 +123,14 @@ def _build_sheet(files: list[Path], out_path: Path) -> None:
             fill=TEXT,
             font=font_label,
         )
+        try:
+            page_count = fitz.open(str(pdf)).page_count
+        except Exception:  # noqa: BLE001
+            page_count = 1
+        shown_page = min(page_index + 1, max(1, page_count))
         draw.text(
             (x0 + MARGIN, y0 + SHEET_H - LABEL_H + 16),
-            f"page 1 of {fitz.open(str(pdf)).page_count}",
+            f"page {shown_page} of {page_count}",
             fill=ACCENT,
             font=font_small,
         )
@@ -197,9 +207,11 @@ class PdfPreviewService:
         return [d for d in ALL_DOC_TYPES if d in found]
 
     def build_sheets(
-        self, doc_type: str = "CSF", output_dir: Path | str | None = None
+        self,
+        doc_type: str = "CSF",
+        output_dir: Path | str | None = None,
+        page_index: int = 0,
     ) -> list[Path]:
-        """Build 3-column contact sheets and return the generated PNG paths."""
         if doc_type not in SUPPORTED_DOC_TYPES:
             raise ValueError(
                 f"Unsupported doc_type: {doc_type}. "
@@ -214,7 +226,17 @@ class PdfPreviewService:
             pdfs = _find_pdfs(doc_type, self.output_dir, self.ready_dir)
         if not pdfs:
             self.logger.warning(f"No {doc_type}.pdf found in {out_dir}")
+            self.last_max_pages = 1
             return []
+
+        max_pages = 1
+        for pdf in pdfs:
+            try:
+                with fitz.open(str(pdf)) as doc:
+                    max_pages = max(max_pages, doc.page_count)
+            except Exception:  # noqa: BLE001
+                pass
+        self.last_max_pages = max_pages
 
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         prefix = doc_type.lower()
@@ -222,11 +244,12 @@ class PdfPreviewService:
         chunks = [pdfs[i : i + COLS] for i in range(0, len(pdfs), COLS)]
         for i, chunk in enumerate(chunks, start=1):
             out_path = self.logs_dir / f"{prefix}_contact_sheet_{i}.png"
-            _build_sheet(chunk, out_path)
+            _build_sheet(chunk, out_path, page_index=page_index)
             sheets.append(out_path)
 
         self.logger.success(
-            f"{doc_type}: {len(pdfs)} PDF(s) -> {len(sheets)} sheet(s)"
+            f"{doc_type}: {len(pdfs)} PDF(s) -> {len(sheets)} sheet(s) "
+            f"(page {page_index + 1}/{max_pages})"
         )
         return sheets
 

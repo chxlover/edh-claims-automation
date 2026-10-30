@@ -86,6 +86,61 @@ Verification:
 - `python -m py_compile edh_claims_gui_XML_COPY_BUTTON.py
   final_bill_runner_launcher.py` — OK.
 
+### 2026-10-30 - Feature: PDF Preview prev/next page for multi-page PDFs
+
+Reason:
+
+Operator request 2026-10-30: "pag multiple page ang PDF lagyan mo ng
+prev, next page." The preview rendered only page 1 of every PDF into
+the contact sheets, so multi-page documents (e.g. DTR with up to 14
+pages) could not be inspected beyond the first page.
+
+Files modified:
+
+- `core/pdf_preview_service.py` —
+  (a) `_render_page(pdf_path, cell_w, page_index=0)` renders the
+      requested page (clamped to the document's page count);
+  (b) `_build_sheet(..., page_index=0)` forwards it and updates the
+      per-cell "page X of Y" label;
+  (c) `build_sheets(..., page_index=0)` accepts the page index, computes
+      `last_max_pages` (max page count across the selected PDFs) and
+      passes it through.
+- `gui/pdf_preview_panel.py` —
+  (a) `_page_index` / `_max_pages` state;
+  (b) "Prev Page" / "Next Page" buttons + a "Page X of Y" label in
+      the nav row;
+  (c) `_previous_page()` / `_next_page()` change the page index and
+      regenerate the sheets; buttons enable/disable at the boundaries;
+  (d) `_on_sheets_ready` accepts max_pages and updates `_max_pages` and
+      the page label.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: only page 1 of each PDF was rendered; no way to see
+later pages.
+
+Behavior after: Prev Page / Next Page flip the rendered page for every
+PDF in the current contact sheet (clamped to each PDF's own page
+count), with "Page X of Y" and disabled buttons at the boundaries.
+Zoom still carries over across page changes.
+
+Safety / compatibility:
+
+- Backwards compatible: build_sheets default page_index=0; _render_page
+  default 0; _on_sheets_ready max_pages default 1.
+- FakePreviewService-based zoom tests still pass (6 OK) because they
+  call _on_sheets_ready with the default max_pages.
+- Page index is clamped to each PDF's page count, so a short PDF is
+  never over-indexed.
+
+Verification:
+
+- Functional check: DTR (max 14 pages) -> "Page 1 of 14", next page
+  -> "Page 2 of 14", prev disabled at 0, next disabled at 13. OK.
+- `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
+- `python -m core.pdf_preview_service` standalone — passed.
+- `python -m py_compile core/pdf_preview_service.py
+  gui/pdf_preview_panel.py` — OK.
+
 ### 2026-10-30 - Change: PDF Preview scans only output + READY folders
 
 Reason:

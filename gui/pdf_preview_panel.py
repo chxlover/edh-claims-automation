@@ -42,6 +42,8 @@ class PdfPreviewPanel:
         self.service = service
         self._sheets: list[Path] = []
         self._sheet_index = 0
+        self._page_index = 0
+        self._max_pages = 1
         self._tk_image: ImageTk.PhotoImage | None = None
         # Persistent zoom (fraction of fit size). Never reset on sheet
         # change or refresh — operator request: zoom carries over to the
@@ -86,6 +88,20 @@ class PdfPreviewPanel:
             nav, text="Next", command=self._next_sheet
         )
         self.next_btn.pack(side="left")
+
+        self.prev_page_btn = ttk.Button(
+            nav, text="Prev Page", command=self._previous_page
+        )
+        self.prev_page_btn.pack(side="left", padx=(12, 4))
+        self.next_page_btn = ttk.Button(
+            nav, text="Next Page", command=self._next_page
+        )
+        self.next_page_btn.pack(side="left")
+
+        self.page_label_var = tk.StringVar(value="Page 1 of 1")
+        ttk.Label(nav, textvariable=self.page_label_var).pack(
+            side="left", padx=8
+        )
 
         self.zoom_out_btn = ttk.Button(
             nav, text="Zoom -", command=self.zoom_out
@@ -194,9 +210,15 @@ class PdfPreviewPanel:
 
         def _work():
             try:
-                sheets = self.service.build_sheets(doc_type=doc_type)
+                sheets = self.service.build_sheets(
+                    doc_type=doc_type, page_index=self._page_index
+                )
+                max_pages = getattr(self.service, "last_max_pages", 1)
                 self.parent.after(
-                    0, lambda: self._on_sheets_ready(doc_type, sheets)
+                    0,
+                    lambda: self._on_sheets_ready(
+                        doc_type, sheets, max_pages
+                    ),
                 )
             except Exception as exc:
                 logger.error(f"PDF preview refresh failed: {exc}")
@@ -209,14 +231,18 @@ class PdfPreviewPanel:
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _on_sheets_ready(self, doc_type: str, sheets: list[Path]) -> None:
+    def _on_sheets_ready(
+        self, doc_type: str, sheets: list[Path], max_pages: int = 1
+    ) -> None:
         self._sheets = sheets
         self._sheet_index = 0
+        self._max_pages = max(1, int(max_pages or 1))
         self._render_current()
         self.status_var.set(
             f"{doc_type}: {len(sheets)} sheet(s) for "
             f"{len(self.service.list_patients(doc_type))} patient(s)"
         )
+        self._set_page_state()
 
     def _on_error(self, message: str) -> None:
         self._sheets = []
@@ -277,6 +303,23 @@ class PdfPreviewPanel:
             if self._sheet_index < len(self._sheets) - 1
             else "disabled"
         )
+        self._set_page_state()
+
+    def _set_page_state(self) -> None:
+        try:
+            self.prev_page_btn.configure(
+                state="normal" if self._page_index > 0 else "disabled"
+            )
+            self.next_page_btn.configure(
+                state="normal"
+                if self._page_index < self._max_pages - 1
+                else "disabled"
+            )
+            self.page_label_var.set(
+                f"Page {self._page_index + 1} of {self._max_pages}"
+            )
+        except Exception:  # noqa: BLE001 - widgets may not exist yet.
+            pass
 
     def _previous_sheet(self) -> None:
         if self._sheet_index > 0:
@@ -287,6 +330,16 @@ class PdfPreviewPanel:
         if self._sheet_index < len(self._sheets) - 1:
             self._sheet_index += 1
             self._render_current()
+
+    def _previous_page(self) -> None:
+        if self._page_index > 0:
+            self._page_index -= 1
+            self._refresh()
+
+    def _next_page(self) -> None:
+        if self._page_index < self._max_pages - 1:
+            self._page_index += 1
+            self._refresh()
 
     # -- zoom (persistent across sheets) -----------------------------------
 
