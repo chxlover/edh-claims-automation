@@ -86,6 +86,42 @@ Verification:
 - `python -m py_compile edh_claims_gui_XML_COPY_BUTTON.py
   final_bill_runner_launcher.py` — OK.
 
+### 2026-10-30 - Fix: PDF Preview rejected review document types (ValueError)
+
+Reason:
+
+Operator report 2026-10-30: "ayaw mag generate sa preview." After
+adding MRF/PBC/MMC/ANR/OPR/DTR to the preview, selecting any of them
+raised `ValueError: Unsupported doc_type: MRF. Supported: ('CSF', 'COE')`
+because `build_sheets()` and `list_patients()` validated against the old
+`SUPPORTED_DOC_TYPES = ("CSF", "COE")` tuple instead of the new
+`ALL_DOC_TYPES`. Only CSF and COE could actually generate.
+
+Files modified:
+
+- `core/pdf_preview_service.py` — `SUPPORTED_DOC_TYPES` is now an alias
+  of `ALL_DOC_TYPES` (CSF, COE, MRF, PBC, MMC, ANR, OPR, DTR), so the
+  validation in `build_sheets()` and `list_patients()` accepts every
+  previewable type.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: selecting MRF/PBC/MMC/ANR/OPR/DTR raised ValueError
+and no sheets were generated.
+
+Behavior after: all 8 types generate correctly (verified: CSF 250
+sheets, MRF 22, DTR 245, PBC 20, MMC 4, ANR 9, OPR 17).
+
+Safety / compatibility:
+
+- No interface change; FakePreviewService-based tests unaffected.
+- `SUPPORTED_DOC_TYPES` kept as an alias for backwards compatibility.
+
+Verification:
+
+- Manual check: build_sheets for all 7 non-CSF types succeeded.
+- `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
+- `python -m py_compile core/pdf_preview_service.py` — OK.
+
 ### 2026-10-30 - Feature: PDF Preview supports review documents (MRF, PBC, MMC, ANR, OPR, DTR)
 
 Reason:

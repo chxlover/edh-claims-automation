@@ -43,12 +43,13 @@ CARD_BG = (255, 255, 255)
 TEXT = (30, 30, 30)
 ACCENT = (0, 120, 215)
 
-SUPPORTED_DOC_TYPES = ("CSF", "COE")
 # All document types the preview can render. The "review documents"
 # (MRF, PBC, MMC, ANR, OPR, DTR) are only shown in the UI when at
 # least one PDF of that type actually exists, so the radio-button
 # selection stays short.
 ALL_DOC_TYPES = ("CSF", "COE", "MRF", "PBC", "MMC", "ANR", "OPR", "DTR")
+# Backwards-compatible alias used by build_sheets/list_patients validation.
+SUPPORTED_DOC_TYPES = ALL_DOC_TYPES
 
 @dataclass(frozen=True, slots=True)
 class SheetResult:
