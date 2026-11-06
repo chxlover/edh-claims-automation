@@ -15,14 +15,11 @@ Action vocabulary (stable; the Agent Plan Panel + engine route on these):
     ACTION_DATE_FILL        — blank Prof Fee / Consent / Auth Sign Date
                               (user-confirmed: Auth Sign Date IS Consent,
                               both filled by the existing Date Fill tool)
-    ACTION_FINAL_BILL       — NO FINAL BILL (itemized total zero/null) or
-                              MISMATCH totals were also routed
-                              here per the 2026-09-26 decision —
-                              REVERSED 2026-10-07: the Final Bill
-                              automation only touches bills that
-                              were NEVER finalized. MISMATCH
-                              totals are an operator decision,
-                              so they queue for MANUAL_REVIEW.)
+    ACTION_FINAL_BILL       - NO FINAL BILL (itemized total zero/null) or
+                              MISMATCH (operator request 2026-11-06:
+                              MISMATCH is now also included in Final
+                              Bill, re-finalizing the bill instead of
+                              queuing for manual review.)
                               Runs the verified Final Bill flow (Slice D
                               final_bill_actions.py); the Slice E
                               orchestrator executes it.
@@ -35,7 +32,7 @@ Priority (first match wins — deterministic, no scoring):
     2. Status NO FINAL BILL ...................... FINAL_BILL
     3. Any signed date blank ..................... DATE_FILL
     4. Ready to Generate XML = YES ............... XML_CLICKER
-    5. Anything else (incl. MISMATCH totals) ..... MANUAL_REVIEW
+    5. Anything else (ADM/DIS mismatch, ...) ..... MANUAL_REVIEW
 """
 
 from __future__ import annotations
@@ -202,21 +199,23 @@ def decide_action(row: dict, *, output_root=None) -> ActionDecision:
             ready_verdict=ready,
         )
 
-    # 2b. Charge totals mismatch — operator decision 2026-10-07: the
-    #     Final Bill automation only touches bills that were NEVER
-    #     finalized (NO FINAL BILL). MISMATCH (itemized vs grouped
-    #     charges) needs an operator decision, so it queues for
-    #     manual review instead of auto-re-finaling the bill.
-    #     (Was FINAL_BILL per the 2026-09-26 decision — reversed.)
+    # 2b. Charge totals mismatch — operator decision 2026-11-06: include
+    #     MISMATCH in the Final Bill (re-finalize) instead of queuing it
+    #     for manual review. The Final Bill flow's own never-guess
+    #     confinement matching and per-patient continue-on-error remain
+    #     the safety boundary; the fees gate in final_bill_runner now
+    #     accepts MISMATCH alongside NO FINAL BILL.
     if status == "MISMATCH":
+        tool_ready = TOOL_AVAILABLE[ACTION_FINAL_BILL]
         return ActionDecision(
             patient_folder=folder,
-            action=ACTION_MANUAL_REVIEW,
+            action=ACTION_FINAL_BILL,
             reason=(
                 "MISMATCH ang itemized vs grouped charges — "
-                "manual review (hindi na auto-final bill)."
+                "i-final bill ulit (operator request)."
             ),
-            review_code=REVIEW_MISMATCH,
+            review_code="" if tool_ready else REVIEW_FINAL_BILL_TOOL_MISSING,
+            tool_available=tool_ready,
             ready_verdict=ready,
         )
 
@@ -267,7 +266,7 @@ def decide_action(row: dict, *, output_root=None) -> ActionDecision:
 
     # 5. Anything else (ADM/DIS mismatch, unexpected Status, gate NO
     #    without a known cause) — manual review, never guessed.
-    #    (MISMATCH routed to FINAL_BILL at step 2b, so it never reaches here.)
+    #    (MISMATCH is now routed to FINAL_BILL at step 2b.)
     problems = []
     if row.get(KEY_ADM_MATCH) != "YES":
         problems.append("ADM date mismatch")

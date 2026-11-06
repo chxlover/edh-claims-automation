@@ -457,22 +457,24 @@ class FeesGateTests(unittest.TestCase):
             {FOLDER_JUAN: "NO FINAL BILL", FOLDER_MARIA: "MATCH"},
         )
 
-    def test_only_no_final_bill_is_pending(self):
+    def test_no_final_bill_and_mismatch_are_pending(self):
         tmp, root = make_root(FOLDER_JUAN, FOLDER_MARIA, FOLDER_B)
         try:
             folders = runner.iter_patient_folders(root)
             status_map = {
                 FOLDER_JUAN: "NO FINAL BILL",
                 FOLDER_MARIA: "MATCH",      # already final-billed
-                FOLDER_B: "MISMATCH",       # operator review
+                FOLDER_B: "MISMATCH",       # now included in Final Bill
             }
             pending, skipped = runner.select_final_bill_folders(
                 folders, status_map
             )
-            self.assertEqual([f.name for f in pending], [FOLDER_JUAN])
+            self.assertEqual(
+                [f.name for f in pending], [FOLDER_B, FOLDER_JUAN]
+            )
             self.assertEqual(
                 [(f.name, s) for f, s in skipped],
-                [(FOLDER_B, "MISMATCH"), (FOLDER_MARIA, "MATCH")],
+                [(FOLDER_MARIA, "MATCH")],
             )
         finally:
             tmp.cleanup()
@@ -501,7 +503,7 @@ class FeesGateTests(unittest.TestCase):
         finally:
             tmp.cleanup()
 
-    def test_main_dry_skips_already_billed_and_mismatch_patients(self):
+    def test_main_dry_runs_no_final_bill_and_mismatch_patients(self):
         tmp, root = make_root(FOLDER_JUAN, FOLDER_MARIA, FOLDER_B)
         try:
             rows = [
@@ -516,14 +518,12 @@ class FeesGateTests(unittest.TestCase):
                 code = runner.main(["--output-root", str(root)])
             self.assertEqual(code, runner.EXIT_OK)
             text = out.getvalue()
-            # The NO FINAL BILL patient is the only one listed to run.
+            # NO FINAL BILL and MISMATCH patients are both listed to run.
             self.assertIn(f"[DRY] {FOLDER_JUAN}", text)
+            self.assertIn(f"[DRY] {FOLDER_B}", text)
             self.assertNotIn(f"[DRY] {FOLDER_MARIA}", text)
-            self.assertNotIn(f"[DRY] {FOLDER_B}", text)
-            # The other two are skipped with status + reason.
+            # The already-billed patient is skipped with status + reason.
             self.assertIn("[SKIP]", text)
-            self.assertIn("MISMATCH", text)
-            self.assertIn("manual review", text)
             self.assertIn("final bill na sa HBSys", text)
             self.assertFalse(runner.marker_path(root / FOLDER_JUAN).exists())
         finally:

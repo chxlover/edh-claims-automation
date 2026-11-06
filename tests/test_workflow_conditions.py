@@ -179,16 +179,17 @@ class MismatchRoutingTests(unittest.TestCase):
     """Operator rule 2026-10-12: MISMATCH goes to XML, not to Final Bill.
 
     Verified basis: a fees row is NO FINAL BILL when itemized <= 0.01,
-    so a MISMATCH row has itemized > 0 — the bill is ALREADY finalized
-    in HBSys and does not need Final Bill again.
+    so a MISMATCH row has itemized > 0 - the bill is already finalized
+    in HBSys, but the operator now requests re-finalization (Final Bill)
+    in addition to XML generation (2026-11-06).
     """
 
-    def test_mismatch_is_not_final_billed(self):
-        # Unchanged 2026-10-07 rule: MISMATCH never routes to Final Bill.
+    def test_mismatch_is_final_billed(self):
+        # Operator request 2026-11-06: MISMATCH is now included in Final
+        # Bill (re-finalize) in addition to XML generation.
         ok, reason = evaluate(CONDITION_FEES_SAYS_FINAL_BILL,
                               {"fees_rows": [ROW_MISMATCH]})
-        self.assertFalse(ok)
-        self.assertIn("no patient needs Final Bill", reason)
+        self.assertTrue(ok)
 
     def test_mismatch_allows_xml(self):
         ok, _ = evaluate(CONDITION_FEES_ALLOWS_XML,

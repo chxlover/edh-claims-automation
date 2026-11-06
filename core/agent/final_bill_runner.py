@@ -27,12 +27,12 @@ Resume contract (why re-running is cheap and safe):
 Status gate (operator rule 2026-10-08): before ANY Final Bill, this node
 runs the Fees Check silently (read-only, ``write_reports=False`` — this
 node never writes fees_checker_report.csv/.xlsx; the reports only come
-from the main dashboard Fees Check). Only patients whose fees Status is
-NO FINAL BILL are final-billed. MATCH (already final-billed in HBSys),
-MISMATCH (itemized vs grouped), NO RECORD, ERROR and any folder without
-a fees row are SKIPPED with a [SKIP] reason — the automation must never
-re-final-bill a patient whose bill was already finalized, and MISMATCH
-queues for manual review instead of auto-re-finaling. A failed Fees
+from the main dashboard Fees Check). Patients whose fees Status is NO FINAL BILL or MISMATCH are
+final-billed (operator request 2026-11-06: MISMATCH is included in
+Final Bill). MATCH (already final-billed in HBSys), NO RECORD, ERROR
+and any folder without a fees row are SKIPPED with a [SKIP] reason —
+the automation must never re-final-bill a patient whose bill was
+already finalized. A failed Fees
 Check stops the node (exit 1): a status is never guessed. --force
 overrides the resume marker but NEVER this status gate.
 
@@ -183,8 +183,8 @@ def final_bill_skip_reason(status: str) -> str:
         )
     if status == "MISMATCH":
         return (
-            "MISMATCH ang itemized vs grouped charges — manual review "
-            "(hindi na auto-final bill)."
+            "MISMATCH ang itemized vs grouped charges — kasama na sa "
+            "Final Bill (operator request)."
         )
     if status == "NO RECORD":
         return "walang hpatcon1 record sa HBSys — manual review."
@@ -199,19 +199,17 @@ def select_final_bill_folders(
 ) -> tuple[list[Path], list[tuple[Path, str]]]:
     """Split marker-cleared folders into (pending, skipped).
 
-    Only a fees Status of exactly NO FINAL BILL may run the Final
-    Bill flow (operator rule 2026-10-08: the automation must not
-    touch patients whose bill was already finalized, and MISMATCH
-    rows queue for manual review instead of auto-re-finaling).
-    Every other status — and any folder without a fees row — is
-    skipped together with its status so the operator sees it in
-    the workflow log.
+    Fees Statuses of NO FINAL BILL and MISMATCH may run the Final
+    Bill flow (operator request 2026-11-06: MISMATCH is included in
+    Final Bill). MATCH (already final-billed), NO RECORD, ERROR and
+    any folder without a fees row are skipped together with their
+    status so the operator sees them in the workflow log.
     """
     pending: list[Path] = []
     skipped: list[tuple[Path, str]] = []
     for folder in candidates:
         status = status_map.get(folder.name, "")
-        if status == "NO FINAL BILL":
+        if status in ("NO FINAL BILL", "MISMATCH"):
             pending.append(folder)
         else:
             skipped.append((folder, status))
@@ -333,7 +331,8 @@ def main(argv: list[str] | None = None) -> int:
     mode = "[LIVE]" if args.live else "[DRY]"
     log(
         f"{mode} {len(folders)} patient folder(s) under {output_root}, "
-        f"{len(pending)} pending (NO FINAL BILL), {len(skipped)} skipped"
+        f"{len(pending)} pending (NO FINAL BILL / MISMATCH), "
+        f"{len(skipped)} skipped"
     )
     for folder, status in skipped:
         log(

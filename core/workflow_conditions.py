@@ -63,8 +63,8 @@ CONDITION_LABELS = {
 #: Verified in fees_checker: a MISMATCH row has itemized > 0, i.e. the
 #: bill IS already finalized in HBSys (that is why NO FINAL BILL is the
 #: separate "itemized is 0.00" status). Operator rule 2026-10-12: a
-#: MISMATCH claim therefore does not need Final Bill again — it goes
-#: straight to XML generation.
+#: MISMATCH claim is also routed to Final Bill (operator request
+#: 2026-11-06) in addition to XML generation.
 FEES_STATUS_MISMATCH = "MISMATCH"
 
 #: Fees Status of a row whose bill was never finalized (itemized is 0.00).
@@ -267,8 +267,9 @@ def evaluate(condition: str, context: dict | None = None) -> tuple[bool, str]:
     if name == CONDITION_FEES_ALLOWS_XML:
         # (a) the existing route: Fees says "Ready to Generate XML" = YES
         folders = _folders_needing(context, fees_actions.ACTION_XML_CLICKER)
-        # (b) MISMATCH: the bill is already finalized, so Final Bill is
-        #     skipped and XML generation may run (dates must be filled).
+        # (b) MISMATCH: the bill is already finalized, so XML generation
+        #     may run (dates must be filled); Final Bill is ALSO run now
+        #     (operator request 2026-11-06) to re-finalize.
         folders += mismatch_folders_allowing_xml(context)
         folders = _unique(folders)
         if folders:

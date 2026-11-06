@@ -123,6 +123,63 @@ Verification:
 - `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
 - `python -m py_compile gui/pdf_preview_panel.py` — OK.
 
+### 2026-11-06 - Change: Final Bill now includes MISMATCH status (operator request)
+
+Reason:
+
+Operator request 2026-11-06: "sa final bill include mo sa final bill ang
+mismatch status." Previously MISMATCH patients (itemized vs grouped
+charges differ) were routed to manual review and skipped by the Final
+Bill node; the operator now wants them re-finalized by Final Bill.
+
+Files modified:
+
+- `core/agent/fees_actions.py` — `decide_action()`: MISMATCH now routes
+  to ACTION_FINAL_BILL (instead of ACTION_MANUAL_REVIEW), with a
+  reason noting it is operator-requested re-finalization. Step 2b and
+  the priority table updated. (Affects the Agent Plan and the
+  workflow's fees_says_final_bill condition.)
+- `core/agent/final_bill_runner.py` — `select_final_bill_folders()` now
+  includes MISMATCH alongside NO FINAL BILL in the pending list;
+  `final_bill_skip_reason()` MISMATCH case updated; docstrings and
+  log messages updated.
+- `core/workflow_conditions.py` — comments updated (MISMATCH now goes
+  to Final Bill + XML, not "skips Final Bill").
+- `tests/test_agent_fees_actions.py` — MISMATCH tests updated to assert
+  ACTION_FINAL_BILL (policy change, not weakening).
+- `tests/test_workflow_final_bill_node.py` — MISMATCH now pending;
+  assertions updated.
+- `tests/test_workflow_conditions.py` — MISMATCH now final-billed;
+  assertions updated.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: MISMATCH patients were skipped by the Final Bill node
+and queued for manual review (fees_actions routed them to
+ACTION_MANUAL_REVIEW).
+
+Behavior after: MISMATCH patients are final-billed (re-finalize) in
+addition to being allowed for XML generation. MATCH (already
+final-billed), NO RECORD, ERROR and folders without a fees row are
+still skipped. The Final Bill flow's own never-guess confinement
+matching and per-patient continue-on-error remain the safety boundary.
+
+Safety / compatibility:
+
+- The fees gate in final_bill_runner now accepts MISMATCH alongside
+  NO FINAL BILL; --force still overrides the resume marker but never
+  the status gate.
+- The workflow's fees_says_final_bill condition now includes MISMATCH
+  (via decide_action), so the Final Bill node runs for them.
+- Fees_actions tests (99 total across the three suites) updated to
+  reflect the new policy and still pass.
+
+Verification:
+
+- `tests.test_agent_fees_actions` — 25 OK.
+- `tests.test_workflow_final_bill_node` — (included in the 99) OK.
+- `tests.test_workflow_conditions` — (included in the 99) OK.
+- `python -m py_compile` on all touched files — OK.
+
 ### 2026-11-06 - Fix: Date Fill search_hospital_number now returns bool + verifies entry
 
 Reason:
