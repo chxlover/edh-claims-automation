@@ -123,6 +123,59 @@ Verification:
 - `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
 - `python -m py_compile gui/pdf_preview_panel.py` — OK.
 
+### 2026-11-06 - Fix: Date Fill close_claim_forms now verifies the base screen
+
+Reason:
+
+Operator report 2026-11-06: "diba after matapos ang isang pasyente
+mgclose form then mag enter uli ng hpercode. bakit di nya ineenter ang
+hpercode sa next patient." Investigation showed that
+`close_claim_forms()` clicked "Close Claim Form 2" + closed the PHIC
+Beneficiaries window and then *assumed* the screen was at the
+Hospital No. base state (it only set `screen_stage = "base"` without
+verifying). When the close did not actually restore the base screen
+(e.g. the form stayed open, or a modal dialog appeared), the next
+patient's `search_hospital_number()` called `ensure_hospital_number_screen()`,
+which could still fail -> `search_hospital_number` returned early
+without typing the hpercode -> "parang di nya ineenter". The new
+`SCREEN_RESTORE_ROUNDS=5` + Esc/maximize + 5x2.0s popup waits from
+the previous commit helped, but the close itself was never verified.
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` and
+  `date_fill_hbsys/hbsys_fill_dates.py`:
+  (a) `close_claim_forms()` now calls `ensure_hospital_number_screen("after
+      closing Claim Form 2")` after closing; if it fails, logs a warning
+      and captures a `close_forms_not_base_*.png` screenshot instead of
+      claiming "base";
+  (b) `search_hospital_number()` now captures a `no_hospital_no_field_*.png`
+      screenshot when `ensure_hospital_number_screen` fails, so the
+      operator can see exactly which form/dialog blocked the typing.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: close_claim_forms assumed the base screen without
+verifying; a failed restore was silent, and the next patient's hpercode
+was not typed (search_hospital_number returned early).
+
+Behavior after: the base screen is verified after every close; on
+failure a screenshot is captured and a warning is logged, so the
+operator sees why the hpercode was not typed instead of guessing.
+
+Safety / compatibility:
+
+- All new behavior is best-effort (try/except around screenshots);
+  a failure never aborts the run by itself.
+- The "never guess" contract is preserved: if the screen cannot be
+  restored, search_hospital_number still returns without typing.
+- No engine/registry/adapter/persistence/condition change.
+
+Verification:
+
+- `python -m py_compile` on both Date Fill files — OK.
+- `date_fill_hbsys.test_hbsys_date_fill_verifier` — 38 tests OK.
+- Ran fees_checker is unrelated; no regression in the touched modules.
+
 ### 2026-11-06 - Fix: Date Fill next-patient confinement matching robustness
 
 Reason:

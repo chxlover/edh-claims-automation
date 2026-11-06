@@ -313,6 +313,12 @@ class HbsysOperator:
                 "no screen with a Hospital No. field — not typing the hospital "
                 "number into an unknown form"
             )
+            try:
+                if self.hbsys_window is not None:
+                    shot = self.capture_window(self.hbsys_window, "no_hospital_no_field")
+                    self.log_action(f"captured: {shot}")
+            except Exception:  # noqa: BLE001 - best-effort.
+                pass
             return
         self.double_click(P.HOSPITAL_NO, "Hospital No.")
         self.hotkey("ctrl", "a")
@@ -1242,7 +1248,22 @@ class HbsysOperator:
         sleep_short(0.8)
         self.close_phic_beneficiaries("Close PhilHealth Beneficiaries")
         sleep_short(0.8)
-        self.screen_stage = "base"
+        # Verify the screen is actually back at the Hospital No. base
+        # state (operator rule 2026-11-06: a form that did not close
+        # leaves the next patient without a typing target).
+        if not self.ensure_hospital_number_screen("after closing Claim Form 2"):
+            self.log_action(
+                "screen is NOT at the Hospital No. base state after "
+                "closing forms — next patient may not load correctly"
+            )
+            try:
+                if self.hbsys_window is not None:
+                    shot = self.capture_window(self.hbsys_window, "close_forms_not_base")
+                    self.log_action(f"captured: {shot}")
+            except Exception:  # noqa: BLE001 - best-effort.
+                pass
+        else:
+            self.screen_stage = "base"
 
     def close_open_form_at_run_end(self) -> None:
         """End-of-run Close Form cleanup (operator rule 2026-10-08).
