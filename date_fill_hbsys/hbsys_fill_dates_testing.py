@@ -70,7 +70,7 @@ class P:
     HOSPITAL_NO_EDIT_ID = 1004
     # How many times the screen-restore routine may close the active form
     # while looking for the Hospital No. field (operator rule 2026-10-09).
-    SCREEN_RESTORE_ROUNDS = 3
+    SCREEN_RESTORE_ROUNDS = 5
     # Current HBSys Beneficiaries toolbar always shows a Details button, so the
     # Close Form button sits at x=485. x=435 is the legacy slot for toolbars
     # that have no Details button.
@@ -350,9 +350,9 @@ class HbsysOperator:
                     return False
 
             window = None
-            for attempt in range(1, 4):
+            for attempt in range(1, 6):
                 self.click(P.ADMIT_HISTORY, f"Admit History (attempt {attempt})")
-                sleep_short(1.2 if attempt == 1 else 1.5)
+                sleep_short(1.2 if attempt == 1 else 2.0)
                 window = find_admission_history_window()
                 if window is not None:
                     if attempt > 1:
@@ -363,7 +363,7 @@ class HbsysOperator:
                     break
                 self.log_action(
                     "Admission History popup not yet open "
-                    f"(attempt {attempt}/3); retrying"
+                    f"(attempt {attempt}/5); retrying"
                 )
                 try:
                     pyautogui.press("esc")
@@ -472,12 +472,22 @@ class HbsysOperator:
                     f"HBSys OCR {row.admission_date}-{row.discharge_date}, "
                     f"folder {claim.admission_grid}-{claim.discharge_grid}. Stopping."
                 )
+                try:
+                    shot = self.capture_window(window, "admission_history_mismatch")
+                    self.log_action(f"captured mismatch screenshot: {shot}")
+                except Exception:  # noqa: BLE001 - screenshot is best-effort.
+                    pass
                 return False
 
             self.log_action(
                 "matching Admission History row not found for "
                 f"{claim.admission_grid}-{claim.discharge_grid}; stopping for review"
             )
+            try:
+                shot = self.capture_window(window, "admission_history_not_found")
+                self.log_action(f"captured mismatch screenshot: {shot}")
+            except Exception:  # noqa: BLE001 - screenshot is best-effort.
+                pass
             return False
 
     def _close_admission_history_popup(self) -> bool:
@@ -568,6 +578,19 @@ class HbsysOperator:
                 )
                 try:
                     self.focus_hbsys()
+                    # Dismiss any modal dialog first (Esc), then maximize the
+                    # main window so the Hospital No. field is not covered.
+                    try:
+                        pyautogui.press("esc")
+                    except Exception:  # noqa: BLE001 - best-effort.
+                        pass
+                    sleep_short(0.3)
+                    if self.hbsys_window is not None:
+                        try:
+                            self.hbsys_window.maximize()
+                        except Exception:  # noqa: BLE001 - best-effort.
+                            pass
+                    sleep_short(0.3)
                     pyautogui.hotkey("ctrl", "f4")
                 except Exception as exc:  # noqa: BLE001 - best-effort restore.
                     self.log_action(f"{context}: close attempt failed: {exc}")

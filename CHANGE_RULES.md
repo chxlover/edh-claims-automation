@@ -123,6 +123,58 @@ Verification:
 - `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
 - `python -m py_compile gui/pdf_preview_panel.py` — OK.
 
+### 2026-11-06 - Fix: Date Fill next-patient confinement matching robustness
+
+Reason:
+
+Operator report 2026-11-06 (screenshot ssssss.png): "Date Fill stopped
+before completion. Patient: TALOSIG, MARJORIE CAAYA ... Reason: Could
+not select the correct Admission History confinement period." The
+operator observed that when moving to the next patient the hospital
+number did not seem to be entered first. Investigation showed the
+hospital number WAS being typed (it appears in the stop popup), but
+the confinement row matching then failed — and the batch stopped.
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` (and the same
+  changes in `date_fill_hbsys/hbsys_fill_dates.py` for the production
+  tool):
+  (a) SCREEN_RESTORE_ROUNDS 3 -> 5;
+  (b) ensure_hospital_number_screen() now presses Esc (dismiss any
+      modal dialog) and maximizes the main window before Ctrl+F4, so a
+      modal form or a covered Hospital No. field is restored instead
+      of failing the round;
+  (c) select_admission_history_row() retries the Admit History popup
+      5 times (was 3) with 2.0 s waits (was 1.5 s) for slow HBSys;
+  (d) captures a screenshot of the Admit History popup on confinement
+      mismatch / not-found (best-effort) so the failed row is reviewable.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: 3 restore rounds, 3 popup attempts with 1.2/1.5 s
+waits, and no screenshot on confinement mismatch. A slow HBSys or a
+modal leftover form could exhaust the rounds and stop the batch.
+
+Behavior after: more restore rounds, modal-aware form closing, longer
+popup waits, and a captured screenshot on every confinement mismatch
+so the operator can see exactly what was on screen.
+
+Safety / compatibility:
+
+- All changes are additive and best-effort (try/except around
+  Esc/maximize/screenshot); a failure never aborts the run by itself.
+- The "never guess" confinement matching is unchanged: ambiguous or
+  unmatched rows still return False -> safe skip / stop, never a guess.
+- guard_blind_input (warn mode) is already present in the Date Fill
+  input methods; unchanged.
+- No engine/registry/adapter/persistence/condition change.
+
+Verification:
+
+- `python -m py_compile` on both Date Fill files — OK.
+- `date_fill_hbsys.test_hbsys_date_fill_verifier` — 38 tests OK.
+- `tests.test_hbsys_window` — 24 tests OK.
+
 ### 2026-11-06 - Fix: overlay plain click no longer raises the main GUI
 
 Reason:

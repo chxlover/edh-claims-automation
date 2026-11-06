@@ -99,7 +99,7 @@ class P:
     HOSPITAL_NO_EDIT_ID = 1004
     # How many times the screen-restore routine may close the active form
     # while looking for the Hospital No. field (operator rule 2026-10-09).
-    SCREEN_RESTORE_ROUNDS = 3
+    SCREEN_RESTORE_ROUNDS = 5
     TAB_PROF_FEES = Point(619, 132)
     TAB_CONSENT = Point(872, 132)
     PROF_DATE_SIGNED_CELL = Point(940, 179)
@@ -410,6 +410,13 @@ class HbsysOperator:
             if picked:
                 break
         if not picked:
+            try:
+                _w = find_admission_history_window()
+                if _w is not None:
+                    _shot = self.capture_window(_w, "admission_history_mismatch")
+                    self.log_action(f"captured mismatch screenshot: {_shot}")
+            except Exception:  # noqa: BLE001 - screenshot is best-effort.
+                pass
             return False
         if not self._wait_admission_history_closed():
             self.log_action(
@@ -509,6 +516,17 @@ class HbsysOperator:
                 )
                 try:
                     self.focus_hbsys()
+                    try:
+                        pyautogui.press("esc")
+                    except Exception:  # noqa: BLE001 - best-effort.
+                        pass
+                    sleep_short(0.3)
+                    if self.hbsys_window is not None:
+                        try:
+                            self.hbsys_window.maximize()
+                        except Exception:  # noqa: BLE001 - best-effort.
+                            pass
+                    sleep_short(0.3)
                     pyautogui.hotkey("ctrl", "f4")
                 except Exception as exc:  # noqa: BLE001 - best-effort restore.
                     self.log_action(f"{context}: close attempt failed: {exc}")
