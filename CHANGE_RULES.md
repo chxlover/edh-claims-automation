@@ -123,6 +123,41 @@ Verification:
 - `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
 - `python -m py_compile gui/pdf_preview_panel.py` — OK.
 
+### 2026-11-06 - Fix: overlay plain click no longer raises the main GUI
+
+Reason:
+
+Operator report 2026-11-06: "pag click ko yung overlay nagaappear yung
+GUI dapat hindi." A plain click on the run-status overlay called
+`self.owner.deiconify()`, which raised/deiconified the main GUI window
+while HBSys automation was running (stealing focus). The overlay is
+display-only and must never bring the main window forward on its own.
+
+Files modified:
+
+- `gui/run_status_overlay.py` — `_on_release()` no longer calls
+  `self.owner.deiconify()` on a plain click (now a no-op; dragging
+  still works). Double-click remains the only way to bring the main
+  GUI forward (`<Double-Button-1>` -> `owner.lift()`). Docstring updated.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: a plain click on the overlay deiconified the main GUI.
+
+Behavior after: a plain click does nothing; the overlay never raises
+or deiconifies the main GUI, so HBSys automation is not interrupted.
+Double-click still brings the main window forward.
+
+Safety / compatibility:
+
+- Display-only contract preserved (never takes focus).
+- Dragging and the blink/shine/count/log-tail animations are unchanged.
+- No engine/registry/adapter change.
+
+Verification:
+
+- `python -m py_compile gui/run_status_overlay.py` — OK.
+- Standalone overlay demo ran 4 s without crashing.
+
 ### 2026-11-06 - Fix: Fees Checker confinement selection (match on adm+dis date)
 
 Reason:

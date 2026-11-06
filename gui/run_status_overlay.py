@@ -17,8 +17,10 @@ operator can see at a glance whether the Claims Bot is working:
 The overlay is DRAGGABLE: press anywhere inside it and move the mouse
 to park it wherever the operator wants. The new position sticks for
 the rest of the session — the poll loop no longer snaps the overlay
-back to the corner. A plain click (no drag) still brings the main
-GUI window forward.
+back to the corner. A plain click (no drag) does NOTHING: the overlay
+never raises or deiconifies the main GUI (operator request
+2026-11-06), so HBSys automation is never interrupted. Double-click
+brings the main GUI window forward.
 
 Display-only by design: it never takes focus (safe while HBSys
 mouse/keyboard automation is live), and it hides together with the
@@ -395,9 +397,11 @@ class RunStatusOverlay:
         self._press_y = None
         self._dragging = False
         if not dragged:
-            # Plain click: bring the main GUI forward. NEVER focus_force —
-            # the overlay must not steal focus while HBSys automation runs.
-            self.owner.deiconify()
+            # Plain click does NOTHING: the overlay must never raise or
+            # deiconify the main GUI on its own (operator request
+            # 2026-11-06). Dragging still works; double-click is the only
+            # way to bring the main window forward.
+            pass
 
     def _current_xy(self) -> tuple[int, int]:
         """Current window position from the geometry string (works mapped or withdrawn)."""
