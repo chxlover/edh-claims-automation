@@ -253,7 +253,7 @@ class HbsysOperator:
                 "Screen must be 1920x1080 for this coordinate-based script."
             )
 
-    def search_hospital_number(self, claim: ReadyClaim) -> None:
+    def search_hospital_number(self, claim: ReadyClaim) -> bool:
         # Only a form that actually has the Hospital No. field can load a
         # patient (live failure 2026-10-09, DAYAG: the search ran while the
         # Patient Record Form was still up, the double-click hit a label, the
@@ -272,12 +272,30 @@ class HbsysOperator:
                     self.log_action(f"captured: {shot}")
             except Exception:  # noqa: BLE001 - best-effort.
                 pass
-            return
+            return False
         self.double_click(P.HOSPITAL_NO, "Hospital No.")
         self.hotkey("ctrl", "a")
         self.write(claim.hospital_no)
         self.press("enter")
         sleep_short(1.5)
+        # Verify the searched hospital number actually landed on the base
+        # screen (operator rule 2026-11-06: "hpercode muna ang eenter sa
+        # hospital number"). If the double-click missed the field, the
+        # number went nowhere and the Admit History popup would still show
+        # the PREVIOUS patient — stop instead of guessing.
+        if not self._hospital_number_visible(claim):
+            self.log_action(
+                f"Hospital No. {claim.hospital_no} not visible after the "
+                "search — the number did not land; stopping for review"
+            )
+            try:
+                if self.hbsys_window is not None:
+                    shot = self.capture_window(self.hbsys_window, "hospital_no_not_entered")
+                    self.log_action(f"captured: {shot}")
+            except Exception:  # noqa: BLE001 - best-effort.
+                pass
+            return False
+        return True
 
     def select_admission_history_row(
         self,
@@ -2040,7 +2058,8 @@ class HbsysOperator:
             return "DRY_RUN_VERIFIED_INPUT"
 
         self.focus_hbsys()
-        self.search_hospital_number(claim)
+        if not self.search_hospital_number(claim):
+            return "SKIPPED_HOSPITAL_NUMBER_NOT_LOADED"
         expected_types = (
             {"OPD", "OPDAD"}
             if identity.claim_type == "ABTC"

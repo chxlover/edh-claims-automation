@@ -123,7 +123,57 @@ Verification:
 - `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
 - `python -m py_compile gui/pdf_preview_panel.py` — OK.
 
-### 2026-11-06 - Fix: Date Fill close_claim_forms now verifies the base screen
+### 2026-11-06 - Fix: Date Fill search_hospital_number now returns bool + verifies entry
+
+Reason:
+
+Operator report 2026-11-06 (screenshot ssssss.png): "diba after matapos ang
+isang pasyente mgclose form then mag enter uli ng hpercode. bakit di nya
+ineenter ang hpercode sa next patient." Investigation showed that
+search_hospital_number() returned early (ensure_hospital_number_screen
+failed) but process_claim() ignored the (void) return and continued to
+select_admission_history_row(), which clicked "Admit History" on the
+PREVIOUS patient's screen -> "Could not select the correct Admission History
+confinement period." So the hpercode was "not entered" because the typing
+step was skipped, and the process proceeded to confinement matching anyway.
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` and
+  `date_fill_hbsys/hbsys_fill_dates.py`:
+  (a) search_hospital_number() now returns bool (True = hospital number
+      typed AND verified visible via _hospital_number_visible; False =
+      screen not restorable or number did not land);
+  (b) on failure, captures a no_hospital_no_field_*.png or
+      hospital_no_not_entered_*.png screenshot for diagnosis;
+  (c) process_claim() now checks the return value and returns
+      "SKIPPED_HOSPITAL_NUMBER_NOT_LOADED" instead of proceeding to
+      confinement matching when the hpercode was not entered.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: search_hospital_number() was void; process_claim()
+always proceeded to select_admission_history_row() even when the hpercode
+was never typed, producing "Could not select the correct Admission History
+confinement period" on the previous patient's data.
+
+Behavior after: if the hpercode is not entered/verified, the patient is
+skipped with SKIPPED_HOSPITAL_NUMBER_NOT_LOADED and a screenshot, and
+confinement matching is NOT attempted. The batch continues to the next
+patient (no whole-batch stop) unless CRITICAL_WRONG_ENCOUNTER.
+
+Safety / compatibility:
+
+- Read-only DB; no schema change.
+- Backwards compatible: callers that ignored the (void) return are
+  updated to check it.
+- No engine/registry/adapter/persistence/condition change.
+
+Verification:
+
+- `python -m py_compile` on both Date Fill files — OK.
+- `date_fill_hbsys.test_hbsys_date_fill_verifier` — 38 tests OK.
+
+### 2026-11-06 - Fix: Date Fill close_claim_forms now verifies base screen + screenshot
 
 Reason:
 
