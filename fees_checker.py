@@ -188,19 +188,57 @@ def check_patient_folder(folder_name: str, cur) -> dict:
         row["Remarks"] = "NO hadmlog record for this hospital number"
         return row
 
+    # --- pick the encounter that matches THIS folder's confinement -------
+    # A patient can have several confinements (multiple hadmlog rows), so
+    # match on BOTH admdate and disdate taken from the folder name. Fall
+    # back to admdate-only, then disdate-only, then the closest admdate
+    # (never silently guess the earliest one without saying so).
     chosen = None
+    match_kind = ""
     for enc_row in admissions:
         adm_d = enc_row["admdate"]
+        dis_d = enc_row["disdate"]
         if isinstance(adm_d, dt.datetime):
             adm_d = adm_d.date()
-        if adm_d == parsed["adm"]:
+        if isinstance(dis_d, dt.datetime):
+            dis_d = dis_d.date()
+        if adm_d == parsed["adm"] and dis_d == parsed["dis"]:
             chosen = enc_row
+            match_kind = "exact (adm+dis)"
             break
     if chosen is None:
-        chosen = admissions[0]
+        for enc_row in admissions:
+            adm_d = enc_row["admdate"]
+            if isinstance(adm_d, dt.datetime):
+                adm_d = adm_d.date()
+            if adm_d == parsed["adm"]:
+                chosen = enc_row
+                match_kind = "adm only"
+                break
+    if chosen is None:
+        for enc_row in admissions:
+            dis_d = enc_row["disdate"]
+            if isinstance(dis_d, dt.datetime):
+                dis_d = dis_d.date()
+            if dis_d == parsed["dis"]:
+                chosen = enc_row
+                match_kind = "dis only"
+                break
+    if chosen is None:
+        # closest admdate by absolute day distance
+        chosen = min(
+            admissions,
+            key=lambda r: abs(
+                (r["admdate"].date() if isinstance(r["admdate"], dt.datetime)
+                 else r["admdate"]) - parsed["adm"]
+            ).days,
+        )
+        match_kind = "closest admdate (fallback)"
+    if match_kind != "exact (adm+dis)":
         row["Remarks"] += (
-            f"Admission date {row['Folder ADM']} not found in hadmlog; "
-            f"using earliest encounter. "
+            f"Confinement match: {match_kind} for folder "
+            f"ADM {row['Folder ADM']} / DIS {row['Folder DIS']} "
+            f"(hadmlog adm {chosen['admdate']}, dis {chosen['disdate']}). "
         )
 
     enccode = str(chosen["enccode"]).strip()

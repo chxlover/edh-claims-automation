@@ -123,6 +123,53 @@ Verification:
 - `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
 - `python -m py_compile gui/pdf_preview_panel.py` — OK.
 
+### 2026-11-06 - Fix: Fees Checker confinement selection (match on adm+dis date)
+
+Reason:
+
+Operator request 2026-11-06: "yung WHERE DATE(enc.disdate) = '2026-10-22';
+dapat sa folder kukunin sa DIS(date) kasi yung format ko dyan sa folder
+output yung kinukuha kasi ung isang confinement nya check mo." The fees
+checker's encounter lookup only matched on admdate and fell back to the
+earliest encounter when no admdate matched, which could pick the WRONG
+confinement for a patient with several hadmlog rows (the folder
+represents one specific confinement). The disdate from the folder was
+ignored.
+
+Files modified:
+
+- `fees_checker.py` — `check_patient_folder()` encounter selection now
+  tries, in order: exact match on BOTH admdate and disdate (from the
+  folder), then admdate only, then disdate only, then closest admdate
+  by day distance. A non-exact match is logged in Remarks
+  ("Confinement match: ...") so the operator can see which encounter
+  was used. No date is hardcoded; all come from the parsed folder name.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: match on admdate only; on no match, silently use the
+earliest encounter (could be the wrong confinement for multi-confined
+patients).
+
+Behavior after: match on adm+dis first (the folder's exact confinement),
+with explicit fallbacks and a logged remark when a fallback is used.
+No hardcoded dates.
+
+Safety / compatibility:
+
+- Read-only: still only SELECTs on hadmlog / hpatchrgdtl / hpatgrpchrg.
+- Backwards compatible: rows that previously matched on admdate still
+  match (exact adm+dis is a stricter superset).
+- The remark makes any fallback visible in the report.
+
+Verification:
+
+- Ran fees_checker.py against the 2 output folders:
+    DELA CRUZ: exact match (adm+dis), MISMATCH, Missing = "ACCOM 3,000.00"
+    MAMARIL:   exact match (adm+dis), MATCH, Missing = ""
+  No "Confinement match" remark appeared (both exact), no crash.
+- `python -m py_compile fees_checker.py` — OK.
+- `tests.test_agent_fees_actions` — 25 OK.
+
 ### 2026-11-06 - Feature: Fees Checker per-chargcode breakdown ("Missing Charges")
 
 Reason:
