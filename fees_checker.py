@@ -76,6 +76,7 @@ HEADERS = [
     "DIS Match",
     "Itemized Total (SUM pcchrgamt hpatchrgdtl)",
     "Group Charges (SUM grpamount hpatgrpchrg)",
+    "Missing Charges (chargcode in itemized, not grouped)",
     "Member PHIC No (hpatcon.memphicnum)",
     "Employed (hphiclog.typemem)",
     "Employee No (hphiclog.phicnum2)",
@@ -152,6 +153,7 @@ def check_patient_folder(folder_name: str, cur) -> dict:
         "DIS Match": "",
         "Itemized Total (SUM pcchrgamt hpatchrgdtl)": "",
         "Group Charges (SUM grpamount hpatgrpchrg)": "",
+        "Missing Charges (chargcode in itemized, not grouped)": "",
         "Member PHIC No (hpatcon.memphicnum)": "",
         "Employed (hphiclog.typemem)": "",
         "Employee No (hphiclog.phicnum2)": "",
@@ -224,6 +226,40 @@ def check_patient_folder(folder_name: str, cur) -> dict:
     )
     grouped = float(grp_row["total"] or 0) if grp_row else 0.0
     row["Group Charges (SUM grpamount hpatgrpchrg)"] = _money(grouped)
+
+    # --- per-chargcode breakdown: which itemized charges are NOT grouped ---
+    # (read-only)  Query both sides by chargcode so a missing grouped
+    # charge (e.g. ACCOM not finalized in hpatgrpchrg) is visible instead
+    # of only the total difference. PROC is excluded from the itemized side
+    # to match the Itemized Total column.
+    dtl_codes = _query_all(
+        cur,
+        "SELECT chargcode, SUM(pcchrgamt) AS total FROM hpatchrgdtl "
+        "WHERE enccode=%s AND chargcode!='PROC' GROUP BY chargcode",
+        (enccode,),
+    )
+    grp_codes = _query_all(
+        cur,
+        "SELECT chargcode, SUM(grpamount) AS total FROM hpatgrpchrg "
+        "WHERE enccode=%s GROUP BY chargcode",
+        (enccode,),
+    )
+    itemized_by_code = {
+        str(r["chargcode"]).strip(): float(r["total"] or 0) for r in dtl_codes
+    }
+    grouped_by_code = {
+        str(r["chargcode"]).strip(): float(r["total"] or 0) for r in grp_codes
+    }
+    missing = sorted(
+        code for code in itemized_by_code if code not in grouped_by_code
+    )
+    row["Missing Charges (chargcode in itemized, not grouped)"] = (
+        ", ".join(
+            f"{code} {itemized_by_code[code]:,.2f}" for code in missing
+        )
+        if missing
+        else ""
+    )
 
     # --- member PHIC number: hpatcon.memphicnum (read-only) ----------
     # hpatcon (not hpatcon1) holds the member PHIC number, keyed by enccode.
@@ -338,10 +374,18 @@ def check_patient_folder(folder_name: str, cur) -> dict:
         )
     else:
         row["Status"] = "MISMATCH"
+        missing_note = ""
+        if missing:
+            missing_note = (
+                " Missing (in itemized, not grouped): "
+                + ", ".join(f"{c} PHP {_money(itemized_by_code[c])}" for c in missing)
+                + "."
+            )
         row["Remarks"] += (
             f"TOTAL MISMATCH: itemized PHP {_money(itemized)} "
             f"(hpatchrgdtl) vs grouped PHP {_money(grouped)} "
             f"(hpatgrpchrg) (difference PHP {_money(abs(diff))})."
+            f"{missing_note}"
         )
     return row
 

@@ -123,6 +123,58 @@ Verification:
 - `python -m unittest tests.test_gui_pdf_preview_zoom` — 6 tests OK.
 - `python -m py_compile gui/pdf_preview_panel.py` — OK.
 
+### 2026-11-06 - Feature: Fees Checker per-chargcode breakdown ("Missing Charges")
+
+Reason:
+
+Operator request 2026-11-06: "doon sa fees check, Itemized Total (SUM
+pcchrgamt hpatchrgdtl) dapat exclude mo ang hpatchrgdtl.chargcode='PROC'"
+followed by "check mo nga kung saan ang difference na 3000? nasa output
+folder ang pasyente" and "dapat yung hpercode hindi hardcoded". The
+PROC exclusion was already in place; the real gap was that the report
+only compared TOTALS, so a missing grouped charge (e.g. ACCOM 3,000.00)
+showed up only as a 3,000 difference with no indication of WHICH
+charge was missing.
+
+Files modified:
+
+- `fees_checker.py` —
+  (a) HEADERS: added "Missing Charges (chargcode in itemized, not
+      grouped)" column (after "Group Charges");
+  (b) row init dict: added the same key (default "");
+  (c) check_patient_folder(): after computing itemized/grouped totals,
+      query both sides GROUP BY chargcode and record the chargcodes that
+      exist in itemized (excl PROC) but not in grouped, as
+      "ACCOM 3,000.00"-style entries; store in the new column;
+  (d) MISMATCH remark now also lists the missing charges with amounts.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: the report showed only total itemized vs total grouped
+and a single "TOTAL MISMATCH ... difference PHP X" remark, so the
+operator had to run manual SQL to find which charge was missing.
+
+Behavior after: a dedicated "Missing Charges (chargcode in itemized, not
+grouped)" column lists exactly which chargcodes are in hpatchrgdtl
+(excl PROC) but absent from hpatgrpchrg (e.g. "ACCOM 3,000.00"),
+and the MISMATCH remark repeats them. Empty when there is no mismatch
+of chargcodes.
+
+Safety / compatibility:
+
+- Read-only: still only SELECTs on hpatchrgdtl / hpatgrpchrg.
+- PROC exclusion on the itemized side is unchanged (already present).
+- The new column is added to HEADERS and the row init dict, so CSV/XLSX
+  output stays aligned.
+- No engine/registry/adapter change.
+
+Verification:
+
+- Ran fees_checker.py against the 2 output folders:
+    DELA CRUZ: MISMATCH, Missing Charges = "ACCOM 3,000.00"
+    MAMARIL:   MATCH,   Missing Charges = "" (empty)
+  CSV and XLSX generated successfully; the new column is populated.
+- `python -m py_compile fees_checker.py` — OK.
+
 ### 2026-10-30 - Fix: PDF Preview "Next/Prev Page" reset the sheet to page 1
 
 Reason:
