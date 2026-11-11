@@ -180,6 +180,70 @@ Verification:
 - `tests.test_workflow_conditions` — (included in the 99) OK.
 - `python -m py_compile` on all touched files — OK.
 
+### 2026-11-11 - Feature: shared robust focus helpers for all HBSys-touching tools
+
+Reason:
+
+Operator request 2026-11-11: "itong system ko ba paano pupunta sa XML
+clicker? at add claims upload - test mo nga kung nadedetect nya ang
+window at na cliclick nya." Analysis showed that the XML Clicker had
+the robust focus pattern (ghost filter, taskbar-icon raise, screen
+detection + go_home, stale-window close, verify_screen_layout) but
+Add Claims Upload and Claim Attachments Upload did NOT: Add Claims used
+a weaker inline filter ("HOSPITAL"/"HBSYS" in title, no browser/ghost
+exclusion, no taskbar fallback, no stale close, no screen detection)
+and Claim Attachments targeted only the "UPLOAD CLAIM ATTACHMENTS"
+window with the same weak maximize+set_focus. This could mis-detect a
+Chrome tab titled "HBSys ..." and silently fail to focus the real
+HBSys window.
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_window.py` — added three shared, best-effort
+  helpers (close_stale_windows, focus_via_taskbar_icon,
+  detect_screen_and_recover) so every HBSys-touching tool focuses the
+  same robust way. (Ghost filter was already here via is_ghost_window.)
+- `core/add_claims_uploader.py` — focus_hbsys() now uses the shared
+  helpers + is_hbsys_window/is_browser_window/is_ghost_window filter,
+  excludes the Upload Claims/Attachments popups and the CF5 generator
+  window, and ranks HBSYS/HOMIS titles first. Browser/ghost windows
+  can no longer be picked.
+- `core/claim_attachments_uploader.py` — focus_hbsys() now uses the
+  shared helpers + browser/ghost exclusion; targets the "UPLOAD CLAIM
+  ATTACHMENTS" window specifically.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: Add Claims used a weaker inline filter with no
+browser/ghost exclusion, no taskbar fallback, no stale close, no screen
+detection. Claim Attachments similarly lacked those.
+
+Behavior after: Add Claims and Claim Attachments focus HBSys the same
+robust way as the XML Clicker (close stale popups/forms, screen
+detection + go_home recovery, taskbar-icon raise, maximize+set_focus,
+verify layout, browser/ghost excluded). Detection and clicking are
+therefore consistent across all three HBSys-touching upload/click tools.
+
+Safety / compatibility:
+
+- All new behavior is additive and best-effort (try/except); a failure
+  never aborts a run.
+- No tool-specific window preference is lost (Add Claims still targets
+  the main HBSys window; Claim Attachments still targets the Upload
+  Claim Attachments window).
+- No engine/registry/adapter/persistence/condition change.
+- The XML Clicker keeps its own (identical) inline helpers for now to
+  avoid regressions; the shared ones are the canonical copies.
+
+Verification:
+
+- `python -m py_compile` on hbsys_window.py, add_claims_uploader.py,
+  claim_attachments_uploader.py, xml_generator_clicker.py — OK.
+- `tests.test_hbsys_window` (24) + `tests.test_unicode_typing` (15) +
+  `tests.test_gui_workflow_tab_conditions` (12) — 51 OK.
+- The hbsys_window module's standalone smoke
+  (`python -m date_fill_hbsys.hbsys_window`) still lists HBSys windows
+  when HBSys is open.
+
 ### 2026-11-06 - Fix: Date Fill search_hospital_number now returns bool + verifies entry
 
 Reason:

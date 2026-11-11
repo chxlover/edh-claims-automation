@@ -425,33 +425,49 @@ class AttachmentsOperator:
     # -- navigation -------------------------------------------------------
 
     def focus_hbsys(self) -> None:
-        """Find and focus the main HBSys UPLOAD CLAIM ATTACHMENTS window."""
+        """Find and focus the HBSys UPLOAD CLAIM ATTACHMENTS window (robust)."""
+        from date_fill_hbsys.hbsys_window import (
+            close_stale_windows,
+            detect_screen_and_recover,
+            focus_via_taskbar_icon,
+            is_browser_window,
+            is_ghost_window,
+        )
+
+        close_stale_windows(log_fn=self.log_action, live=self.live)
+        detect_screen_and_recover(log_fn=self.log_action, live=self.live)
+        focus_via_taskbar_icon(log_fn=self.log_action, live=self.live)
+
         desktop = Desktop(backend="win32")
+        candidates = []
         for window in desktop.windows():
             try:
                 title = window.window_text().strip()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 continue
-            title_upper = title.upper()
-            if "UPLOAD" in title_upper and "CLAIM" in title_upper and "ATTACHMENT" in title_upper:
-                self.log_action(f"focus HBSys window: {title!r}")
-                if self.live:
-                    try:
-                        window.maximize()
-                        window.set_focus()
-                    except Exception:
-                        pass
-                self.hbsys_window = window
-                self.maybe_wait()
-                self.verify_screen_layout()
-                return
-        raise RuntimeError(
-            "HBSys UPLOAD CLAIM ATTACHMENTS window not found. "
-            "Open HBSys and navigate to Upload Claim Attachments first."
-        )
+            if is_browser_window(window) or is_ghost_window(window):
+                continue
+            tu = title.upper()
+            if not ("UPLOAD" in tu and "CLAIM" in tu and "ATTACHMENT" in tu):
+                continue
+            candidates.append((window, title))
 
-    # -- patient search ---------------------------------------------------
-
+        if not candidates:
+            raise RuntimeError(
+                "HBSys UPLOAD CLAIM ATTACHMENTS window not found. "
+                "Open HBSys and navigate to Upload Claim Attachments first."
+            )
+        window, title = candidates[0]
+        self.log_action(f"focus Hbsys window: {title!r}")
+        if self.live:
+            try:
+                window.maximize()
+                window.set_focus()
+            except Exception:  # noqa: BLE001
+                pass
+        self.hbsys_window = window
+        self.maybe_wait()
+        self.verify_screen_layout()
     def search_patient(self, patient_name: str) -> bool:
         """Type patient name in search box and click Search.
 

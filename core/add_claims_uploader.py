@@ -247,27 +247,60 @@ class AddClaimsOperator:
     # -- navigation -------------------------------------------------------
 
     def focus_hbsys(self) -> None:
-        """Find and focus the main HBSys window."""
+        """Find and focus the main HBSys window (robust)."""
+        from date_fill_hbsys.hbsys_window import (
+            close_stale_windows,
+            detect_screen_and_recover,
+            focus_via_taskbar_icon,
+            is_browser_window,
+            is_ghost_window,
+            is_hbsys_window,
+        )
+
+        close_stale_windows(log_fn=self.log_action, live=self.live)
+        detect_screen_and_recover(log_fn=self.log_action, live=self.live)
+        focus_via_taskbar_icon(log_fn=self.log_action, live=self.live)
+
         desktop = Desktop(backend="win32")
+        candidates = []
         for window in desktop.windows():
             try:
                 title = window.window_text().strip()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 continue
-            if "HOSPITAL" in title.upper() or "HBSYS" in title.upper():
-                self.log_action(f"focus HBSys window: {title!r}")
-                if self.live:
-                    try:
-                        window.maximize()
-                        window.set_focus()
-                    except Exception:
-                        pass
-                self.hbsys_window = window
-                self.maybe_wait()
-                self.verify_screen_layout()
-                return
-        raise RuntimeError("HBSys window not found. Open HBSys and try again.")
+            if is_browser_window(window) or is_ghost_window(window):
+                continue
+            tu = title.upper()
+            if not (is_hbsys_window(window) or "HOSPITAL" in tu or "HBSYS" in tu or "HOMIS" in tu):
+                continue
+            if "ATTACHMENT" in tu or "UPLOAD CLAIMS" in tu:
+                continue
+            if "CF5 XML" in tu or "GENERATOR" in tu:
+                continue
+            candidates.append((window, title))
 
+        def _rank(item):
+            t = item[1].upper()
+            if "HBSYS" in t or "HOMIS" in t:
+                return 0
+            if "HOSPITAL" in t:
+                return 1
+            return 2
+
+        candidates.sort(key=_rank)
+        if not candidates:
+            raise RuntimeError("HBSys window not found. Open HBSys and try again.")
+        window, title = candidates[0]
+        self.log_action(f"focus Hbsys window: {title!r}")
+        if self.live:
+            try:
+                window.maximize()
+                window.set_focus()
+            except Exception:  # noqa: BLE001
+                pass
+        self.hbsys_window = window
+        self.maybe_wait()
+        self.verify_screen_layout()
     def click_eclaims(self) -> None:
         """Step 1: Click eClaims on the HBSys toolbar."""
         self.log_action("Step 1: Click eClaims")
