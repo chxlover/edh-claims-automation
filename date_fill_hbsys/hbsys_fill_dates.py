@@ -1620,8 +1620,33 @@ class HbsysOperator:
         if self.confirm_each:
             input("Press Enter to process this claim, or Ctrl+C to stop...")
 
+        if not self.ensure_hospital_number_screen("before processing the patient"):
+            self.log_action(
+                "no Hospital No. field before processing - not typing into "
+                "an unknown form"
+            )
+            try:
+                if self.hbsys_window is not None:
+                    shot = self.capture_window(self.hbsys_window, "no_hospital_no_field_before_process")
+                    self.log_action(f"captured: {shot}")
+            except Exception:  # noqa: BLE001 - best-effort.
+                pass
+            return "SKIPPED_NO_HOSPITAL_NUMBER_SCREEN"
         self.focus_hbsys()
         if not self.search_hospital_number(claim):
+            return "SKIPPED_HOSPITAL_NUMBER_NOT_LOADED"
+        if not self._hospital_number_visible(claim):
+            self.log_action(
+                f"Hospital No. {claim.hospital_no} not visible right before "
+                "Admit History - the search did not switch patients; "
+                "stopping for review"
+            )
+            try:
+                if self.hbsys_window is not None:
+                    shot = self.capture_window(self.hbsys_window, "hospital_no_not_visible_before_admit")
+                    self.log_action(f"captured: {shot}")
+            except Exception:  # noqa: BLE001 - best-effort.
+                pass
             return "SKIPPED_HOSPITAL_NUMBER_NOT_LOADED"
         if not self.select_admission_history_row(claim):
             return "needs_review_admission_history"

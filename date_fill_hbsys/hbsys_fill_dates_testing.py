@@ -157,6 +157,18 @@ class HbsysOperator:
         self.maybe_wait()
 
     def focus_hbsys(self) -> None:
+        from hbsys_window import (
+            close_stale_windows,
+            detect_screen_and_recover,
+            focus_via_taskbar_icon,
+            is_browser_window,
+            is_ghost_window,
+        )
+
+        close_stale_windows(log_fn=self.log_action, live=self.live)
+        detect_screen_and_recover(log_fn=self.log_action, live=self.live)
+        focus_via_taskbar_icon(log_fn=self.log_action, live=self.live)
+
         window = find_hbsys_window()
         if window is None:
             raise RuntimeError("HBSys window not found. Open HBSys and try again.")
@@ -165,7 +177,7 @@ class HbsysOperator:
             try:
                 window.maximize()
                 window.set_focus()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         self.hbsys_window = window
         self.maybe_wait()
@@ -2057,8 +2069,41 @@ class HbsysOperator:
             self.log_action("dry-run input encounter verified; no dates were written")
             return "DRY_RUN_VERIFIED_INPUT"
 
+        # Make sure the screen is at the Hospital No. base state BEFORE we
+        # try to load this patient (operator rule 2026-11-13: the previous
+        # patient's form can still be open and would make the Admit History
+        # click land on the wrong patient). Restore it first; if it cannot
+        # be restored, do not type into an unknown form.
+        if not self.ensure_hospital_number_screen("before processing the patient"):
+            self.log_action(
+                "no Hospital No. field before processing - not typing into "
+                "an unknown form"
+            )
+            try:
+                if self.hbsys_window is not None:
+                    shot = self.capture_window(self.hbsys_window, "no_hospital_no_field_before_process")
+                    self.log_action(f"captured: {shot}")
+            except Exception:  # noqa: BLE001 - best-effort.
+                pass
+            return "SKIPPED_NO_HOSPITAL_NUMBER_SCREEN"
         self.focus_hbsys()
         if not self.search_hospital_number(claim):
+            return "SKIPPED_HOSPITAL_NUMBER_NOT_LOADED"
+        # Re-verify the searched hospital number is still on screen BEFORE
+        # clicking Admit History, so a stale previous-patient popup cannot
+        # masquerade as the new patient.
+        if not self._hospital_number_visible(claim):
+            self.log_action(
+                f"Hospital No. {claim.hospital_no} not visible right before "
+                "Admit History - the search did not switch patients; "
+                "stopping for review"
+            )
+            try:
+                if self.hbsys_window is not None:
+                    shot = self.capture_window(self.hbsys_window, "hospital_no_not_visible_before_admit")
+                    self.log_action(f"captured: {shot}")
+            except Exception:  # noqa: BLE001 - best-effort.
+                pass
             return "SKIPPED_HOSPITAL_NUMBER_NOT_LOADED"
         expected_types = (
             {"OPD", "OPDAD"}
