@@ -197,15 +197,25 @@ class HbsysOperator:
         self.maybe_wait()
 
     def focus_hbsys(self) -> None:
+        from hbsys_window import (
+            close_stale_windows,
+            detect_screen_and_recover,
+            focus_via_taskbar_icon,
+        )
+
+        close_stale_windows(log_fn=self.log_action, live=self.live)
+        detect_screen_and_recover(log_fn=self.log_action, live=self.live)
+        focus_via_taskbar_icon(log_fn=self.log_action, live=self.live)
+
         window = find_hbsys_window()
         if window is None:
             raise RuntimeError("HBSys window not found. Open HBSys and try again.")
-        self.log_action(f"focus HBSys window: {window.window_text()!r}")
+        self.log_action(f"focus Hbsys window: {window.window_text()!r}")
         if self.live:
             try:
                 window.maximize()
                 window.set_focus()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         self.hbsys_window = window
         self.maybe_wait()

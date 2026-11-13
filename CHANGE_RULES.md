@@ -320,6 +320,61 @@ Files modified:
       hospital number is not on screen, returns
       SKIPPED_HOSPITAL_NUMBER_NOT_LOADED with a screenshot instead of
       clicking "Admit History" on a stale screen.
+  (c) focus_hbsys() now uses the shared helpers (close_stale_windows,
+      detect_screen_and_recover, focus_via_taskbar_icon) from
+      hbsys_window — browser/ghost excluded, taskbar raise, screen
+      recovery — matching the XML Clicker/Add Claims pattern.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: process_claim() called search_hospital_number() (which
+could return early without typing) and then unconditionally proceeded
+to select_admission_history_row(), which clicked "Admit History" on the
+previous patient's screen -> "Could not select the correct Admission
+History confinement period."
+
+Behavior after: the base screen (Hospital No. field) is verified before
+processing, and the hospital number is re-verified before clicking
+"Admit History". If either fails, the patient is skipped with a
+screenshot and a reason — no Admit History click on a stale screen.
+
+Safety / compatibility:
+
+- All new behavior is additive and best-effort (try/except around
+  screenshots); a failure never aborts the run by itself.
+- The "never guess" confinement matching is unchanged.
+- No engine/registry/adapter/persistence/condition change.
+
+Verification:
+
+- `python -m py_compile` on both Date Fill files — OK.
+- `date_fill_hbsys.test_hbsys_date_fill_verifier` — 38 tests OK.
+
+### 2026-11-06 - Fix: Date Fill close_claim_forms now verifies base screen + screenshot
+
+Reason:
+
+Operator report 2026-11-13: "nakita ko na ang problema after matapos ang
+isang patient niclick nya ung admit history. dapat ang mangyayari ang
+unang step after matapos ang 1st patient dapat double click ang pag
+enterran ng hospital number tapos itype or ipaste ang hospital number
+or hpercode gayan ng first step sa first patient." The process was
+clicking "Admit History" on the previous patient's screen (stale form)
+instead of first typing the hpercode for the new patient.
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` and
+  `date_fill_hbsys/hbsys_fill_dates.py`:
+  (a) process_claim() now calls ensure_hospital_number_screen("before
+      processing the patient") at the very start, before focus_hbsys()
+      and search_hospital_number() — restores the Hospital No. field
+      first; if it cannot be restored, returns
+      SKIPPED_NO_HOSPITAL_NUMBER_SCREEN with a screenshot;
+  (b) process_claim() now re-verifies _hospital_number_visible(claim)
+      right BEFORE select_admission_history_row() — if the searched
+      hospital number is not on screen, returns
+      SKIPPED_HOSPITAL_NUMBER_NOT_LOADED with a screenshot instead of
+      clicking "Admit History" on a stale screen.
 - `CHANGE_RULES.md` — this record.
 
 Behavior before: process_claim() called search_hospital_number() (which
