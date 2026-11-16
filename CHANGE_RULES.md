@@ -294,6 +294,57 @@ Verification:
 - `python -m py_compile` on both Date Fill files — OK.
 - `date_fill_hbsys.test_hbsys_date_fill_verifier` — 38 tests OK.
 
+### 2026-11-16 - Fix: Date Fill close_claim_forms now closes Patient Record Form first
+
+Reason:
+
+Operator report 2026-11-16 (screenshot hospital_no_not_entered_20261111_135239.png):
+"nakita ko na ang problema after matapos ang isang patient niclick nya ung
+admit history. dapat ang mangyayari ang unang step after matapos ang 1st
+patient dapat double click ang pag enterran ng hospital number tapos itype
+or ipaste ang hospital number or hpercode gayan ng first step sa first
+patient." The OCR of the screenshot showed the screen was still on the
+PREVIOUS patient's "Patient Record Form" (PASCUA), not the new patient
+(YASOL). The double-click on P.HOSPITAL_NO landed on the covering form,
+the typed number went nowhere, and _hospital_number_visible() correctly
+returned False — but the root cause was that close_claim_forms() clicked
+"Close Claim Form 2" (P.CLOSE_FORM_CF2) while the open form was actually
+"Patient Record Form" (a different window), so the close missed and the
+form stayed open, covering the Hospital No. field of the main window.
+ensure_hospital_number_screen() then returned True (false positive — the
+field exists on the main window behind the form).
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` and
+  `date_fill_hbsys/hbsys_fill_dates.py`:
+  `close_claim_forms()` now closes any open "Patient Record Form" window
+  (set_focus + close, fallback Ctrl+F4) BEFORE clicking Close Form CF2.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: close_claim_forms() clicked "Close Claim Form 2" only;
+if the open form was "Patient Record Form", the close missed and the
+form stayed open, covering the Hospital No. field. The next patient's
+double-click landed on the wrong window → hpercode not entered → Admit
+History clicked on the previous patient → "Could not select the correct
+Admission History confinement period."
+
+Behavior after: close_claim_forms() first closes any open "Patient
+Record Form" window, then closes CF2 + PHIC beneficiaries, then verifies
+the base screen. The next patient's double-click on the Hospital No.
+field now lands on the correct (main) window.
+
+Safety / compatibility:
+
+- Best-effort: try/except around window close; a failure never aborts.
+- No engine/registry/adapter/persistence/condition change.
+- guard_blind_input (warn mode) unchanged.
+
+Verification:
+
+- `python -m py_compile` on both Date Fill files — OK.
+- `date_fill_hbsys.test_hbsys_date_fill_verifier` — 38 tests OK.
+
 ### 2026-11-13 - Fix: Date Fill next patient now verifies hpercode before Admit History
 
 Reason:

@@ -534,6 +534,34 @@ class HbsysOperator:
         """
         if not self.live:
             return True
+        # Close any open "Patient Record Form" first — it covers the
+        # Hospital No. field on the main window and makes hospital_no_edit()
+        # return a false positive (field exists behind the form). (live
+        # failure 2026-11-13: PASCUA's form stayed open, YASOL's hpercode
+        # was typed into the wrong window.)
+        try:
+            for window in Desktop(backend="win32").windows():
+                try:
+                    title = window.window_text() or ""
+                except Exception:  # noqa: BLE001
+                    title = ""
+                if "Patient Record Form" not in title:
+                    continue
+                self.log_action(f"closing leftover Patient Record Form: {title!r}")
+                try:
+                    window.set_focus()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    window.close()
+                except Exception:  # noqa: BLE001
+                    try:
+                        pyautogui.hotkey("ctrl", "f4")
+                    except Exception:  # noqa: BLE001
+                        pass
+                sleep_short(0.8)
+        except Exception:  # noqa: BLE001
+            pass
         for round_no in range(1, P.SCREEN_RESTORE_ROUNDS + 1):
             if self.hospital_no_edit() is not None:
                 return True
@@ -1267,6 +1295,32 @@ class HbsysOperator:
         sleep_short(0.8)
 
     def close_claim_forms(self) -> None:
+        # Close the Patient Record Form first (it is the form that
+        # actually stays open after a VERIFIED patient and that covers
+        # the Hospital No. field of the main window).
+        try:
+            for window in Desktop(backend="win32").windows():
+                try:
+                    title = window.window_text() or ""
+                except Exception:  # noqa: BLE001
+                    title = ""
+                if "Patient Record Form" not in title:
+                    continue
+                self.log_action(f"closing Patient Record Form: {title!r}")
+                try:
+                    window.set_focus()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    window.close()
+                except Exception:  # noqa: BLE001
+                    try:
+                        pyautogui.hotkey("ctrl", "f4")
+                    except Exception:  # noqa: BLE001
+                        pass
+                sleep_short(0.8)
+        except Exception:  # noqa: BLE001 - best-effort.
+            pass
         self.click(P.CLOSE_FORM_CF2, "Close Claim Form 2")
         sleep_short(0.8)
         self.close_phic_beneficiaries("Close PhilHealth Beneficiaries")
