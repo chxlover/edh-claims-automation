@@ -360,7 +360,7 @@ class RunStatusOverlay:
         )
 
     def _bind_drag(self) -> None:
-        """Make the whole overlay draggable; a plain click focuses the main GUI."""
+        """Drag with the mouse; double-click focuses the main GUI."""
         widgets = [self.window, *self._descendants(self.window)]
         for widget in widgets:
             widget.bind("<ButtonPress-1>", self._on_press)

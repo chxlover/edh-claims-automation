@@ -287,14 +287,16 @@ def _is_blue_band(pixel: tuple[int, ...]) -> bool:
 
 def detect_highlighted_row_band(
     image: Image.Image,
-    scan_start_y: int = 150,
-    scan_end_y: int = 400,
+    scan_start_y: int = 120,
+    scan_end_y: int = 1040,
     scan_start_x: int = 50,
     scan_end_x: int = 1300,
 ) -> tuple[int, int] | None:
     """Detect the blue highlight band in a screenshot.
 
-    Returns (top_y, bottom_y) of the widest blue band, or None.
+    Scans y=120..1040 (the full grid area while excluding the HBSys title
+    bar at the top and the Windows taskbar at the bottom). Returns
+    (top_y, bottom_y) of the widest blue band, or None.
     """
     width, height = image.size
 
@@ -328,13 +330,14 @@ def detect_highlighted_row_band(
 
 def detect_highlighted_row_y(
     image: Image.Image,
-    scan_start_y: int = 150,
-    scan_end_y: int = 400,
+    scan_start_y: int = 120,
+    scan_end_y: int = 1040,
     scan_start_x: int = 50,
     scan_end_x: int = 1300,
 ) -> float | None:
     """Detect the vertical centre of the blue highlight band in a screenshot.
 
+    Uses the same full-grid range as detect_highlighted_row_band (y=120..1040).
     Returns the screen Y coordinate of the row centre, or None.
     """
     band = detect_highlighted_row_band(
@@ -549,11 +552,12 @@ class AttachmentsOperator:
         width, height = screenshot.size
         self.log_action(f"screenshot: {width}x{height}")
 
-        # Detect blue band position
+        # Detect blue band position — scan the full grid area (y=120..1040)
+        # so a patient whose row sits lower in the result list is still found.
         band = detect_highlighted_row_band(
             screenshot,
-            scan_start_y=150,
-            scan_end_y=400,
+            scan_start_y=120,
+            scan_end_y=1040,
             scan_start_x=50,
             scan_end_x=1300,
         )

@@ -99,7 +99,7 @@ class P:
     HOSPITAL_NO_EDIT_ID = 1004
     # How many times the screen-restore routine may close the active form
     # while looking for the Hospital No. field (operator rule 2026-10-09).
-    SCREEN_RESTORE_ROUNDS = 5
+    SCREEN_RESTORE_ROUNDS = 3
     TAB_PROF_FEES = Point(619, 132)
     TAB_CONSENT = Point(872, 132)
     PROF_DATE_SIGNED_CELL = Point(940, 179)
@@ -197,25 +197,15 @@ class HbsysOperator:
         self.maybe_wait()
 
     def focus_hbsys(self) -> None:
-        from hbsys_window import (
-            close_stale_windows,
-            detect_screen_and_recover,
-            focus_via_taskbar_icon,
-        )
-
-        close_stale_windows(log_fn=self.log_action, live=self.live)
-        detect_screen_and_recover(log_fn=self.log_action, live=self.live)
-        focus_via_taskbar_icon(log_fn=self.log_action, live=self.live)
-
         window = find_hbsys_window()
         if window is None:
             raise RuntimeError("HBSys window not found. Open HBSys and try again.")
-        self.log_action(f"focus Hbsys window: {window.window_text()!r}")
+        self.log_action(f"focus HBSys window: {window.window_text()!r}")
         if self.live:
             try:
                 window.maximize()
                 window.set_focus()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         self.hbsys_window = window
         self.maybe_wait()
@@ -310,7 +300,7 @@ class HbsysOperator:
                 "Screen must be 1920x1080 for this coordinate-based script."
             )
 
-    def search_hospital_number(self, claim: ReadyClaim) -> bool:
+    def search_hospital_number(self, claim: ReadyClaim) -> None:
         # Only a form that actually has the Hospital No. field can load a
         # patient (live failure 2026-10-09, DAYAG: the search ran while the
         # Patient Record Form was still up, the double-click hit a label, the
@@ -323,31 +313,40 @@ class HbsysOperator:
                 "no screen with a Hospital No. field — not typing the hospital "
                 "number into an unknown form"
             )
-            try:
-                if self.hbsys_window is not None:
-                    shot = self.capture_window(self.hbsys_window, "no_hospital_no_field")
-                    self.log_action(f"captured: {shot}")
-            except Exception:  # noqa: BLE001 - best-effort.
-                pass
-            return False
-        self.double_click(P.HOSPITAL_NO, "Hospital No.")
-        self.hotkey("ctrl", "a")
-        self.write(claim.hospital_no)
-        self.press("enter")
-        sleep_short(1.5)
-        if not self._hospital_number_visible(claim):
+            return
+        for search_attempt in (1, 2):
             self.log_action(
-                f"Hospital No. {claim.hospital_no} not visible after the "
-                "search — the number did not land; stopping for review"
+                f"searching hospital number for {getattr(claim, 'patient_name', 'patient')} "
+                f"({claim.hospital_no}) attempt {search_attempt}"
             )
-            try:
-                if self.hbsys_window is not None:
-                    shot = self.capture_window(self.hbsys_window, "hospital_no_not_entered")
-                    self.log_action(f"captured: {shot}")
-            except Exception:  # noqa: BLE001 - best-effort.
-                pass
-            return False
-        return True
+            self.double_click(P.HOSPITAL_NO, "Hospital No.")
+            self.hotkey("ctrl", "a")
+            self.write(claim.hospital_no)
+            self.press("enter")
+            sleep_short(2.5)
+            if self._hospital_number_visible(claim):
+                self.log_action(
+                    f"hospital number {claim.hospital_no} is visible after "
+                    f"search attempt {search_attempt}"
+                )
+                break
+            if search_attempt == 1:
+                self.log_action(
+                    f"hospital number {claim.hospital_no} not visible after "
+                    "search attempt 1; re-focusing HBSys and re-typing"
+                )
+                self.focus_hbsys()
+                if not self.ensure_hospital_number_screen("before re-typing the hospital number"):
+                    self.log_action(
+                        "no screen with a Hospital No. field on re-type - "
+                        "stopping this patient for review"
+                    )
+                    return
+            else:
+                self.log_action(
+                    f"hospital number {claim.hospital_no} still not visible after "
+                    "search attempt 2; continuing anyway"
+                )
 
     def select_admission_history_row(self, claim: ReadyClaim) -> bool:
         """Click Admit History, then double-click the row for this admission.
@@ -439,13 +438,6 @@ class HbsysOperator:
             if picked:
                 break
         if not picked:
-            try:
-                _w = find_admission_history_window()
-                if _w is not None:
-                    _shot = self.capture_window(_w, "admission_history_mismatch")
-                    self.log_action(f"captured mismatch screenshot: {_shot}")
-            except Exception:  # noqa: BLE001 - screenshot is best-effort.
-                pass
             return False
         if not self._wait_admission_history_closed():
             self.log_action(
@@ -534,34 +526,6 @@ class HbsysOperator:
         """
         if not self.live:
             return True
-        # Close any open "Patient Record Form" first — it covers the
-        # Hospital No. field on the main window and makes hospital_no_edit()
-        # return a false positive (field exists behind the form). (live
-        # failure 2026-11-13: PASCUA's form stayed open, YASOL's hpercode
-        # was typed into the wrong window.)
-        try:
-            for window in Desktop(backend="win32").windows():
-                try:
-                    title = window.window_text() or ""
-                except Exception:  # noqa: BLE001
-                    title = ""
-                if "Patient Record Form" not in title:
-                    continue
-                self.log_action(f"closing leftover Patient Record Form: {title!r}")
-                try:
-                    window.set_focus()
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    window.close()
-                except Exception:  # noqa: BLE001
-                    try:
-                        pyautogui.hotkey("ctrl", "f4")
-                    except Exception:  # noqa: BLE001
-                        pass
-                sleep_short(0.8)
-        except Exception:  # noqa: BLE001
-            pass
         for round_no in range(1, P.SCREEN_RESTORE_ROUNDS + 1):
             if self.hospital_no_edit() is not None:
                 return True
@@ -573,17 +537,6 @@ class HbsysOperator:
                 )
                 try:
                     self.focus_hbsys()
-                    try:
-                        pyautogui.press("esc")
-                    except Exception:  # noqa: BLE001 - best-effort.
-                        pass
-                    sleep_short(0.3)
-                    if self.hbsys_window is not None:
-                        try:
-                            self.hbsys_window.maximize()
-                        except Exception:  # noqa: BLE001 - best-effort.
-                            pass
-                    sleep_short(0.3)
                     pyautogui.hotkey("ctrl", "f4")
                 except Exception as exc:  # noqa: BLE001 - best-effort restore.
                     self.log_action(f"{context}: close attempt failed: {exc}")
@@ -1295,52 +1248,11 @@ class HbsysOperator:
         sleep_short(0.8)
 
     def close_claim_forms(self) -> None:
-        # Close the Patient Record Form first (it is the form that
-        # actually stays open after a VERIFIED patient and that covers
-        # the Hospital No. field of the main window).
-        try:
-            for window in Desktop(backend="win32").windows():
-                try:
-                    title = window.window_text() or ""
-                except Exception:  # noqa: BLE001
-                    title = ""
-                if "Patient Record Form" not in title:
-                    continue
-                self.log_action(f"closing Patient Record Form: {title!r}")
-                try:
-                    window.set_focus()
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    window.close()
-                except Exception:  # noqa: BLE001
-                    try:
-                        pyautogui.hotkey("ctrl", "f4")
-                    except Exception:  # noqa: BLE001
-                        pass
-                sleep_short(0.8)
-        except Exception:  # noqa: BLE001 - best-effort.
-            pass
         self.click(P.CLOSE_FORM_CF2, "Close Claim Form 2")
         sleep_short(0.8)
         self.close_phic_beneficiaries("Close PhilHealth Beneficiaries")
         sleep_short(0.8)
-        # Verify the screen is actually back at the Hospital No. base
-        # state (operator rule 2026-11-06: a form that did not close
-        # leaves the next patient without a typing target).
-        if not self.ensure_hospital_number_screen("after closing Claim Form 2"):
-            self.log_action(
-                "screen is NOT at the Hospital No. base state after "
-                "closing forms — next patient may not load correctly"
-            )
-            try:
-                if self.hbsys_window is not None:
-                    shot = self.capture_window(self.hbsys_window, "close_forms_not_base")
-                    self.log_action(f"captured: {shot}")
-            except Exception:  # noqa: BLE001 - best-effort.
-                pass
-        else:
-            self.screen_stage = "base"
+        self.screen_stage = "base"
 
     def close_open_form_at_run_end(self) -> None:
         """End-of-run Close Form cleanup (operator rule 2026-10-08).
@@ -1435,11 +1347,41 @@ class HbsysOperator:
             return False
 
     def is_phic_beneficiaries_current_screen(self) -> bool:
+        """True when a PHIC Beneficiaries window is open (window-title based).
+
+        Live failure 2026-11-25 (ABOTAR): the OCR-based check read none of the
+        9 variants as "BENEFICIARIES" even though the window was open, so the
+        guard in close_phic_beneficiaries() never closed it and the flow got
+        stuck with the Hospital No. field covered. Window titles are
+        deterministic and cannot be misread by OCR.
+        """
         if not self.live:
             return False
-        return self.is_phic_beneficiaries_text(
-            self.current_hbsys_text("phic_beneficiaries_close_probe")
-        )
+        if self.hbsys_window is not None:
+            try:
+                for child in self.hbsys_window.children():
+                    try:
+                        title = (child.window_text() or "").strip()
+                        visible = child.is_visible()
+                    except Exception:
+                        continue
+                    if visible and self.is_phic_beneficiaries_text(title):
+                        return True
+            except Exception:  # noqa: BLE001 - best-effort probe.
+                pass
+        try:
+            from pywinauto import Desktop
+
+            for window in Desktop(backend="win32").windows():
+                try:
+                    title = (window.window_text() or "").strip()
+                except Exception:
+                    continue
+                if self.is_phic_beneficiaries_text(title):
+                    return True
+        except Exception:  # noqa: BLE001 - best-effort probe.
+            pass
+        return False
 
     def beneficiaries_window_shows_other_patient(
         self,
@@ -1552,6 +1494,19 @@ class HbsysOperator:
         return True
 
     def close_phic_beneficiaries(self, label: str) -> None:
+        # Only touch the Close Form slots when the PHIC Beneficiaries
+        # window is actually on screen. On the base Billing screen
+        # these slots are the PHIC button (486,58) and Admit History
+        # (435,58) - clicking them blindly opens a popup that covers
+        # the Hospital No. textbox, so the next patient's hpercode is
+        # never typed (operator report 2026-11-16). Guard only; no
+        # other backup behavior is changed.
+        if not self.is_phic_beneficiaries_current_screen():
+            self.log_action(
+                f"{label}: PHIC Beneficiaries not on screen - no Close Form "
+                "click (keeping the Hospital No. field ready for the next patient)"
+            )
+            return
         self.cancel_pending_beneficiary_edit_if_visible()
         for point, slot_label in (
             (P.CLOSE_FORM_BENEFICIARIES, "with Details"),
@@ -1684,34 +1639,8 @@ class HbsysOperator:
         if self.confirm_each:
             input("Press Enter to process this claim, or Ctrl+C to stop...")
 
-        if not self.ensure_hospital_number_screen("before processing the patient"):
-            self.log_action(
-                "no Hospital No. field before processing - not typing into "
-                "an unknown form"
-            )
-            try:
-                if self.hbsys_window is not None:
-                    shot = self.capture_window(self.hbsys_window, "no_hospital_no_field_before_process")
-                    self.log_action(f"captured: {shot}")
-            except Exception:  # noqa: BLE001 - best-effort.
-                pass
-            return "SKIPPED_NO_HOSPITAL_NUMBER_SCREEN"
         self.focus_hbsys()
-        if not self.search_hospital_number(claim):
-            return "SKIPPED_HOSPITAL_NUMBER_NOT_LOADED"
-        if not self._hospital_number_visible(claim):
-            self.log_action(
-                f"Hospital No. {claim.hospital_no} not visible right before "
-                "Admit History - the search did not switch patients; "
-                "stopping for review"
-            )
-            try:
-                if self.hbsys_window is not None:
-                    shot = self.capture_window(self.hbsys_window, "hospital_no_not_visible_before_admit")
-                    self.log_action(f"captured: {shot}")
-            except Exception:  # noqa: BLE001 - best-effort.
-                pass
-            return "SKIPPED_HOSPITAL_NUMBER_NOT_LOADED"
+        self.search_hospital_number(claim)
         if not self.select_admission_history_row(claim):
             return "needs_review_admission_history"
 

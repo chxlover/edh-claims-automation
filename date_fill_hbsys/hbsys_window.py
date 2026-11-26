@@ -107,13 +107,43 @@ def find_hbsys_window_or_raise(backend: str = "win32"):
 # on custom-drawn 4GL windows), then maximize + set_focus + verify layout.
 
 
-def close_stale_windows(log_fn=None, live: bool = True) -> None:
+STALE_POPUP_TITLES = (
+    "Select Encounter",
+    "Admission History",
+    "Admit History",
+    "Rate Validation",
+    "PhilHealth Beneficiaries",
+)
+
+BILLING_FORM_PREFIX = "Billing ("
+
+
+def stale_window_should_close(title, close_billing_forms: bool = True) -> bool:
+    """Pure: True when a window title is a leftover this helper may close.
+
+    ``Billing (...)`` forms are closed only for callers that pass
+    *close_billing_forms* — XML Clicker wants that. Date Fill must NOT:
+    the Billing form carries the Hospital No. field the next patient is
+    typed into (operator rule 2026-11-16: "huwag mong iclose form kasi mag
+    eenter ka ng hospital number"), so Date Fill opts out.
+    """
+    clean = str(title or "").strip()
+    if clean in STALE_POPUP_TITLES:
+        return True
+    return bool(close_billing_forms) and clean.startswith(BILLING_FORM_PREFIX)
+
+
+def close_stale_windows(
+    log_fn=None, live: bool = True, close_billing_forms: bool = True,
+) -> None:
     """Close leftover popups / Billing forms that would steal the click.
 
     Transient popups (Select Encounter, Admission/Admit History, Rate
-    Validation, PhilHealth Beneficiaries) and leftover ``Billing (...)``
-    forms are closed. Everything is best-effort and logged. Safe no-op
-    when *live* is False.
+    Validation, PhilHealth Beneficiaries) are always closed. Leftover
+    ``Billing (...)`` forms are closed only when *close_billing_forms* is
+    True (the XML Clicker default); Date Fill passes False because that form
+    is its Hospital No. entry target. Everything is best-effort and logged.
+    Safe no-op when *live* is False.
     """
     if not live:
         return
@@ -122,14 +152,6 @@ def close_stale_windows(log_fn=None, live: bool = True) -> None:
         from pywinauto import Desktop
     except Exception:  # noqa: BLE001 - helpers must never crash the caller
         return
-
-    stale_popup_titles = (
-        "Select Encounter",
-        "Admission History",
-        "Admit History",
-        "Rate Validation",
-        "PhilHealth Beneficiaries",
-    )
 
     def _log(message: str) -> None:
         if callable(log_fn):
@@ -148,9 +170,9 @@ def close_stale_windows(log_fn=None, live: bool = True) -> None:
             title = window.window_text() or ""
         except Exception:  # noqa: BLE001
             title = ""
-        is_stale_popup = title.strip() in stale_popup_titles
-        is_billing_form = title.strip().startswith("Billing (")
-        if not (is_stale_popup or is_billing_form):
+        if not stale_window_should_close(
+            title, close_billing_forms=close_billing_forms
+        ):
             continue
         _log(f"closing stale window before HBSys focus: {title!r}")
         try:

@@ -125,6 +125,23 @@ class BeneficiariesWindowTextTests(unittest.TestCase):
             )
         )
 
+    def test_current_screen_detects_window_by_title_not_ocr(self):
+        # Live failure 2026-11-25 (ABOTAR): all 9 OCR variants failed to read
+        # "BENEFICIARIES" — the window-title check must still detect it.
+        op = _operator()
+        child = _Window(_Rect(left=0, top=0))
+        child.window_text = mock.Mock(
+            return_value="PHILHEALTH BENEFICIARIES OF ABOTAR, ELMAJANE MANIEGO"
+        )
+        child.is_visible = mock.Mock(return_value=True)
+        window = _Window(_Rect(left=0, top=0))
+        window.children = mock.Mock(return_value=[child])
+        op.hbsys_window = window
+        # OCR is never even called — no screenshot captured.
+        op.current_hbsys_text = mock.Mock(side_effect=AssertionError("OCR called"))
+        self.assertTrue(op.is_phic_beneficiaries_current_screen())
+        op.current_hbsys_text.assert_not_called()
+
 
 class SafeResetTextTests(unittest.TestCase):
     """The reset proof must count a spaced title as the window."""
@@ -458,6 +475,7 @@ class HospitalNumberEditTests(unittest.TestCase):
 
     def test_search_types_once_the_field_is_available(self):
         op = self._op_with_edit(text="")
+        op._hospital_number_visible = mock.Mock(return_value=True)
         with mock.patch.object(hdft.pyautogui, "doubleClick") as dclick, \
                 mock.patch.object(hdft.pyautogui, "hotkey"), \
                 mock.patch.object(hdft.pyautogui, "write") as write, \
@@ -621,7 +639,9 @@ class AdmissionHistoryReloadTests(unittest.TestCase):
 
     def test_popup_that_never_opens_is_reloaded_and_retried(self):
         op = self._operator_with_mocks([200.0])
-        windows = iter([None, None, None, _Window(_Rect(left=116, top=120))])
+        windows = iter(
+            [None, None, None, None, None, _Window(_Rect(left=116, top=120))]
+        )
         with mock.patch.object(
             hdft, "find_admission_history_window",
             side_effect=lambda: next(windows),
@@ -786,6 +806,47 @@ class AdmissionHistoryReloadTests(unittest.TestCase):
             hdft.pyautogui, "press"
         ):
             self.assertFalse(op._close_admission_history_popup())
+
+
+class CloseBeneficiariesGuardTests(unittest.TestCase):
+    """2026-11-16: no blind Close Form click when PHIC is not on screen.
+
+    On the base Billing screen the Close Form slots (485,58 / 435,58) are
+    the PHIC button and Admit History — clicking them blindly opens a popup
+    that covers the Hospital No. textbox, so the NEXT patient's hpercode
+    is never typed. The guard keeps the field ready for the next patient.
+    """
+
+    def test_no_click_when_phic_not_on_screen(self):
+        op = _operator()
+        op.is_phic_beneficiaries_current_screen = mock.Mock(return_value=False)
+        op.cancel_pending_beneficiary_edit_if_visible = mock.Mock()
+        with mock.patch.object(hdft.pyautogui, "click") as click, \
+                mock.patch.object(hdft, "sleep_short"):
+            op.close_phic_beneficiaries("after patient")
+        click.assert_not_called()
+        op.cancel_pending_beneficiary_edit_if_visible.assert_not_called()
+
+    def test_clicks_close_slots_when_phic_is_on_screen(self):
+        op = _operator()
+        op.is_phic_beneficiaries_current_screen = mock.Mock(return_value=True)
+        op.cancel_pending_beneficiary_edit_if_visible = mock.Mock()
+        op.beneficiaries_close_point = mock.Mock(return_value=hdft.P.CLOSE_FORM_BENEFICIARIES_WITH_DETAILS)
+        op.beneficiaries_alternate_close_point = mock.Mock(return_value=hdft.P.CLOSE_FORM_BENEFICIARIES_LEGACY)
+        op.dismiss_phic_details_if_open = mock.Mock()
+        # First slot closes PHIC -> the loop returns after one pass.
+        op.is_phic_beneficiaries_current_screen = mock.Mock(
+            side_effect=[True, False]
+        )
+        with mock.patch.object(hdft.pyautogui, "click") as click, \
+                mock.patch.object(hdft, "sleep_short"):
+            op.close_phic_beneficiaries("after patient")
+        self.assertEqual(
+            click.call_args_list[0].args,
+            (hdft.P.CLOSE_FORM_BENEFICIARIES_WITH_DETAILS.x,
+             hdft.P.CLOSE_FORM_BENEFICIARIES_WITH_DETAILS.y),
+        )
+        op.cancel_pending_beneficiary_edit_if_visible.assert_called_once_with()
 
 
 if __name__ == "__main__":

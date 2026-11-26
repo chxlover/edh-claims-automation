@@ -294,7 +294,313 @@ Verification:
 - `python -m py_compile` on both Date Fill files — OK.
 - `date_fill_hbsys.test_hbsys_date_fill_verifier` — 38 tests OK.
 
+### 2026-11-25 - Fix: PHIC Beneficiaries detection by window title (OCR misread caused a stuck run)
+
+Reason:
+
+Operator reported the flow got stuck at PhilHealth Beneficiaries. The last
+screenshot (15:03:26) was a `phic_beneficiaries_close_probe` — captured by
+the guard in `close_phic_beneficiaries()`. That guard used
+`is_phic_beneficiaries_current_screen()`, which relied on OCR. Checking all
+9 OCR variants of that live screenshot: none read "BENEFICIARIES" (only
+`ABOTAR` / `ELMAJANE` were read), so the check always returned False even
+while the window was open. The guard therefore never closed the PHIC
+window, which covered the Hospital No. field and left the next patient
+unable to type — appearing stuck.
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` and
+  `date_fill_hbsys/hbsys_fill_dates.py`:
+  `is_phic_beneficiaries_current_screen()` now detects the window by its
+  **window title** (MDI child of the HBSys main window first, then any
+  top-level window), using `is_phic_beneficiaries_text()` on the title.
+  No OCR / screenshot, so an OCR misread can never block the close again.
+- `tests/test_hbsys_fill_dates_testing.py`: new test
+  `test_current_screen_detects_window_by_title_not_ocr`.
+- `CHANGE_RULES.md` — this record.
+
+Safety / compatibility:
+
+- Deterministic rule-based detection (no AI/LLM, no new dependency).
+- Only the PHIC window "is open" check changed; the close/cancel flow is
+  otherwise the working backup.
+
+Verification:
+
+- `py_compile` — OK.
+- Live evidence: all 9 OCR variants of `phic_beneficiaries_close_probe_
+  20261125_150326.png` read no "BENEFICIARIES"; window title is
+  `PHILHEALTH BENEFICIARIES OF ABOTAR, ELMAJANE MANIEGO`.
+- Targeted (50 tests) — OK. Full suite — 992 tests OK.
+
+### 2026-11-25 - Fix: Claim Attachments scans the full grid for the highlighted row
+
+Reason:
+
+`click_attach_on_highlighted_row()` only scanned y=150..400 for the blue
+highlighted result row. When the searched patient's row sat lower in the
+list (y > 400), the band was not detected, so the "attach..." link was
+never clicked. Operator: "gusto ko buong screen ang icompute nya para
+maclick ung attach... pag mababa na ung patient di na nya maclick."
+
+Files modified:
+
+- `core/claim_attachments_uploader.py`:
+  - `detect_highlighted_row_band()` / `detect_highlighted_row_y()` defaults
+    `scan_start_y=150 -> 120`, `scan_end_y=400 -> 1040`.
+  - `click_attach_on_highlighted_row()` explicit call site updated to the
+    same y=120..1040 range.
+  - Range covers the whole grid while excluding the HBSys title bar (top)
+    and Windows taskbar (bottom), avoiding false positives.
+
+Verification:
+
+- `py_compile` — OK.
+- Checked against 8 real `debug_attachments_attach_row_*.png` (2026-11-25):
+  4 cases previously detected only a 1px artifact at y=163 and now find the
+  real 18px highlighted row (y=438..550); the rest unchanged.
+- Full suite (`python -m unittest discover -s tests`) — 991 tests OK.
+
+### 2026-11-16 - Fix (on the copied backup): guard PHIC close so the next patient's hpercode is typed
+
+Reason:
+
+After replacing Date Fill with the operator's working backup (see the
+record above), the operator reported the remaining problem: "dapat sa
+susunod na patient type uli ang hpercode or hospital number" — the FIRST
+patient works, but the NEXT patient's hospital number is not typed.
+
+Root cause in the backup: `close_phic_beneficiaries()` blindly clicked the
+Close Form slots (485,58 / 435,58) at the end of every patient even when
+the PHIC Beneficiaries window was NOT open. On the base Billing screen
+those slots are actually the PHIC button (486,58) and Admit History
+(435,58), so the click opened a popup covering the Hospital No. textbox.
+The next patient's `search_hospital_number()` then could not type into the
+field (its `ensure_hospital_number_screen()` failed / ctrl+F4 closed forms).
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` and
+  `date_fill_hbsys/hbsys_fill_dates.py`: `close_phic_beneficiaries()` now
+  returns early when `is_phic_beneficiaries_current_screen()` is False, so
+  no Close Form / PHIC / Admit History click happens on the base screen —
+  the Hospital No. field stays ready for the next patient. This is the
+  only change on top of the verbatim backup copy.
+- `tests/test_hbsys_fill_dates_testing.py`: new `CloseBeneficiariesGuardTests`
+  (2 tests) locking down the guard.
+- `CHANGE_RULES.md` — this record.
+
+Safety / compatibility:
+
+- Minimal change on top of the operator's proven backup; no other backup
+  behavior touched.
+- No new dependency; no engine/registry/workflow change.
+
+Verification:
+
+- `py_compile` on both Date Fill scripts — OK.
+- Marker added to the run log: `[LIVE] DATE FILL BUILD 2026-11-16
+  (next-patient hpercode guard)` — proves the new build is running.
+- `python -m unittest discover -s tests` — 991 tests OK.
+
+### 2026-11-16 - Change: replace Date Fill scripts with the operator's working backup
+
+Reason:
+
+Operator reported the Billing form was still being closed after every
+attempt to fix the "type the next hpercode into the textbox" flow, even
+after the no-close changes. The operator pointed to a Date Fill copy that
+works in production:
+`\\192.168.1.193\Echague District Hospital Files\melvin\AIBOT(BACKUP)\claims_bot_10122026\date_fill_hbsys`.
+Per the operator's explicit instruction, that working Date Fill now
+replaces the one in `C:\claims_bot`.
+
+Files replaced (copied verbatim, `fc.exe` confirmed no differences):
+
+- `date_fill_hbsys/hbsys_fill_dates.py` (from backup 10/9/2026)
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` (from backup 10/9/2026)
+- `tests/test_hbsys_fill_dates_testing.py` and
+  `tests/test_date_fill_confinement.py` — restored to backup versions so
+  they match the restored code.
+
+Files kept (NOT copied, so the GUI/workflow integration is intact):
+
+- `date_fill_hbsys/hbsys_window.py` — the current shared focus helpers
+  (`close_stale_windows`, `focus_via_taskbar_icon`,
+  `detect_screen_and_recover`, `stale_window_should_close`) that the GUI,
+  XML Clicker and Final Bill import; the backup copy lacks these.
+- All other modules, launchers and workflow adapters.
+
+Safety / compatibility:
+
+- The previous modified scripts were preserved under
+  `date_fill_hbsys/_backup_before_copy_20261116_170725/` and
+  `tests/_backup_before_copy_20261116_170913/` before overwriting.
+- `__pycache__` cleared; GUI must be restarted.
+- GUI Date Fill button still launches
+  `C:\claims_bot\date_fill_hbsys\hbsys_fill_dates_testing.py`.
+
+Verification:
+
+- `py_compile` on both Date Fill scripts — OK.
+- Import smoke test (`HOSPITAL_NO Point(166, 174)`) — OK.
+- `python -m unittest discover -s tests` — 989 tests OK.
+
+### 2026-11-16 - Test: align stale MISMATCH and overlay expectations with the 2026-11-06 rules
+
+Reason:
+
+The full suite still asserted two behaviors the operator changed on
+2026-11-06, so it was red at HEAD `78296b4` independently of the Date Fill
+work:
+
+- `tests/test_agent_plan_steps.py` and `tests/test_agent_plan_store.py`
+  expected MISMATCH rows to be MANUAL_REVIEW only (the 2026-10-07 rule).
+  Commit `e5162f5` (2026-11-06) includes MISMATCH in Final Bill instead.
+- `tests/test_run_status_overlay.py` expected a plain click to deiconify
+  the main GUI. Commit `9ffb8f3` (2026-11-06) made a plain click do nothing
+  so HBSys automation is never interrupted; only double-click lifts the
+  main window.
+
+Files modified:
+
+- `tests/test_agent_plan_steps.py` — MISMATCH + missing dates now expects
+  Final Bill + Date Fill.
+- `tests/test_agent_plan_store.py` — MISMATCH rows now expect
+  ACTION_FINAL_BILL and `summary["final_bill"] == 1`.
+- `tests/test_run_status_overlay.py` — small jiggle / plain click assert
+  `deiconify` is NOT called (drag still moves the overlay).
+- `gui/run_status_overlay.py` — `_bind_drag()` docstring corrected (it
+  still said a plain click focuses the GUI).
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: no production change; only stale test expectations and a
+stale docstring failed.
+
+Behavior after: tests match the approved 2026-11-06 behavior; full suite is
+green again.
+
+Safety / compatibility:
+
+- No production behavior change (docstring only).
+- The Date Fill changes and their tests are unaffected.
+
+Verification:
+
+- Full suite (`python -m unittest discover -s tests`) — see the Date Fill
+  record below for the final result.
+
+### 2026-11-16 - Fix: Date Fill raises the Billing form (never closes it) before the next hpercode
+
+Reason:
+
+Operator correction 2026-11-16: "huwag mong iclose form kasi mag eenter ka
+ng hospital number." The earlier same-day fix (`78296b4`) closed the leftover
+"Patient Record Form", but the operator's actual next step is to type the next
+patient's hospital number into the Billing form — closing forms around that
+field is the wrong recovery. Live evidence (2026-11-11 workflow run,
+`logs/hbsys_fill_run_20261111_135244.csv`): PASCUA was VERIFIED, then YASOL
+was skipped with SKIPPED_HOSPITAL_NUMBER_NOT_LOADED. The screenshot
+`logs/hospital_no_not_entered_20261111_135239.png` shows PASCUA's
+"PHILHEALTH BENEFICIARIES" window still open over the Billing form.
+`hospital_no_edit()` returned Edit 1004 because `is_visible()` only reports
+the control's own WS_VISIBLE style even while another window covers it, so
+the double-click and typing landed on the covering grid instead of the field.
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_window.py`:
+  (a) new pure `stale_window_should_close(title, close_billing_forms=True)`;
+  (b) `close_stale_windows()` gains `close_billing_forms` (default True for
+      XML Clicker); Date Fill passes False so the Billing form that holds
+      the Hospital No. field is never closed.
+- `date_fill_hbsys/hbsys_fill_dates_testing.py` and
+  `date_fill_hbsys/hbsys_fill_dates.py`:
+  (a) revert the `78296b4` "close Patient Record Form" loops in
+      `ensure_hospital_number_screen()` and `close_claim_forms()`;
+  (b) `focus_hbsys()` calls `close_stale_windows(...,
+      close_billing_forms=False)`;
+  (c) `hospital_no_edit(require_reachable=True)` now rejects a field that is
+      not the window at its own centre (`WindowFromPoint` + `GetParent`,
+      stdlib ctypes);
+  (d) new `activate_open_billing_form()` raises the visible
+      `Billing (...)` child with `SetWindowPos(HWND_TOP)` + `set_focus()`
+      and never closes anything — no maximize, so the existing form layout
+      is preserved;
+  (e) `ensure_hospital_number_screen()`: reachable field -> True; field
+      exists but covered -> raise the Billing form and re-check; still
+      covered -> log and return False (safe per-patient skip); no field at
+      all -> NO ctrl+F4 any more — the old close rounds could close the
+      Billing form that holds the Hospital No. textbox, so they were
+      removed; the flow just stops safely for review;
+  (f) stale "did not open after 3 attempts" log text corrected to 5;
+  (g) `close_phic_beneficiaries()` returns early when the PHIC window is
+      not actually on screen, so its Close Form slot (485/435, 58) can no
+      longer land on the Billing form's toolbar and close the Billing form;
+  (h) `close_open_form_at_run_end()` no longer clicks the Close Form slot
+      (434, 60) — that slot lives on the *active* form's toolbar, so with
+      the Billing form on top it would close the Billing form. It now only
+      closes a lingering PHIC window and raises the Billing form, leaving
+      the Billing form open for the next step.
+- `tests/test_hbsys_fill_dates_testing.py`,
+  `tests/test_date_fill_confinement.py`, `tests/test_hbsys_window.py` —
+  new tests for covered-field rejection, raise-instead-of-close, raise
+  failure -> False without closing, and `stale_window_should_close`.
+- `tests/test_hbsys_fill_dates_testing.py` — the
+  `test_popup_that_never_opens_is_reloaded_and_retried` fixture now supplies
+  five first-pass probes (commit `c381449` raised the retry count 3 -> 5,
+  but the fixture still had three; the test was already failing at
+  `78296b4`). The end-of-run tests stub `ensure_hospital_number_screen()` so
+  they no longer reach the real desktop/taskbar helper.
+- `CHANGE_RULES.md` — this record.
+
+Behavior before: Date Fill could close the "Billing (...)" form that carries
+the Hospital No. field, and a WS_VISIBLE-but-covered Edit 1004 was treated
+as a typing target, so the next patient's hpercode never landed.
+
+Behavior after: Date Fill keeps the Billing form open. A covered field is
+not a typing target; the Billing form is raised to the front (no maximize —
+the layout that already works is preserved) instead of closing a form, and
+the next hospital number is typed and verified there. If the Billing form
+cannot be raised, the patient is skipped safely for review without closing
+the form. Forms with no Hospital No. field at all are NOT closed either
+(the old ctrl+F4 restore is gone) — the patient just stops safely for
+review instead of losing the textbox needed for the next hpercode. A window
+from another application over HBSys does not
+block the pre-focus check: `focus_hbsys()` brings HBSys forward before any
+typing, so only HBSys-owned windows count as covering the field. The PHIC
+close and end-of-run cleanup no longer click the Close Form slot on the
+Billing form's toolbar, so the Billing form can no longer be closed by a
+stale close slot.
+
+Safety / compatibility:
+
+- No new dependency: `ctypes` is stdlib; pywin32 is already used by
+  `core/agent/final_bill_actions.py`.
+- XML Clicker keeps the old `close_stale_windows()` default
+  (`close_billing_forms=True`) — behavior unchanged there.
+- No engine/registry/adapter/persistence/condition change; dashboard
+  behavior unchanged.
+- Best-effort: window probes/raises are wrapped; a probe error never
+  blocks a genuinely reachable field.
+
+Verification:
+
+- `python -m py_compile` on both Date Fill files + `hbsys_window.py` — OK.
+- `tests.test_hbsys_fill_dates_testing` + `tests.test_date_fill_confinement`
+  + `tests.test_hbsys_window` — 144 tests OK (run twice, deterministic).
+- `date_fill_hbsys.test_hbsys_date_fill_verifier` — 38 tests OK.
+- Full suite (`python -m unittest discover -s tests`) — 995 tests OK.
+- Pre-existing test failures confirmed at HEAD `78296b4` before fixing the
+  fixtures (popup 5-attempt iterator; end-of-run real-desktop clicks; stale
+  MISMATCH and overlay expectations).
+
 ### 2026-11-16 - Fix: Date Fill close_claim_forms now closes Patient Record Form first
+
+> Superseded by the 2026-11-16 correction above: Date Fill must NOT close
+> forms — the operator's next step is entering the hospital number in the
+> Billing form. This entry is kept as history for `78296b4`.
 
 Reason:
 

@@ -237,5 +237,58 @@ class FindHbsysWindowsTests(unittest.TestCase):
         self.assertEqual(factory.calls, ["win32"])
 
 
+class StaleWindowShouldCloseTests(unittest.TestCase):
+    """2026-11-16: Date Fill must not close its Hospital No. entry form.
+
+    The Billing form carries the Hospital No. field the next patient is
+    typed into (operator rule: "huwag mong iclose form kasi mag eenter ka
+    ng hospital number"), so only XML Clicker keeps the old behavior of
+    closing leftover "Billing (...)" forms.
+    """
+
+    def test_transient_popups_are_always_closed(self):
+        for title in (
+            "Select Encounter",
+            "Admission History",
+            "Admit History",
+            "Rate Validation",
+            "PhilHealth Beneficiaries",
+        ):
+            with self.subTest(title=title):
+                self.assertTrue(hbsys_window.stale_window_should_close(title))
+
+    def test_billing_form_is_closed_by_default(self):
+        self.assertTrue(
+            hbsys_window.stale_window_should_close(
+                "Billing (PASCUA, LERSON JAY ORTALIZA)"
+            )
+        )
+
+    def test_billing_form_is_kept_for_date_fill(self):
+        self.assertFalse(
+            hbsys_window.stale_window_should_close(
+                "Billing (PASCUA, LERSON JAY ORTALIZA)",
+                close_billing_forms=False,
+            )
+        )
+
+    def test_popups_are_still_closed_when_billing_is_kept(self):
+        self.assertTrue(
+            hbsys_window.stale_window_should_close(
+                "PhilHealth Beneficiaries", close_billing_forms=False
+            )
+        )
+
+    def test_unrelated_and_empty_titles_are_kept(self):
+        for title in ("", None, "Notepad", "Billing", "Patient Record Form"):
+            with self.subTest(title=title):
+                self.assertFalse(hbsys_window.stale_window_should_close(title))
+
+    def test_surrounding_whitespace_is_ignored(self):
+        self.assertTrue(
+            hbsys_window.stale_window_should_close("  Admission History  ")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

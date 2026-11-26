@@ -470,6 +470,7 @@ class HospitalNumberEditTests(unittest.TestCase):
 
     def test_search_types_once_the_field_is_available(self):
         op = self._op_with_edit(text="")
+        op._hospital_number_visible = mock.Mock(return_value=True)
         with mock.patch.object(hdf.pyautogui, "doubleClick") as dclick, \
                 mock.patch.object(hdf.pyautogui, "hotkey"), \
                 mock.patch.object(hdf.pyautogui, "write") as write, \

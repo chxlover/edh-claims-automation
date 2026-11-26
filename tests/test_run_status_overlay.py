@@ -306,19 +306,21 @@ class RunStatusOverlayTests(unittest.TestCase):
         self.overlay._position()
         self.assertEqual(self._xy(), (moved_x, moved_y))
 
-    def test_small_jiggle_is_a_click_not_a_drag(self):
+    def test_small_jiggle_is_a_click_and_does_not_raise_owner(self):
+        # 2026-11-06: a plain click must never raise/deiconify the main GUI
+        # while HBSys automation is running.
         self._press(100, 100)
         self._motion(102, 100)   # below DRAG_THRESHOLD
         with mock.patch.object(self.overlay.owner, "deiconify") as deiconify:
             self._release(102, 100)
-        deiconify.assert_called_once()
+        deiconify.assert_not_called()
         self.assertFalse(self.overlay._user_moved)
 
-    def test_click_without_drag_focuses_owner(self):
+    def test_plain_click_does_not_raise_owner(self):
         self._press(100, 100)
         with mock.patch.object(self.overlay.owner, "deiconify") as deiconify:
             self._release(100, 100)
-        deiconify.assert_called_once()
+        deiconify.assert_not_called()
 
     def test_drag_does_not_focus_owner(self):
         self._press(100, 100)

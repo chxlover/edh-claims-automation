@@ -137,8 +137,9 @@ class BuildPlanFromRowsTests(unittest.TestCase):
         self.assertEqual(summary["final_bill"], 0)
         self.assertIn("No patient rows", note)
 
-    def test_mismatch_rows_are_manual_review_not_final_bill(self):
-        # 2026-10-07: only NO FINAL BILL is auto-final-billed.
+    def test_mismatch_rows_are_final_billed(self):
+        # 2026-11-06: MISMATCH is included in Final Bill (supersedes the
+        # 2026-10-07 manual-review-only rule).
         items, summary, note = store.build_plan_from_rows([
             dict(ready_row("MISMATCH PATIENT"),
                  **{"Status": "MISMATCH",
@@ -146,10 +147,10 @@ class BuildPlanFromRowsTests(unittest.TestCase):
         ])
         self.assertEqual(
             [item["action"] for item in items],
-            [actions.ACTION_MANUAL_REVIEW],
+            [actions.ACTION_FINAL_BILL],
         )
-        self.assertEqual(summary["manual_review"], 1)
-        self.assertEqual(summary["final_bill"], 0)
+        self.assertEqual(summary["manual_review"], 0)
+        self.assertEqual(summary["final_bill"], 1)
 
 
 class FanOutTests(unittest.TestCase):
