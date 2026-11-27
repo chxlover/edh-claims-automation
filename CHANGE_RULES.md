@@ -294,6 +294,95 @@ Verification:
 - `python -m py_compile` on both Date Fill files — OK.
 - `date_fill_hbsys.test_hbsys_date_fill_verifier` — 38 tests OK.
 
+### 2026-11-27 - Fix: Final Bill handles the 'Invalid PIN' dialog (click OK, next patient)
+
+Reason:
+
+Live 2026-11-27 (RAMOS): after Print Options OK, HBSys raised a
+"Please Check — Invalid PIN" dialog. Final Bill only knew the "File save"
+and "Call Administrator" prompts, so it reported BLOCKED and stopped the
+whole batch. Operator rule: "i-click ang OK, tuloy ang bill" / "pagka click
+ng OK next patient na agad" — dismiss it with OK and hand the patient back
+to the runner so the next one is processed.
+
+Files modified:
+
+- `core/agent/final_bill_actions.py`:
+  - `find_invalid_pin_dialog()` — exact title "Please Check", class
+    `#32770`, body must contain "INVALID PIN" (deterministic, no OCR).
+  - `dismiss_invalid_pin_dialog()` — raise + click OK, verify gone.
+  - `clear_blocking_popups()` dismisses it before the next patient load.
+  - `FinalBillRunner` has an injectable `invalid_pin_fn`; at the top of
+    its loop, if the dialog is open it clicks OK and returns immediately
+    (no marker, patient not billed) so the runner moves to the next one.
+- `core/agent/final_bill_actions.py` OCR-cache key fix: `_ocr_cache_key`
+  now converts str -> Path (the Final Bill admission-history capture returns
+  a str path, which previously raised "'str' object has no attribute 'stat'").
+- `tests/test_agent_final_bill.py`: new test
+  `test_invalid_pin_dialog_skips_patient_immediately`.
+- `CHANGE_RULES.md` — this record.
+
+Verification:
+
+- `py_compile` — OK. Targeted (105) OK. Full suite — 998 tests OK.
+- LIVE: `final_bill_runner --live --limit 1` on RAMOS — dialog detected,
+  OK clicked, patient skipped, no crash; second run reproduced cleanly
+  (no OCR error).
+
+Safety / compatibility:
+
+- The dialog identity is exact (title + class + body marker), so no other
+  "Please Check" dialog can be mistaken for it.
+- The skipped patient carries no marker, so it stays pending for review.
+- No AI/LLM, no new dependency, no change to the two known prompts.
+
+### 2026-11-27 - Feature: Speed up Date Fill (OCR cache + smart retry)
+
+Reason:
+
+The operator asked to speed up the processing. Profiling showed the same
+screenshot was read 4-9x per step, each running 9 tesseract variants at up
+to 3x scale (~4.2s per read), and the hpercode search always slept a fixed
+2.5s even when HBSys had already loaded the patient.
+
+Files modified:
+
+- `date_fill_hbsys/hbsys_read_admission_history.py` and
+  `hbsys_read_admission_history_testing.py`:
+  - Added a bounded per-process OCR cache keyed by (path, mtime_ns, size):
+    `clear_ocr_cache()`, `_ocr_cache_get/_ocr_cache_put`. A rewritten file
+    can never return a stale result. Max 128 entries.
+  - `read_ocr_item_variants_tesseract()` now returns the cached result on
+    a repeat read of the same capture.
+  - Wrapped `Image.open()` in a context manager so the file handle is
+    released (fixed a Windows PermissionError on file rewrite).
+- `date_fill_hbsys/hbsys_fill_dates.py` and
+  `hbsys_fill_dates_testing.py`:
+  - Added `_wait_for_hospital_number(claim, timeout=3.0)` — adaptive wait
+    that polls every 0.25s and returns as soon as the hpercode is visible,
+    replacing the fixed 2.5s sleep (often <1s instead of 2.5s).
+  - Both `main()` functions call `clear_ocr_cache()` at run start.
+- `tests/test_ocr_cache.py` (new): 3 headless tests — same file read once,
+  rewritten file re-runs OCR, clear-cache forces a re-read.
+- `tests/test_hbsys_fill_dates_testing.py`: 2 tests for the adaptive wait
+  (returns immediately when loaded; polls once until loaded).
+- `CHANGE_RULES.md` — this record.
+
+Verification:
+
+- Measured on a real 1936x1056 capture: 1st OCR read 4.16s, 2nd (cached)
+  0.0000s, identical result.
+- `py_compile` — OK.
+- Full suite (`python -m unittest discover -s tests`) — 997 tests OK.
+
+Safety / compatibility:
+
+- Cache key includes mtime+size; a changed capture always re-runs OCR, so
+  no stale row decision is introduced.
+- Adaptive wait keeps the same 3s ceiling as the old retry logic; it only
+  returns earlier when the patient is already loaded.
+- No AI/LLM, no new dependency, no change to the match rules.
+
 ### 2026-11-25 - Fix: PHIC Beneficiaries detection by window title (OCR misread caused a stuck run)
 
 Reason:

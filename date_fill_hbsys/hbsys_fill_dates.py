@@ -24,6 +24,7 @@ from hbsys_read_admission_history import (
     read_ocr_item_variants,
     read_ocr_items,
     select_confinement_row,
+    clear_ocr_cache,
 )
 from hbsys_date_fill_precheck import (
     PRECHECK_PROCESS,
@@ -300,6 +301,20 @@ class HbsysOperator:
                 "Screen must be 1920x1080 for this coordinate-based script."
             )
 
+    def _wait_for_hospital_number(self, claim, timeout: float = 3.0) -> bool:
+        """Adaptive wait: poll for the loaded hpercode instead of a fixed sleep.
+
+        Returns as soon as the number is visible (often <1s), so a fast HBSys
+        no longer costs a full 2.5s per patient. Polls every 0.25s up to
+        *timeout*, then does one final check.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._hospital_number_visible(claim):
+                return True
+            sleep_short(0.25)
+        return self._hospital_number_visible(claim)
+
     def search_hospital_number(self, claim: ReadyClaim) -> None:
         # Only a form that actually has the Hospital No. field can load a
         # patient (live failure 2026-10-09, DAYAG: the search ran while the
@@ -323,8 +338,8 @@ class HbsysOperator:
             self.hotkey("ctrl", "a")
             self.write(claim.hospital_no)
             self.press("enter")
-            sleep_short(2.5)
-            if self._hospital_number_visible(claim):
+            loaded = self._wait_for_hospital_number(claim, timeout=3.0)
+            if loaded:
                 self.log_action(
                     f"hospital number {claim.hospital_no} is visible after "
                     f"search attempt {search_attempt}"
@@ -1811,6 +1826,7 @@ def main() -> int:
 
     operator = HbsysOperator(live=args.live, pause=args.pause, confirm_each=args.confirm_each)
     verifier = HbsysDateFillVerifier()
+    clear_ocr_cache()  # fresh run: never reuse a capture from a previous run
     results: list[dict[str, str]] = []
 
     print(f"Mode: {'LIVE' if args.live else 'DRY-RUN'}")

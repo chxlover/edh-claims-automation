@@ -1238,6 +1238,57 @@ def answer_dialog_no(window) -> str:
     return button.window_text()
 
 
+def find_invalid_pin_dialog():
+    """The 'Please Check — Invalid PIN' modal, or None.
+
+    Live 2026-11-27 (RAMOS): this dialog appears after the Print Options OK
+    and is NOT one of the two known prompts (File save / Call Administrator),
+    so the state machine reports BLOCKED and the whole batch stops. It is
+    identified by its exact title and an "Invalid PIN" body marker — never by
+    OCR — so a different 'Please Check' dialog cannot be mistaken for it.
+    """
+    window = find_dialog_exact("Please Check")
+    if window is None:
+        return None
+    try:
+        if window.class_name() != "#32770":
+            return None
+        body = dialog_text(window).upper()
+    except Exception:  # noqa: BLE001 - window died mid-probe
+        return None
+    if "INVALID PIN" not in body:
+        return None
+    return window
+
+
+def dismiss_invalid_pin_dialog(log_fn=None) -> bool:
+    """Click OK on the 'Invalid PIN' dialog. Returns True if it was dismissed.
+
+    Operator rule 2026-11-27: "i-click ang OK, tuloy ang bill" — after the
+    dialog is closed the runner moves to the next patient immediately. Ok is
+    clicked via the verified accept-button helper, then the dialog is checked
+    gone; nothing else is guessed.
+    """
+    log = log_fn or (lambda message: None)
+    dialog = find_invalid_pin_dialog()
+    if dialog is None:
+        return False
+    import time
+
+    log("'Invalid PIN' dialog is open — clicking OK and moving to the next patient")
+    raise_to_top(dialog)
+    answer_dialog_ok(dialog)
+    try:
+        deadline = time.time() + SAVE_VERIFY_TIMEOUT_SECONDS
+        while time.time() < deadline:
+            if not dialog.is_visible():
+                return True
+            time.sleep(0.1)
+    except Exception:  # noqa: BLE001 - handle died == dismissed
+        return True
+    return False
+
+
 def answer_dialog_ok(window) -> str:
     """Answer the 'File save' prompt with the OK at the BOTTOM of the dialog.
 
@@ -1806,6 +1857,12 @@ def clear_blocking_popups(log_fn=None) -> bool:
     guessing.
     """
     log = log_fn or (lambda message: None)
+
+    # 'Please Check — Invalid PIN' (live 2026-11-27): appears after Print
+    # Options OK, is not a known prompt, and would block the whole batch.
+    # Dismiss it first so the next patient can be loaded.
+    if dismiss_invalid_pin_dialog(log):
+        log("dismissed 'Invalid PIN' dialog before the patient load")
 
     popup = find_admission_history()
     if popup is not None:
@@ -2862,6 +2919,7 @@ class FinalBillRunner:
         click_ok_fn=None,
         save_click_ok_fn=None,
         confirm_no_fn=None,
+        invalid_pin_fn=None,
         log_fn=None,
         max_steps: int = 12,
         initial_final_checked: bool = False,
@@ -2875,6 +2933,11 @@ class FinalBillRunner:
         self.click_ok_fn = click_ok_fn or self._click_ok
         self.save_click_ok_fn = save_click_ok_fn or self._save_click_ok
         self.confirm_no_fn = confirm_no_fn or self._confirm_no
+        # 'Please Check — Invalid PIN' dismissal (2026-11-27); injectable for
+        # headless tests. Returns True if the dialog was open and dismissed.
+        self.invalid_pin_fn = invalid_pin_fn or (
+            lambda log: dismiss_invalid_pin_dialog(log)
+        )
         # No close_form_fn and no close_form_at_end: the Close Form toolbar
         # click is not part of this flow.
         self.log_fn = log_fn or (lambda message: None)
@@ -2901,6 +2964,18 @@ class FinalBillRunner:
         repeat_step = ""
         repeat_count = 0
         for _ in range(self.max_steps):
+            # Operator rule 2026-11-27: the 'Please Check — Invalid PIN'
+            # dialog is not a known prompt. Click its OK, then hand this
+            # patient back to the runner (no marker) so the NEXT patient is
+            # processed immediately instead of blocking the whole batch.
+            if self.invalid_pin_fn(self.log_fn):
+                result.success = False
+                result.reason = (
+                    "Invalid PIN dialog dismissed with OK — moved to the "
+                    "next patient (this patient was not final-billed)"
+                )
+                self.log_fn(f"final bill skip: {result.reason}")
+                return result
             screen = self.detect_fn()
             result.screens_seen.append(screen)
             decision = plan_step(

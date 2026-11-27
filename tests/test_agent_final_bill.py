@@ -685,6 +685,28 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(fake.calls, [])
         self.assertIn("CLOSED", result.reason)
 
+    def test_invalid_pin_dialog_skips_patient_immediately(self):
+        # 2026-11-27: an 'Invalid PIN' dialog is dismissed with OK and the
+        # patient is handed straight back to the runner (next patient), with
+        # no Final Bill steps planned and no GUI primitives touched.
+        fake = FakeHbsys(form_open=True)
+        fake.detect = lambda: screens.SCREEN_DIALOG
+        dismissed = []
+
+        def on_invalid_pin(log):
+            dismissed.append(True)
+            return True
+
+        runner = make_runner(fake, invalid_pin_fn=on_invalid_pin)
+        result = runner.run()
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.actions, [])
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(len(dismissed), 1)
+        self.assertIn("Invalid PIN", result.reason)
+        self.assertIn("next patient", result.reason)
+
     def test_missing_billing_form_blocks_as_human_step(self):
         fake = FakeHbsys(form_open=False)
         fake.detect = lambda: screens.SCREEN_ORDER_TRANSACTIONS

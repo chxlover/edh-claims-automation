@@ -17,6 +17,46 @@ DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{4}\b")
 TIME_RE = re.compile(r"\b\d{1,2}[.:]\d{2}\s*(?:AM|PM)?\b", re.IGNORECASE)
 TYPE_WORDS = {"ADMIT", "OPD", "OPDAD", "ER", "EMERGENCY"}
 
+# OCR result cache (per-process). A screenshot is captured once and then read
+# by several checks in the same step (row locate, proof, re-probe). Re-reading
+# the same file 4-9x with 9 tesseract variants each was the main time sink.
+# Key = (path, mtime_ns, size) so a rewritten/rotated file can never return a
+# stale result. Bounded to avoid unbounded growth across a long patient batch.
+_OCR_CACHE: dict[tuple[str, int, int], list[list["OcrItem"]]] = {}
+_OCR_CACHE_MAX = 128
+
+
+def _ocr_cache_key(image_path) -> tuple[str, int, int] | None:
+    try:
+        from pathlib import Path as _Path
+
+        path = _Path(image_path)  # callers pass both Path and str
+        stat = path.stat()
+        return (str(path), stat.st_mtime_ns, stat.st_size)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _ocr_cache_get(image_path) -> list[list["OcrItem"]] | None:
+    key = _ocr_cache_key(image_path)
+    if key is None:
+        return None
+    return _OCR_CACHE.get(key)
+
+
+def _ocr_cache_put(image_path, variants: list[list["OcrItem"]]) -> None:
+    key = _ocr_cache_key(image_path)
+    if key is None:
+        return
+    if len(_OCR_CACHE) >= _OCR_CACHE_MAX:
+        _OCR_CACHE.pop(next(iter(_OCR_CACHE)))
+    _OCR_CACHE[key] = variants
+
+
+def clear_ocr_cache() -> None:
+    """Clear the OCR cache (call at the start of a fresh run)."""
+    _OCR_CACHE.clear()
+
 
 @dataclass(frozen=True)
 class OcrItem:
@@ -114,15 +154,19 @@ def read_ocr_items_tesseract(image_path: Path) -> list[OcrItem]:
 def read_ocr_item_variants_tesseract(image_path: Path) -> list[list[OcrItem]]:
     import pytesseract
 
-    image = Image.open(image_path)
-    item_variants: list[list[OcrItem]] = []
-    for variant, scale, config in build_ocr_variants(image):
-        data = pytesseract.image_to_data(
-            variant,
-            output_type=pytesseract.Output.DICT,
-            config=config,
-        )
-        item_variants.append(ocr_data_to_items(data, scale=scale))
+    cached = _ocr_cache_get(image_path)
+    if cached is not None:
+        return cached
+    with Image.open(image_path) as image:
+        item_variants: list[list[OcrItem]] = []
+        for variant, scale, config in build_ocr_variants(image):
+            data = pytesseract.image_to_data(
+                variant,
+                output_type=pytesseract.Output.DICT,
+                config=config,
+            )
+            item_variants.append(ocr_data_to_items(data, scale=scale))
+    _ocr_cache_put(image_path, item_variants)
     return item_variants
 
 

@@ -21,6 +21,7 @@ from hbsys_read_admission_history_testing import (
     read_focused_admission_row_variants,
     read_ocr_item_variants,
     read_ocr_items,
+    clear_ocr_cache,
 )
 from hbsys_ready_claims import (
     DEFAULT_READY_DIR,
@@ -253,6 +254,20 @@ class HbsysOperator:
                 "Screen must be 1920x1080 for this coordinate-based script."
             )
 
+    def _wait_for_hospital_number(self, claim, timeout: float = 3.0) -> bool:
+        """Adaptive wait: poll for the loaded hpercode instead of a fixed sleep.
+
+        Returns as soon as the number is visible (often <1s), so a fast HBSys
+        no longer costs a full 2.5s per patient. Polls every 0.25s up to
+        *timeout*, then does one final check.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._hospital_number_visible(claim):
+                return True
+            sleep_short(0.25)
+        return self._hospital_number_visible(claim)
+
     def search_hospital_number(self, claim: ReadyClaim) -> None:
         # Only a form that actually has the Hospital No. field can load a
         # patient (live failure 2026-10-09, DAYAG: the search ran while the
@@ -281,8 +296,8 @@ class HbsysOperator:
             self.hotkey("ctrl", "a")
             self.write(claim.hospital_no)
             self.press("enter")
-            sleep_short(2.5)
-            if self._hospital_number_visible(claim):
+            loaded = self._wait_for_hospital_number(claim, timeout=3.0)
+            if loaded:
                 self.log_action(
                     f"hospital number {claim.hospital_no} is visible after "
                     f"search attempt {search_attempt}"
@@ -2387,6 +2402,10 @@ def main() -> int:
         claim_type=args.claim_type,
         enable_abtc=args.enable_abtc,
     )
+    # Fresh run: clear the OCR cache so no capture from a previous run is
+    # ever reused (cache keys use mtime+size, so stale files cannot match,
+    # but an explicit clear also bounds memory across runs in one process).
+    clear_ocr_cache()
     results: list[dict[str, str]] = []
     batch_stopped = False
 

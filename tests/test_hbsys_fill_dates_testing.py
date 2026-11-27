@@ -380,6 +380,25 @@ class HospitalNumberEditTests(unittest.TestCase):
         op = self._op_with_edit(text="000000000010920")
         self.assertTrue(op._hospital_number_visible(self._claim_no()))
 
+    def test_adaptive_wait_returns_immediately_when_loaded(self):
+        # Smart retry: if the hpercode is already visible, do not poll/sleep.
+        op = self._op_with_edit(text="000000000010920")
+        op._hospital_number_visible = mock.Mock(return_value=True)
+        with mock.patch.object(hdft, "sleep_short") as sleep:
+            self.assertTrue(op._wait_for_hospital_number(self._claim_no()))
+        op._hospital_number_visible.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_adaptive_wait_polls_until_loaded(self):
+        # Loads on the 2nd poll -> exactly one short sleep, then True.
+        op = _operator()
+        op._hospital_number_visible = mock.Mock(side_effect=[False, True])
+        with mock.patch.object(hdft, "sleep_short") as sleep, \
+                mock.patch.object(hdft.time, "time", side_effect=[0, 0, 0, 5]):
+            self.assertTrue(op._wait_for_hospital_number(self._claim_no()))
+        self.assertEqual(sleep.call_count, 1)
+        sleep.assert_called_once_with(0.25)
+
     def test_edit_text_ignores_ocr_misreads(self):
         # The live case: OCR said ...10820 while the control reads the
         # true number. The control decides, so the patient is loaded.
